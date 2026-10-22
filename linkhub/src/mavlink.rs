@@ -40,7 +40,7 @@ pub(crate) const HEARTBEAT_MESSAGE_ID: u32 = 0;
 pub enum LinkPhase {
     #[default]
     Idle,
-    /// Enumerating and probing serial ports for a heartbeat.
+    /// Enumerating serial ports or scanning for a BLE peripheral.
     Scanning,
     /// Opening the resolved serial port or TCP address.
     Opening,
@@ -217,6 +217,7 @@ pub enum MavlinkTransport {
     /// not skip the heartbeat confirmation. The scan repeats on every
     /// reconnect, so an unplugged or renumbered port is rediscovered.
     Serial(DiscoveryConfig),
+    Ble(crate::ble::BleConfig),
 }
 
 impl std::fmt::Display for MavlinkTransport {
@@ -227,6 +228,7 @@ impl std::fmt::Display for MavlinkTransport {
                 Some(port) => write!(formatter, "auto:{port}"),
                 None => write!(formatter, "auto"),
             },
+            Self::Ble(config) => write!(formatter, "ble:{}", config.device_name),
         }
     }
 }
@@ -252,6 +254,19 @@ impl MavlinkLinkConfig {
         Self {
             id: "mavlink".to_owned(),
             transport: MavlinkTransport::Serial(discovery),
+            source_system: 255,
+            source_component: 0,
+            heartbeat_interval: Duration::from_secs(1),
+            reconnect_interval: Duration::from_secs(1),
+            command_capacity: 1024,
+        }
+    }
+
+    #[must_use]
+    pub fn ble(config: crate::ble::BleConfig) -> Self {
+        Self {
+            id: "mavlink".to_owned(),
+            transport: MavlinkTransport::Ble(config),
             source_system: 255,
             source_component: 0,
             heartbeat_interval: Duration::from_secs(1),
@@ -478,6 +493,18 @@ async fn run_link(
                         Box::new(writer) as Box<dyn AsyncWrite + Unpin + Send>,
                     ))
                 }
+                ResolvedTransport::Ble(found) => {
+                    status_tx.send_modify(|status| {
+                        status.connection = format!("ble:{}", found.device_name);
+                        status.port = None;
+                        status.baud = None;
+                    });
+                    let (reader, writer) = tokio::io::split(found.stream);
+                    Ok((
+                        Box::new(reader) as Box<dyn AsyncRead + Unpin + Send>,
+                        Box::new(writer) as Box<dyn AsyncWrite + Unpin + Send>,
+                    ))
+                }
             };
             match opened {
                 Ok((reader, writer)) => {
@@ -538,6 +565,7 @@ fn millis(duration: Duration) -> u64 {
 enum ResolvedTransport {
     Tcp(SocketAddr),
     Serial(crate::discovery::DiscoveredSerial),
+    Ble(crate::ble::BleConnection),
 }
 
 impl ResolvedTransport {
@@ -545,6 +573,7 @@ impl ResolvedTransport {
         match self {
             Self::Tcp(address) => format!("tcp:{address}"),
             Self::Serial(found) => format!("serial:{}:{}", found.port, found.baud),
+            Self::Ble(found) => format!("ble:{}", found.device_name),
         }
     }
 }
@@ -621,6 +650,35 @@ async fn resolve_transport(
                                 error: failure.message,
                                 repeat_count,
                                 scan: failure.report,
+                            })
+                            .await;
+                    }
+                    None
+                }
+            }
+        }
+        MavlinkTransport::Ble(config) => {
+            status_tx.send_modify(|status| {
+                status.connected = false;
+                status.ready = false;
+                status.phase = LinkPhase::Scanning;
+                status.connection = format!("ble:{}", config.device_name);
+                status.port = None;
+                status.baud = None;
+            });
+            match crate::ble::connect(config).await {
+                Ok(found) => Some(ResolvedTransport::Ble(found)),
+                Err(error) => {
+                    record_failure(status_tx, "scan", &error);
+                    if let Some(repeat_count) =
+                        repeats.observe("scan", format!("ble:{}:{error}", config.device_name))
+                    {
+                        events
+                            .emit(LinkEvent::OpenFailed {
+                                target: format!("ble:{}", config.device_name),
+                                error,
+                                error_kind: "ble".to_owned(),
+                                repeat_count,
                             })
                             .await;
                     }

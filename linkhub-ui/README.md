@@ -21,8 +21,8 @@ For SITL:
 .\run_linkhub_ui.cmd tcp:127.0.0.1:5760
 ```
 
-Add `--build` to install UI dependencies, build the UI, and build LinkHub with
-the `bluetooth` Cargo feature:
+Add `--build` to install UI dependencies, build the UI, and build LinkHub
+(Bluetooth support is always included):
 
 ```powershell
 .\run_linkhub_ui.cmd --build auto
@@ -41,7 +41,7 @@ the `bluetooth` Cargo feature:
 
 ## `npm` scripts
 
-`linkhub-ui\package.json` currently defines exactly three scripts:
+`linkhub-ui\package.json` defines the following scripts:
 
 | Command | What it runs | Notes |
 | --- | --- | --- |
@@ -219,6 +219,24 @@ Calibration-only sensor values are excluded. `config apply` writes only
 differing parameters in one batch, verifies them, and refuses while armed or
 while a passive run is active.
 
+### Yaw-trim bench sweep
+
+The standalone `scripts\yaw-trim-sweep.ts` records a bounded trim ladder through
+the shared LinkHub HTTP client. Follow the hardware prerequisites and safe-off
+procedure in [the arming owner](../design/arming.md) before operating it.
+From `linkhub-ui`, inspect its options without connecting to hardware:
+
+```powershell
+npm exec -- vite-node --script scripts\yaw-trim-sweep.ts --help
+```
+
+`--check` only checks the existing connection and required telemetry; it never
+arms. An actual sweep requires an explicit operator invocation. On exit the
+script calls the production passive controller's canonical cleanup, restores
+the saved yaw gains, and requires fresh output-9 telemetry to verify safe-off.
+Missing telemetry or cleanup failures produce a nonzero exit status. Recordings
+and summaries go under `simulation\logs\calibrate\yaw_trim_sweep_<timestamp>`.
+
 ## Wire contract
 
 LinkHub serializes MAVLink enumerations as `{"type": "MAV_X_NAME"}` objects and
@@ -233,28 +251,35 @@ the generated enums are tolerated, and commands and parameter types are sent as
 
 The selector beside the connection state is populated from
 `src\telemetry-profiles.json` and applies the selected display telemetry profile
-through `PUT /v1/mavlink/message-rates`. Each profile declares its minimum
-serial baud. On each connection generation, the UI selects the highest-rate
+through `PUT /v1/mavlink/message-rates`. A profile may declare a
+`connection_prefix`; a connection starting with it (for example `ble:`) uses
+that profile. Otherwise each profile declares its minimum serial baud
+(`minbaud`, `null` for connection-selected profiles). On each connection
+generation, the UI selects the highest-rate
 profile whose minimum fits the detected baud; below every minimum it uses the
 lowest-rate profile. Connections without a baud, such as Wi-Fi/TCP, use the
 highest-rate profile. A manual selection remains active until the connection
 generation changes.
 
-| Message | Wi-Fi | Radio |
-| --- | ---: | ---: |
-| `ATTITUDE` | off | off |
-| `ATTITUDE_QUATERNION` | 300 Hz | 10 Hz |
-| `ATTITUDE_TARGET` | 300 Hz | 10 Hz |
-| `SERVO_OUTPUT_RAW` | 300 Hz | 10 Hz |
-| `PID_TUNING` (yaw) | 200 Hz | 4 Hz |
-| `LOCAL_POSITION_NED` | 10 Hz | 5 Hz |
-| `BATTERY_STATUS` | 2 Hz | 1 Hz |
-| `RC_CHANNELS` | 1 Hz | 1 Hz |
-| `RPM` | 100 Hz | 5 Hz |
-| `EKF_STATUS_REPORT` | 2 Hz | 2 Hz |
-| `VIBRATION` | 2 Hz | 2 Hz |
-| `ESC_TELEMETRY_1_TO_4` (see note) | 10 Hz | 1 Hz |
-| `RAWES_TEL_HZ` (parameter, `DEBUG_FLOAT_ARRAY` rate) | 20 Hz | 2 Hz |
+| Message | Wi-Fi | BLE | Radio |
+| --- | ---: | ---: | ---: |
+| `ATTITUDE` | off | off | off |
+| `ATTITUDE_QUATERNION` | 300 Hz | 50 Hz | 10 Hz |
+| `ATTITUDE_TARGET` | 300 Hz | 50 Hz | 10 Hz |
+| `SERVO_OUTPUT_RAW` | 300 Hz | 50 Hz | 10 Hz |
+| `PID_TUNING` (yaw) | 200 Hz | 50 Hz | 4 Hz |
+| `LOCAL_POSITION_NED` | 10 Hz | 10 Hz | 5 Hz |
+| `BATTERY_STATUS` | 2 Hz | 2 Hz | 1 Hz |
+| `RC_CHANNELS` | 1 Hz | 1 Hz | 1 Hz |
+| `RPM` | 100 Hz | 20 Hz | 5 Hz |
+| `EKF_STATUS_REPORT` | 2 Hz | 2 Hz | 2 Hz |
+| `VIBRATION` | 2 Hz | 2 Hz | 2 Hz |
+| `ESC_TELEMETRY_1_TO_4` (see note) | 10 Hz | 5 Hz | 1 Hz |
+| `RAWES_TEL_HZ` (parameter, `DEBUG_FLOAT_ARRAY` rate) | 20 Hz | 10 Hz | 2 Hz |
+
+The BLE profile exists because DroneBridge BLE delivered only about
+340 kbit/s: the Wi-Fi profile lost about 36% of downlink frames over BLE,
+including command and parameter replies, so LinkHub operations timed out.
 
 Each profile in `src\telemetry-profiles.json` has `label`, `minbaud`, `rates`
 (message rates in Hz, `0` = off) and `params` (vehicle parameters written as
@@ -282,7 +307,7 @@ the overlay's roll/pitch/yaw are computed from the quaternion
 example `calibrate`) request their own stream when they run.
 
 Changing the selector applies the new profile immediately. A manual choice is
-kept until the connection generation changes, then the baud-based selection
+kept until the connection generation changes, then the connection/baud-based selection
 runs again.
 
 The Wi-Fi profile is sized for the DroneBridge link measured at 1500000 baud
@@ -296,8 +321,10 @@ explicitly.
 The UI also consumes other messages when present:
 
 - `HEARTBEAT` for mode/armed state;
-- the RAWES diagnostic `DEBUG_FLOAT_ARRAY` (`array_id` 1) for `YFF_U` yaw-motor
-  display; the key order is in `src\diag-array.ts` and owned by
+- the RAWES diagnostic `DEBUG_FLOAT_ARRAY` (`array_id` 1) for the overlay's
+  `YFF_U` yaw-motor command and `YFF_T` yaw trim (`H_YAW_TRIM`, the Lua
+  observer output), both shown as inactive while disarmed; the key order is in
+  `src\diag-array.ts` and owned by
   [flight stack](../design/flight_stack.md);
 - `EKF_STATUS_REPORT` for status text (`status` prints the set flag names);
 - `RPM.rpm1` for measured yaw-motor speed. The 3D view divides motor RPM by
@@ -307,6 +334,9 @@ Reads use `GET /v1/mavlink/messages` with `collapse=true` and
 `max_lag_ms=1000`, so the browser does not replay stale backlog beyond one
 second. A generation change clears reconstructed state and causes the display
 message-rate configuration to be requested again.
+
+The instrument-bay antenna and black arrow extend outward from the hub,
+perpendicular to the axle on the FRD -X side, and follow the device's measured attitude.
 
 The yellow reference arrow is driven by `ATTITUDE_TARGET`. Its quaternion `q`
 is interpreted as `[w, x, y, z]`, and the arrow points along the target
@@ -388,13 +418,31 @@ only runs while the drawer is open. Opening either drawer closes the other.
 
 The panel uses `ATTITUDE_QUATERNION.rollspeed`, `pitchspeed`, and `yawspeed` from
 the Wi-Fi profile's 300 Hz stream. For each axis it resamples the latest
-contiguous 8-second window, removes the mean, applies a Hann window, and displays
+8-second window, removes the mean, applies a Hann window, and displays
 the FFT spectrum and three strongest component frequencies. The selectable
 frequency range changes only the displayed spectrum and peak list. All three
 plots use one selectable absolute amplitude ceiling (default 0.25 rad/s), so
 levels remain comparable across axes and over time. Peaks above the ceiling are
 clamped and marked at the top edge; reported component amplitudes remain
 unclamped in rad/s.
+
+Occasional gaps do not restart the analysis window. Intervals longer than four
+times the median sample interval have zero weight in the FFT rather than being
+interpolated across. Amplitudes are normalized by the Hann weights of the
+available grid samples, and all axes use the same time grid and missing-data
+mask. The grid size follows the nominal sample interval, not the received sample
+count, so a gap does not halve the frequency range. The status reports the window
+duration, the percentage of usable grid samples, and the FFT grid rate. Missing
+data can still introduce spectral leakage; coverage is not a guarantee of
+spectral accuracy.
+
+If fewer than 32 usable samples remain, all plots and peak lists retain the last
+valid analysis and the status says "Rebuilding after telemetry gap - showing last
+valid spectrum". They resume live analysis once enough samples are available.
+If attitude telemetry stops for more than two seconds, the status instead says
+"No recent attitude telemetry" and identifies any displayed spectrum as held.
+Closing and reopening the panel, or a vehicle/journal generation reset, clears
+the held analysis.
 
 The fourth **Dominant mode** plot combines the complex FFT values from all three
 body-rate axes at the strongest shared frequency. It draws the principal body

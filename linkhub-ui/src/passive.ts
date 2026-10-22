@@ -36,7 +36,8 @@ export const PASSIVE_TELEMETRY_RATES = Object.freeze({
   EXTENDED_SYS_STATE: 25,
   EKF_STATUS_REPORT: 2,
 });
-export const PASSIVE_YAW_TRIM_SEED = 0;
+// Negative ENTER_PASSIVE param1 leaves Lua's adaptive yaw-trim observer active.
+export const NO_YAW_TRIM_SEED = -1;
 
 export type PassivePhase = "idle" | "starting" | "running" | "stopping" | "failed";
 
@@ -198,7 +199,7 @@ export class PassiveController {
       await this.setParameter("RAWES_MODE", MODE_PASSIVE);
       await this.luaCommand(
         CMD_ENTER_PASSIVE,
-        [PASSIVE_YAW_TRIM_SEED],
+        [NO_YAW_TRIM_SEED],
         "ENTER_PASSIVE",
         signal,
       );
@@ -277,7 +278,7 @@ export class PassiveController {
         await this.sendOffsets(this.currentOffsets());
         await this.luaCommand(
           CMD_ENTER_PASSIVE,
-          [PASSIVE_YAW_TRIM_SEED],
+          [NO_YAW_TRIM_SEED],
           "ENTER_PASSIVE recapture",
           signal,
         );

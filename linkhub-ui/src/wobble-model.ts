@@ -22,6 +22,12 @@ export interface WobbleSpectrum {
   components: FrequencyComponent[];
   sampleRateHz: number;
   durationS: number;
+  coverage: number;
+}
+
+export interface WobbleSnapshot {
+  spectra: Record<WobbleAxis, WobbleSpectrum | null>;
+  state: "collecting" | "live" | "rebuilding";
 }
 
 export interface DominantWobbleMode {
@@ -114,7 +120,12 @@ function fft(real: number[], imaginary: number[]): void {
   }
 }
 
-function interpolate(times: readonly number[], values: readonly number[], target: number): number {
+function interpolate(
+  times: readonly number[],
+  values: readonly number[],
+  target: number,
+  maxInterval: number,
+): number | null {
   const upper = lowerBound(times, target);
   if (upper <= 0) {
     return values[0] as number;
@@ -124,6 +135,12 @@ function interpolate(times: readonly number[], values: readonly number[], target
   }
   const t0 = times[upper - 1] as number;
   const t1 = times[upper] as number;
+  if (target === t1) {
+    return values[upper] as number;
+  }
+  if (t1 - t0 > maxInterval) {
+    return null;
+  }
   const fraction = t1 === t0 ? 0 : (target - t0) / (t1 - t0);
   return (values[upper - 1] as number) * (1 - fraction) + (values[upper] as number) * fraction;
 }
@@ -137,25 +154,16 @@ export function analyzeWobble(
     return null;
   }
   const end = sourceTimes.at(-1) as number;
-  let startIndex = lowerBound(sourceTimes, end - windowS);
-  let times = sourceTimes.slice(startIndex);
-  let values = sourceValues.slice(startIndex);
+  const startIndex = lowerBound(sourceTimes, end - windowS);
+  const times = sourceTimes.slice(startIndex);
+  const values = sourceValues.slice(startIndex);
+  if (times.length < MIN_SAMPLES) {
+    return null;
+  }
   const intervals = times.slice(1).map((time, index) => time - (times[index] as number))
     .filter((interval) => interval > 0 && Number.isFinite(interval));
   const typicalInterval = median(intervals);
   if (!Number.isFinite(typicalInterval) || typicalInterval <= 0) {
-    return null;
-  }
-  for (let index = times.length - 1; index > 0; index -= 1) {
-    if ((times[index] as number) - (times[index - 1] as number) > typicalInterval * 4) {
-      startIndex = index;
-      times = times.slice(startIndex);
-      values = values.slice(startIndex);
-      break;
-    }
-  }
-  const size = Math.min(MAX_SAMPLES, powerOfTwoAtMost(times.length));
-  if (size < MIN_SAMPLES) {
     return null;
   }
   const start = times[0] as number;
@@ -163,16 +171,32 @@ export function analyzeWobble(
   if (durationS <= 0) {
     return null;
   }
+  const nominalSamples = Math.round(durationS / typicalInterval) + 1;
+  const size = Math.min(MAX_SAMPLES, powerOfTwoAtMost(nominalSamples));
+  if (size < MIN_SAMPLES) {
+    return null;
+  }
   const sampleRateHz = (size - 1) / durationS;
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
   const real = new Array<number>(size);
   const imaginary = new Array<number>(size).fill(0);
   let windowSum = 0;
+  let validSamples = 0;
   for (let index = 0; index < size; index += 1) {
     const time = start + index * durationS / (size - 1);
+    const value = interpolate(times, values, time, typicalInterval * 4);
+    if (value === null) {
+      // Missing intervals have zero weight, not an interpolated signal.
+      real[index] = 0;
+      continue;
+    }
     const weight = 0.5 - 0.5 * Math.cos(2 * Math.PI * index / (size - 1));
-    real[index] = (interpolate(times, values, time) - mean) * weight;
+    real[index] = (value - mean) * weight;
     windowSum += weight;
+    validSamples += 1;
+  }
+  if (validSamples < MIN_SAMPLES || windowSum <= 0) {
+    return null;
   }
   fft(real, imaginary);
   const frequenciesHz: number[] = [];
@@ -209,6 +233,7 @@ export function analyzeWobble(
     components: candidates.slice(0, 5),
     sampleRateHz,
     durationS,
+    coverage: validSamples / size,
   };
 }
 
@@ -318,6 +343,7 @@ export class WobbleModel {
     pitch: { times: [], values: [] },
     yaw: { times: [], values: [] },
   };
+  private lastSpectra: WobbleSnapshot["spectra"] = { roll: null, pitch: null, yaw: null };
   private lastBootS = 0;
   ingestedAt = 0;
 
@@ -363,6 +389,22 @@ export class WobbleModel {
     return analyzeWobble(sample.times, sample.values);
   }
 
+  snapshot(): WobbleSnapshot {
+    const spectra = {
+      roll: this.spectrum("roll"),
+      pitch: this.spectrum("pitch"),
+      yaw: this.spectrum("yaw"),
+    };
+    if (spectra.roll && spectra.pitch && spectra.yaw) {
+      this.lastSpectra = spectra;
+      return { spectra, state: "live" };
+    }
+    return {
+      spectra: this.lastSpectra,
+      state: this.lastSpectra.roll ? "rebuilding" : "collecting",
+    };
+  }
+
   dominantMode(maxFrequencyHz = Number.POSITIVE_INFINITY): DominantWobbleMode | null {
     return analyzeDominantMode({
       roll: this.spectrum("roll"),
@@ -376,6 +418,7 @@ export class WobbleModel {
       sample.times.length = 0;
       sample.values.length = 0;
     }
+    this.lastSpectra = { roll: null, pitch: null, yaw: null };
     this.lastBootS = 0;
     this.ingestedAt = 0;
   }

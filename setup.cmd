@@ -100,8 +100,8 @@ echo %PKG_DIGEST%>"%PKG_STAMP%"
 :done
 set "LINKHUB=%REPO%\linkhub\target\release\linkhub.exe"
 if not exist "%LINKHUB%" (
-    echo [INFO] Building LinkHub with Bluetooth support ...
-    cargo build --manifest-path "%REPO%\linkhub\Cargo.toml" --release --features bluetooth
+    echo [INFO] Building LinkHub ...
+    cargo build --manifest-path "%REPO%\linkhub\Cargo.toml" --release
     if errorlevel 1 (
         echo ERROR: LinkHub build failed.
         exit /b 1

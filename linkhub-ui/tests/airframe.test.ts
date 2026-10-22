@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { buildAirframe, ROTOR } from "../src/airframe";
+import { VehicleMotion } from "../src/vehicle-motion";
 
 describe("buildAirframe", () => {
   it("keeps the rotor hub 0.35 m above the bay at the vehicle origin", () => {
@@ -58,5 +59,39 @@ describe("buildAirframe", () => {
     const { textures } = buildAirframe();
     expect(textures).toHaveLength(1);
     expect(textures[0]).toBeInstanceOf(THREE.DataTexture);
+  });
+
+  it("points the antenna and black arrow outward on the FRD -X side, perpendicular to the axle, and follows device tilt", () => {
+    const { root } = buildAirframe();
+    const shaft = root.getObjectByName("antenna-shaft");
+    const tip = root.getObjectByName("antenna-tip");
+    const arrow = root.getObjectByName("antenna-arrow");
+    if (!shaft || !tip || !arrow) {
+      throw new Error("Missing antenna geometry");
+    }
+    const motion = new VehicleMotion();
+    for (const pitch of [0, Math.PI / 3]) {
+      motion.accept({
+        message: "ATTITUDE_QUATERNION",
+        fields: { q1: Math.cos(pitch / 2), q2: 0, q3: Math.sin(pitch / 2), q4: 0 },
+        direction: "rx", system_id: 1, component_id: 1,
+        cursor: "v1:1", received_time: "", received_time_ns: 0,
+      }, pitch * 2_000);
+      root.quaternion.copy(motion.attitude);
+      root.updateMatrixWorld(true);
+      const expected = new THREE.Vector3(0, -Math.sin(pitch), Math.cos(pitch));
+      const base = arrow.getWorldPosition(new THREE.Vector3());
+      const antennaDirection = tip.getWorldPosition(new THREE.Vector3()).sub(base).normalize();
+      expect(antennaDirection.distanceTo(expected)).toBeLessThan(1e-10);
+      const axleDirection = new THREE.Vector3(0, 1, 0).applyQuaternion(root.quaternion);
+      expect(antennaDirection.dot(axleDirection)).toBeCloseTo(0, 10);
+      expect(antennaDirection.dot(base.clone().normalize())).toBeCloseTo(1, 10);
+      for (const part of [shaft, arrow]) {
+        const direction = new THREE.Vector3(0, 1, 0)
+          .applyQuaternion(part.getWorldQuaternion(new THREE.Quaternion()));
+        expect(direction.distanceTo(expected)).toBeLessThan(1e-10);
+      }
+      expect(tip.position.distanceTo(arrow.position)).toBeCloseTo(0.09, 10);
+    }
   });
 });

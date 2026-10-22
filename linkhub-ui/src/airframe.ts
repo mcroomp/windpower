@@ -50,7 +50,6 @@ const COLOR = {
 const ROTOR_HUB_HEIGHT_M = 0.35;
 const AXLE_BOTTOM_M = -0.35;
 const AXLE_TOP_M = 0.75;
-const FORWARD_ARROW_HEIGHT_M = 0.08;
 
 export interface Airframe {
   root: THREE.Group;
@@ -230,18 +229,23 @@ export function buildAirframe(): Airframe {
   const antennaMaterial = new THREE.MeshStandardMaterial({
     color: COLOR.antenna, roughness: 0.55, metalness: 0.15,
   });
-  const antennaBase = SIZE.instrumentHubRadius;
-  root.add(createRod(
-    new THREE.Vector3(antennaBase, 0, 0),
-    new THREE.Vector3(antennaBase + SIZE.antennaLength, 0, 0),
+  const antennaBase = new THREE.Vector3(-SIZE.instrumentHubRadius, 0, 0);
+  const antennaDirection = new THREE.Vector3(-1, 0, 0);
+  const antennaEnd = antennaBase.clone().addScaledVector(antennaDirection, SIZE.antennaLength);
+  const antennaShaft = createRod(
+    antennaBase,
+    antennaEnd,
     SIZE.antennaRadius,
     antennaMaterial,
-  ));
+  );
+  antennaShaft.name = "antenna-shaft";
+  root.add(antennaShaft);
   const antennaTip = new THREE.Mesh(
     new THREE.SphereGeometry(SIZE.antennaRadius * 1.5, 16, 12),
     antennaMaterial,
   );
-  antennaTip.position.set(antennaBase + SIZE.antennaLength, 0, 0);
+  antennaTip.name = "antenna-tip";
+  antennaTip.position.copy(antennaEnd);
   root.add(antennaTip);
 
   root.add(createRod(
@@ -257,14 +261,16 @@ export function buildAirframe(): Airframe {
     new THREE.MeshStandardMaterial({ color: COLOR.tether, roughness: 0.9, metalness: 0 }),
   ));
 
-  root.add(new THREE.ArrowHelper(
-    new THREE.Vector3(1, 0, 0),
-    new THREE.Vector3(0, FORWARD_ARROW_HEIGHT_M, 0),
+  const antennaArrow = new THREE.ArrowHelper(
+    antennaDirection,
+    antennaBase,
     0.8,
     0x08090c,
     0.2,
     0.12,
-  ));
+  );
+  antennaArrow.name = "antenna-arrow";
+  root.add(antennaArrow);
 
   return { root, rotor, textures: [texture] };
 }

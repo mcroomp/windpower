@@ -111,11 +111,10 @@ _setup_venv() {
 
     local linkhub="$REPO_DIR/linkhub/target/release/linkhub.exe"
     if [ ! -x "$linkhub" ]; then
-        echo "[INFO] Building LinkHub with Bluetooth support ..."
+        echo "[INFO] Building LinkHub ..."
         cargo build \
             --manifest-path "$REPO_DIR/linkhub/Cargo.toml" \
-            --release \
-            --features bluetooth
+            --release
     fi
     echo "[INFO] Done."
     "$PYTHON" --version

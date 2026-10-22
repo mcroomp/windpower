@@ -5,13 +5,19 @@ use linkhub::{
     discovery::{self, DiscoveryConfig},
     http,
     journal::{JournalConfig, JournalHandle},
-    mavlink::{MavlinkLinkConfig, start_link},
+    mavlink::{MavlinkLinkConfig, MavlinkTransport, start_link},
     motor::MotorHandle,
     query::QueryArgs,
     records::{DiagnosticEvent, DiagnosticLevel, wall_time_ns},
 };
+use mavlink_protocol::codec::FrameReader;
 use serde_json::{Map, json};
-use tokio::{fs, net::TcpListener};
+use tokio::{
+    fs,
+    io::AsyncRead,
+    net::{TcpListener, TcpStream},
+    time,
+};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -25,13 +31,26 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     Query(QueryArgs),
+    TestConnection {
+        /// MAVLink endpoint: `tcp:HOST:PORT`, `ble:DEVICE_NAME_OR_ADDRESS`, or `auto`
+        /// to discover a serial port by scanning for a MAVLink heartbeat.
+        #[arg(long, env = "LINKHUB_CONNECTION", default_value = "auto")]
+        connection: String,
+        /// Restrict serial discovery to one baud rate.
+        #[arg(long)]
+        baud: Option<u32>,
+        /// Baud rates tried when `--baud` is not supplied.
+        #[arg(long, default_value = "115200,57600,38400,19200,9600")]
+        discovery_bauds: String,
+        /// Maximum TCP check time and BLE scan/heartbeat or serial probe time.
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+    },
     Serve {
-        /// MAVLink endpoint: `tcp:HOST:PORT` for SITL, or `auto` (the
-        /// default) to discover a serial port by scanning for a MAVLink
-        /// heartbeat. Any other value is treated as a serial port name that
-        /// *restricts* which port is scanned (e.g. `COM7`); the heartbeat
-        /// probe still runs, and the restricted port is still rescanned on
-        /// every reconnect.
+        /// MAVLink endpoint: `tcp:HOST:PORT` for SITL, `ble:DEVICE_NAME_OR_ADDRESS` for
+        /// DroneBridge BLE, or `auto` (the default) to discover a serial port
+        /// by scanning for a MAVLink heartbeat. Any other value is treated as
+        /// a serial port name that *restricts* the scan (e.g. `COM7`).
         #[arg(long, env = "LINKHUB_CONNECTION", default_value = "auto")]
         connection: String,
         #[arg(long, default_value = "127.0.0.1")]
@@ -88,6 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match Args::parse().command {
         Command::Query(args) => linkhub::query::execute(args).await?,
+        Command::TestConnection {
+            connection,
+            baud,
+            discovery_bauds,
+            timeout_ms,
+        } => {
+            let timeout = Duration::from_millis(timeout_ms);
+            let config = link_config(&connection, baud, &discovery_bauds, timeout)?;
+            let result = test_connection(config, timeout).await?;
+            println!("{result}");
+        }
         Command::Serve {
             connection,
             listen,
@@ -187,7 +217,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(feature = "bluetooth")]
+async fn test_connection(config: MavlinkLinkConfig, timeout: Duration) -> Result<String, String> {
+    match config.transport {
+        MavlinkTransport::Serial(discovery) => {
+            let found = discovery::discover_serial_transport(&discovery)
+                .await
+                .map_err(|failure| failure.message)?;
+            Ok(format!(
+                "MAVLink heartbeat received on serial port {} at {} baud",
+                found.port, found.baud
+            ))
+        }
+        MavlinkTransport::Tcp(address) => {
+            let result = time::timeout(timeout, async {
+                let stream = TcpStream::connect(address)
+                    .await
+                    .map_err(|error| format!("could not connect to {address}: {error}"))?;
+                receive_heartbeat(stream).await
+            })
+            .await
+            .map_err(|_| format!("no MAVLink heartbeat received within {timeout:?}"))??;
+            Ok(format!(
+                "MAVLink heartbeat received over tcp:{address} from sysid={} compid={}",
+                result.0, result.1
+            ))
+        }
+        MavlinkTransport::Ble(ble_config) => {
+            let connection = ble_config.device_name.clone();
+            let ble_config = linkhub::ble::BleConfig::new(connection.clone(), timeout)?;
+            let ble = linkhub::ble::connect(&ble_config).await?;
+            let result = time::timeout(timeout, receive_heartbeat(ble.stream))
+                .await
+                .map_err(|_| {
+                    format!(
+                        "no MAVLink heartbeat received over ble:{connection} within {timeout:?}"
+                    )
+                })??;
+            Ok(format!(
+                "MAVLink heartbeat received over ble:{connection} from sysid={} compid={}",
+                result.0, result.1
+            ))
+        }
+    }
+}
+
+async fn receive_heartbeat<R>(reader: R) -> Result<(u8, u8), String>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    let mut frames = FrameReader::new(Box::new(reader));
+    loop {
+        let message = frames
+            .recv()
+            .await
+            .map_err(|error| format!("MAVLink receive failed: {error}"))?;
+        if message.message_id == 0 {
+            return Ok((message.system_id, message.component_id));
+        }
+    }
+}
+
 async fn configure_motor(
     name_prefix: Option<String>,
     scan_timeout_ms: u64,
@@ -210,33 +299,22 @@ async fn configure_motor(
     Ok(Some(std::sync::Arc::new(controller)))
 }
 
-#[cfg(not(feature = "bluetooth"))]
-async fn configure_motor(
-    name_prefix: Option<String>,
-    _scan_timeout_ms: u64,
-    _heartbeat_ms: u64,
-    _maximum_command_timeout_ms: u64,
-) -> Result<Option<MotorHandle>, Box<dyn std::error::Error>> {
-    if name_prefix.is_some() {
-        return Err("LinkHub was built without the bluetooth feature".into());
-    }
-    Ok(None)
-}
-
 /// Build the MAVLink link configuration for `serve`.
 ///
 /// `connection` is `auto` (discover any serial port), `tcp:HOST:PORT` (SITL),
-/// or any other value, which is treated as a serial port name that
-/// *restricts* discovery to that one port. `baud`, if set, likewise
-/// restricts discovery to a single baud rate instead of scanning
-/// `discovery_bauds`. In every serial case the link still confirms a live
-/// MAVLink heartbeat before use, and rescans from scratch on every reconnect.
+/// `ble:DEVICE_NAME_OR_ADDRESS` (BLE GATT), or any other value, which is treated as a
+/// serial port name that *restricts* discovery to that one port. `baud`, if
+/// set, restricts serial discovery to a single baud rate.
 fn link_config(
     connection: &str,
     baud: Option<u32>,
     discovery_bauds: &str,
     probe_timeout: Duration,
 ) -> Result<MavlinkLinkConfig, String> {
+    if let Some(device_name) = connection.strip_prefix("ble:") {
+        return linkhub::ble::BleConfig::new(device_name.to_owned(), Duration::from_millis(10_000))
+            .map(MavlinkLinkConfig::ble);
+    }
     if let Some(address) = connection.strip_prefix("tcp:") {
         return address
             .parse()
@@ -312,6 +390,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn accepts_tcp_auto_and_restricted_serial_connection_syntax() {
@@ -335,5 +414,45 @@ mod tests {
             linkhub::mavlink::MavlinkTransport::Serial(discovery)
                 if discovery.port_filter.as_deref() == Some("COM4") && discovery.bauds == [57_600]
         ));
+        assert!(matches!(
+            link_config("ble:DroneBridge", None, "115200", Duration::from_secs(3))
+                .expect("BLE connection")
+                .transport,
+            linkhub::mavlink::MavlinkTransport::Ble(config)
+                if config.device_name == "DroneBridge"
+        ));
+    }
+
+    #[test]
+    fn parses_test_connection_for_dronebridge() {
+        assert!(matches!(
+            Args::try_parse_from([
+                "linkhub",
+                "test-connection",
+                "--connection",
+                "ble:DroneBridge"
+            ])
+            .expect("test-connection arguments")
+            .command,
+            Command::TestConnection { connection, .. } if connection == "ble:DroneBridge"
+        ));
+    }
+
+    #[tokio::test]
+    async fn connection_check_waits_for_a_mavlink_heartbeat() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let heartbeat = [
+            0xfd, 0x09, 0x00, 0x00, 0x09, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x06, 0x08, 0x00, 0x04, 0x03, 0x51, 0x82,
+        ];
+        let sender = tokio::spawn(async move {
+            writer.write_all(&heartbeat).await.expect("write heartbeat");
+        });
+
+        assert_eq!(
+            receive_heartbeat(reader).await.expect("heartbeat"),
+            (255, 0)
+        );
+        sender.await.expect("heartbeat sender");
     }
 }

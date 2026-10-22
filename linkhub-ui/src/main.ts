@@ -82,10 +82,9 @@ function updateOverlay(): void {
   const status = telemetry.status;
   const attitude = eulerFromAttitudeQuaternion(telemetry.get("ATTITUDE_QUATERNION"));
   const servos = telemetry.get("SERVO_OUTPUT_RAW");
-  const yawMotor = diagValue(
-    telemetry.get("DEBUG_FLOAT_ARRAY", "rx", DIAG_ARRAY_NAME),
-    "YFF_U",
-  );
+  const diag = telemetry.get("DEBUG_FLOAT_ARRAY", "rx", DIAG_ARRAY_NAME);
+  const yawMotor = diagValue(diag, "YFF_U");
+  const yawTrim = diagValue(diag, "YFF_T");
   const rpm = telemetry.get("RPM");
   const degrees = (value: unknown) => (
     typeof value === "number" ? (value * 180 / Math.PI).toFixed(1) : "n/a"
@@ -96,6 +95,11 @@ function updateOverlay(): void {
     ? "inactive"
     : yawMotor !== undefined
     ? `${(yawMotor * 100).toFixed(1)}%`
+    : "n/a";
+  const trimText = !armed
+    ? "inactive"
+    : yawTrim !== undefined
+    ? `${(yawTrim * 100).toFixed(1)}%`
     : "n/a";
   const motorRpm = typeof rpm?.fields.rpm1 === "number" && rpm.fields.rpm1 >= 0
     ? rpm.fields.rpm1
@@ -147,7 +151,7 @@ function updateOverlay(): void {
     `roll ${degrees(attitude?.roll)}°  pitch ${degrees(attitude?.pitch)}°  yaw ${degrees(attitude?.yaw)}°`,
     scene.hasCaptureTarget ? "Capture target: yellow arrow" : "No capture target",
     `swash ${swashText}`,
-    `S1 ${field("servo1_raw")}  S2 ${field("servo2_raw")}  S3 ${field("servo3_raw")}  DShot/S9 ${field("servo9_raw")}  YFF_U ${motorCommand}`,
+    `S1 ${field("servo1_raw")}  S2 ${field("servo2_raw")}  S3 ${field("servo3_raw")}  DShot/S9 ${field("servo9_raw")}  YFF_U ${motorCommand}  YFF_T ${trimText}`,
     rpmText,
   ].join("\n");
 }

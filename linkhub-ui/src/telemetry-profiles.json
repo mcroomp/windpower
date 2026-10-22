@@ -22,6 +22,28 @@
         "RAWES_TEL_HZ": 20
       }
     },
+    "ble": {
+      "label": "BLE",
+      "minbaud": null,
+      "connection_prefix": "ble:",
+      "rates": {
+        "ATTITUDE": 0,
+        "ATTITUDE_QUATERNION": 50,
+        "ATTITUDE_TARGET": 50,
+        "SERVO_OUTPUT_RAW": 50,
+        "PID_TUNING": 50,
+        "LOCAL_POSITION_NED": 10,
+        "BATTERY_STATUS": 2,
+        "RC_CHANNELS": 1,
+        "RPM": 20,
+        "EKF_STATUS_REPORT": 2,
+        "VIBRATION": 2,
+        "ESC_TELEMETRY_1_TO_4": 5
+      },
+      "params": {
+        "RAWES_TEL_HZ": 10
+      }
+    },
     "radio": {
       "label": "Radio",
       "minbaud": 57600,

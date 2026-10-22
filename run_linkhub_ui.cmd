@@ -44,6 +44,7 @@ if not defined CONNECTION (
     echo   %~nx0 COM7
     echo   %~nx0 COM7 57600 8999
     echo   %~nx0 --build auto
+    echo   %~nx0 ble:DroneBridge
     echo.
     echo SITL:
     echo   %~nx0 tcp:127.0.0.1:5760
@@ -85,7 +86,7 @@ if "%BUILD%"=="1" (
     popd
 
     echo [INFO] Building LinkHub...
-    cargo build --manifest-path "%REPO%\linkhub\Cargo.toml" --release --features bluetooth
+    cargo build --manifest-path "%REPO%\linkhub\Cargo.toml" --release
     if errorlevel 1 (
         echo ERROR: LinkHub build failed.
         exit /b 1

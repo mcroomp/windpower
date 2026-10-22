@@ -1,12 +1,13 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 pub const NUS_SERVICE_UUID: &str = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 pub const NUS_RX_UUID: &str = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -409,7 +410,6 @@ async fn supervise<B: MotorBackend>(weak: Weak<Inner<B>>, interval: Duration) {
     }
 }
 
-#[cfg(feature = "bluetooth")]
 mod bluetooth {
     use super::{MotorBackend, MotorError, NUS_RX_UUID, NUS_SERVICE_UUID};
     use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
@@ -531,13 +531,10 @@ mod bluetooth {
     }
 }
 
-#[cfg(feature = "bluetooth")]
 pub use bluetooth::BtleplugBackend;
 
-#[cfg(feature = "bluetooth")]
 pub type BleMotorController = MotorController<BtleplugBackend>;
 
-#[cfg(feature = "bluetooth")]
 impl MotorController<BtleplugBackend> {
     pub async fn bluetooth(config: MotorConfig) -> Result<Self, MotorError> {
         Self::with_backend(BtleplugBackend::new().await?, config)
@@ -591,7 +588,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn command_expiry_sends_safe_stop() {
         let (motor, calls) = test_controller(Duration::from_millis(5), 100);
         assert_eq!(motor.connect().await.unwrap(), "BLDC-mock");
@@ -600,7 +597,19 @@ mod tests {
             .set_running(10, MotorDirection::Forward, 20)
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(19)).await;
+        tokio::task::yield_now().await;
+        assert!(motor.status().running);
+        assert_eq!(
+            lock(&calls)
+                .iter()
+                .filter(|call| *call == SAFE_STOP_COMMAND)
+                .count(),
+            1
+        );
+        tokio::time::advance(Duration::from_millis(6)).await;
+        tokio::task::yield_now().await;
 
         assert!(lock(&calls).contains(&"D:F;B:0;S:10;E:1\n".to_owned()));
         assert!(

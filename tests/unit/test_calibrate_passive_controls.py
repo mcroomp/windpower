@@ -613,6 +613,24 @@ def test_passive_yaw_trim_waits_until_guided_handoff():
     assert sim.fns.diag_nvf("YFF_U") == pytest.approx(0.234)
 
 
+def test_unseeded_enter_passive_clears_previous_yaw_trim_seed():
+    sim = RawesLua(mode=3)
+    sim.vehicle_mode = 20
+    sim.healthy = True
+    sim.armed = True
+    sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.4))
+    sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params(0.3))
+    sim.set_srv_out(sim.fns.YAW_MOTOR_FUNC, 1234)
+    sim.run(0.5)
+    assert sim.get_param("H_YAW_TRIM") == pytest.approx(0.3)
+
+    sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params())
+    sim.run(0.5)
+
+    trim = sim.get_param("H_YAW_TRIM")
+    assert 0.234 < trim < 0.29
+    assert sim.fns.diag_nvf("YFF_T") == pytest.approx(trim)
+
 def test_passive_waits_for_ground_owned_capture_near_hardware_attitude():
     roll = math.radians(90.6)
     pitch = math.radians(-35.8)
