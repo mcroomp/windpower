@@ -73,6 +73,41 @@ Everything below is retained as historical evidence, not as current procedure.
 These observations were not re-proven from code in this audit, but they remain
 relevant to understanding why the current procedure exists.
 
+### 2026-10-22 disarmed cyclic neutral-pulse diagnosis
+
+- Auto-detected through the existing LinkHub at `http://127.0.0.1:8999`,
+  `tcp:192.168.9.143:5760`, target `1/1`. Initial state was disarmed ACRO,
+  `RAWES_MODE=0`, S1/S2/S3 at 1517 us and output 9 at 1000 us.
+- With the operator's explicit secured-hardware authorization, the production
+  Swash panel held +roll at the configured limit, zero pitch, and 50%
+  collective. No travel limits were changed and the vehicle was not armed.
+  RC/servo telemetry was temporarily requested at 100 Hz, then restored to
+  the observed baseline 10 Hz.
+- Canonical journal run `aec19b50-cf44-4e99-834e-98a2f720529c`,
+  sequence range `(1421080, 1430249]`, contains 758 RC and servo samples over
+  8.053 seconds of settled hold. All 12 transmitted `RAWES_RLL` commands were
+  1.0; their gaps remained below the 3-second watchdog.
+- RC1 nevertheless alternated between 1900 us (692 samples) and neutral
+  1500 us (66 samples). S1 alternated between 1428 and 1515 us, S2 between
+  1515 and 1601 us, while S3 stayed at 1515 us. S1 had 122 neutral samples.
+  The live `RC_OVERRIDE_TIME` was 3 seconds, not a short expiry.
+- Source and an all-writes Lua regression reproduced the cause:
+  `run_collective_setup()` wrote RC1/RC2 neutral first and the requested cyclic
+  later in every valid tick. Checking only the mock's final channel values
+  had hidden these intermediate writes. The local correction moves neutral
+  writes into the failure branch; valid ticks write only their final target.
+- Stop returned the vehicle to canonical safe-off, with S1/S2/S3 at 1517 us
+  and output 9 at 1000 us. The corrected Lua and passive-control tests passed
+  (58 tests), including the all-writes regressions that failed before the fix.
+- Windows initially reported no serial ports. Later, LinkHub changed to
+  `serial:COM4:115200`; COM4/COM5 were positively identified as native Pixhawk
+  USB, `VID:PID=3162:0053`, serial `25001C001651333337363133`.
+  Read-only listing showed `rawes.lua` at 85132 bytes and `keep_armed.lua` at
+  1678 bytes; the corrected local script is 85215 bytes. The operator chose
+  manual deployment and subsequently reported the update completed; the agent
+  did not upload or reboot. A post-deployment repeat of the same hold remains
+  necessary; do not infer hardware verification from the local regression.
+
 ### 2026-10-22 script-upload timeout over network bridge
 
 - No-argument calibration connected through the existing LinkHub at
