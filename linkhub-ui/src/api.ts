@@ -62,7 +62,10 @@ export function formatMavResult(result: MavEnum<MavResult>): string {
 }
 
 export class LinkHubApi {
-  constructor(private readonly baseUrl = "") {}
+  constructor(
+    private readonly baseUrl = "",
+    private readonly transport: typeof fetch = (...args) => globalThis.fetch(...args),
+  ) {}
 
   private async request<T>(
     method: string,
@@ -71,7 +74,7 @@ export class LinkHubApi {
     signal?: AbortSignal,
   ): Promise<T> {
     const url = this.baseUrl ? new URL(path, this.baseUrl).toString() : path;
-    const response = await fetch(url, {
+    const response = await this.transport(url, {
       method,
       body: body === undefined ? undefined : JSON.stringify(body),
       headers: body === undefined ? undefined : { "Content-Type": "application/json" },
