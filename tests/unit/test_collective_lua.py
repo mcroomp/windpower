@@ -18,6 +18,65 @@ def send_collective(sim, value):
     sim.send_message(NamedValueFloat(name="RAWES_COL", value=value))
 
 
+def record_cyclic_overrides(sim):
+    writes = {1: [], 2: []}
+    rc = sim._lua.globals().rc
+    for number in writes:
+        channel = rc.get_channel(rc, number)
+        original = channel.set_override
+
+        def record(channel, pwm, number=number, original=original):
+            writes[number].append(int(pwm))
+            original(channel, pwm)
+
+        channel.set_override = record
+    return writes
+
+
+@pytest.mark.parametrize(("roll", "pitch", "expected"), [
+    (1, 0, (2000, 1500)),
+    (0, -1, (1500, 1000)),
+    (0.6, -0.8, (1800, 1100)),
+])
+def test_setup_does_not_pulse_neutral_between_cyclic_commands(roll, pitch, expected):
+    sim = collective_sim()
+    send_collective(sim, 0.5)
+    sim.tick()
+    # Observe all writes; final ch_out alone hides sub-tick neutral pulses.
+    writes = record_cyclic_overrides(sim)
+    for _ in range(4):
+        sim.send_message(NamedValueFloat(name="RAWES_RLL", value=roll))
+        sim.send_message(NamedValueFloat(name="RAWES_PIT", value=pitch))
+        send_collective(sim, 0.5)
+        sim.run(0.5)
+    assert writes[1] == [expected[0]] * 200
+    assert writes[2] == [expected[1]] * 200
+    assert sim.get_param("mode") == MODE_COLLECTIVE
+    assert not sim.armed
+
+
+@pytest.mark.parametrize("failure", ["armed", "configuration", "timeout"])
+def test_setup_failure_writes_only_neutral_cyclic(failure):
+    sim = collective_sim()
+    sim.send_message(NamedValueFloat(name="RAWES_RLL", value=0.6))
+    sim.send_message(NamedValueFloat(name="RAWES_PIT", value=-0.8))
+    send_collective(sim, 0.7)
+    sim.tick()
+    if failure == "armed":
+        sim.armed = True
+    elif failure == "configuration":
+        sim.set_param("H_SV_MAN", 2)
+    else:
+        sim.run(2.99)
+    writes = record_cyclic_overrides(sim)
+    sim.tick()
+    assert writes == {1: [1500], 2: [1500]}
+    assert sim.ch_out[3] == 1505
+    assert sim.ch_out[8] == 1000
+    assert sim.get_param("mode") == 0
+    assert not sim.armed
+
+
 def test_collective_supports_bounded_cyclic_without_arming_or_guided_control():
     sim = collective_sim()
     sim.send_message(NamedValueFloat(name="RAWES_RLL", value=1))

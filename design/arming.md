@@ -271,6 +271,10 @@ collective-only adjustment; the panel also sends normalized `RAWES_RLL` and
 
 Lua holds yaw neutral and interlock low on every setup tick; ArduPilot continues
 to own swash mixing, configured travel limits, and disarmed DDFP inhibition.
+Each cyclic override is written exactly once per setup tick: the requested
+value when valid, neutral on failure or axis expiry. Never pre-write neutral
+before the commanded value: ArduPilot can sample between Lua calls, producing
+real neutral pulses even while ground commands and override refreshes continue.
 No GUIDED controller or yaw-trim observer runs. Collective uses the existing
 normalized RC3 mapping and clamps finite inputs to `[0,1]`. Cyclic uses the
 existing RC1/RC2 calibration and reversal, bounded to the unit roll/pitch circle.

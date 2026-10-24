@@ -1571,8 +1571,7 @@ end
 -- ── Main update ───────────────────────────────────────────────────────────────
 
 local function run_collective_setup(now)
-    if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(0.0, 1)) end
-    if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(0.0, 2)) end
+    -- Write cyclic once per tick; ArduPilot can sample between Lua calls.
     if _rc_ch4 then _rc_ch4:set_override(1500) end
     if _rc_ch8 then _rc_ch8:set_override(1000) end
     _armed_since_ms = nil
@@ -1592,6 +1591,8 @@ local function run_collective_setup(now)
         gcs:send_text(3, "RAWES collective stopped: " .. reason)
     end
     if _collective_failure then
+        if _rc_ch1 then _rc_ch1:set_override(normalized_angle_pwm(0.0, 1)) end
+        if _rc_ch2 then _rc_ch2:set_override(normalized_angle_pwm(0.0, 2)) end
         _collective_value = nil
         _nv_floats["RAWES_COL"] = nil
         if _rc_ch3 then _rc_ch3:set_override(neutral_collective_pwm()) end
