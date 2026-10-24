@@ -1,5 +1,5 @@
 import "./styles.css";
-import { LinkHubApi } from "./api";
+import { createLinkHubApi } from "./runtime-api";
 import { eulerFromAttitudeQuaternion } from "./attitude";
 import { diagValue, DIAG_ARRAY_NAME, isDiagRecord } from "./diag-array";
 import {
@@ -36,7 +36,7 @@ function required<T extends Element>(selector: string): T {
   return element;
 }
 
-const api = new LinkHubApi();
+const api = createLinkHubApi();
 const telemetry = new TelemetryStore(api);
 const output = required<HTMLElement>("#terminal-output");
 const operationState = required<HTMLElement>("#operation-state");

@@ -9,6 +9,68 @@ MAVLink encoding limits still apply at the vehicle boundary; see
 
 ## Build and launch
 
+### Standalone offline demo / GitHub Pages
+
+The demo is the **full normal UI**, with the same HTML, styling, scene, terminal,
+telemetry store, passive controller, and diagnostic panels. The demo Vite build
+replaces only the `runtime-api` factory. `LinkHubApi` uses an injected in-memory
+`DemoBackend` fetch transport instead of network HTTP. The normal build retains
+the real HTTP transport; neither build monkey-patches global `fetch`.
+Synthetic frames are constructed with the production generated MAVLink message
+classes, so required fields and enum shapes are type-checked against the pinned
+dialect. The fake journal preserves events/transactions and uses LinkHub's
+message-specific snapshot keys when collapsing state.
+
+```powershell
+npm --prefix linkhub-ui run dev:demo
+npm --prefix linkhub-ui run build:demo
+```
+
+The build writes `dist-demo/`, separately from the live UI's `dist/`. Serve the
+output with any static HTTP server; double-clicking the HTML via `file://` is
+not supported by browser module security. Relative asset URLs support both
+the GitHub project-site subdirectory and other static hosts. Once loaded, the
+demo needs no network connection; it does not install a service worker for
+offline reloads.
+
+The fake vehicle starts in an active passive run, flying a repeating 30-second
+circle with gentle attitude/altitude changes and a synthetic 1.2 Hz wobble.
+Keyboard controls work immediately. Use `stop` to disarm the fake vehicle,
+then `run passive` to exercise the real startup/settling sequence. Roll/pitch/yaw
+offsets and thrust affect generated telemetry. Nothing can reach hardware.
+
+The telemetry profile selector changes synthetic message rates, the throughput
+popover shows estimated traffic (64 bytes per synthetic frame), and Yaw/Wobble
+use the real journal readers and analysis code. The terminal supports parameter
+get/set/list, config check/apply using the real checked-in defaults, mode/arm,
+passive start/stop/recapture, journal queries, message sends, reboot/generation
+changes, and synthetic compass calibration/cancel/accept. Unknown parameters,
+unsupported commands/endpoints, and invalid requests produce explicit errors;
+they are not acknowledged as successful hardware operations. Rates are limited
+to 300 Hz to bound local browser work. Parameter changes last until page reload.
+
+The synthetic flight is not a physics simulation or measured recording. The
+real scene's 10:1 RPM interpretation is preserved; the fake telemetry does not
+model a motor driving the autorotating rotor. A persistent **OFFLINE DEMO**
+header distinguishes it from the live UI. All simulated commands and calibration
+results apply only to this browser tab.
+
+The browser-only stand-in replaces the Rust service and ArduPilot, not the
+frontend control or analysis code. Synthetic flight, parameter storage, journal
+reads, and command/calibration responses are necessarily local approximations;
+this demo does not validate actual ArduPilot behavior, binary MAVLink transport,
+or the Rust service. Integration tests drive the normal `LinkHubApi`,
+`TelemetryStore`, `CommandRunner`, `PassiveController`, `CompassCalibration`,
+`YawRecorder`, and `WobbleRecorder` against that boundary.
+
+To publish, select **Settings > Pages > Build and deployment > GitHub Actions**
+on the repository. `.github/workflows/pages.yml` tests and builds the demo, then
+deploys it after relevant pushes to `main` or a manual workflow dispatch.
+The default project-site URL is `https://mcroomp.github.io/windpower/`.
+No live service or credentials are required.
+
+### Live UI
+
 From the repository root, launch a previously built UI plus LinkHub:
 
 ```powershell
@@ -51,6 +113,8 @@ missing. With both artifacts present, a normal launch needs no Python or uv.
 | Command | What it runs | Notes |
 | --- | --- | --- |
 | `npm run build` | `tsc --noEmit && vite build` | Type-checks, then writes static assets to `dist\`. |
+| `npm run build:demo` | TypeScript check + standalone Vite build | Writes the offline demo to `dist-demo\`. |
+| `npm run dev:demo` | Demo Vite dev server | Runs the full UI against the in-memory fake backend. |
 | `npm run cli -- <command>` | esbuild runner + Node | Bundles the CLI quickly under `tmp\linkhub-cli\`, then runs it against LinkHub; defaults to `http://127.0.0.1:8999`. |
 | `npm run cli:debug -- <command>` | Node inspector + `vite-node` | Runs the same CLI paused on startup for a VS Code/Chrome debugger. |
 | `npm run dev` | `vite --host 127.0.0.1` | Frontend-only Vite dev server bound to loopback. The command does not set a port, so Vite chooses its default port. |

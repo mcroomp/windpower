@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",
+    "build:demo": "tsc --noEmit && vite build --config vite.demo.config.ts",
+    "dev:demo": "vite --config vite.demo.config.ts --host 127.0.0.1",
     "cli": "node scripts/run-cli.mjs",
     "cli:debug": "node --inspect-brk scripts/run-cli.mjs",
     "dev": "vite --host 127.0.0.1",
