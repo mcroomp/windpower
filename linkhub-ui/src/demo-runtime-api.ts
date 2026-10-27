@@ -1,17 +1,28 @@
 import { LinkHubApi } from "./api";
-import { configTargets } from "./config";
 import { DemoBackend } from "./demo-backend";
+import recording from "./demo/pumping-cycle.json";
+import type { VehicleSceneOptions } from "./scene";
+
+export const sceneOptions: VehicleSceneOptions = {
+  followVehicle: true,
+  groundHeight: recording.groundHeight,
+};
 
 export function createLinkHubApi(): LinkHubApi {
-  document.title = "RAWES LinkHub / Offline demo";
+  document.title = "RAWES LinkHub / Recorded SITL pumping cycle";
+  const backend = new DemoBackend();
   const heading = document.querySelector("h1");
   if (heading) {
-    heading.textContent = "Demo vehicle state";
+    const update = () => {
+      const { time, phase } = backend.playback;
+      heading.textContent = `${phase} / ${time.toFixed(1)} of ${recording.duration.toFixed(1)} s`;
+    };
+    update();
+    window.setInterval(update, 250);
   }
   const label = document.querySelector(".scene-panel .eyebrow");
   if (label) {
-    label.textContent = "RAWES / OFFLINE DEMO";
+    label.textContent = "RAWES / RECORDED SITL / READ-ONLY";
   }
-  const backend = new DemoBackend(configTargets(true));
   return new LinkHubApi("", backend.fetch);
 }

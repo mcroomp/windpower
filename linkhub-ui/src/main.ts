@@ -1,5 +1,5 @@
 import "./styles.css";
-import { createLinkHubApi } from "./runtime-api";
+import { createLinkHubApi, sceneOptions } from "./runtime-api";
 import { eulerFromAttitudeQuaternion } from "./attitude";
 import { diagValue, DIAG_ARRAY_NAME, isDiagRecord } from "./diag-array";
 import {
@@ -77,7 +77,7 @@ const setPhase = (phase: PassivePhase) => {
 };
 const passive = new PassiveController(api, telemetry, write, setPhase);
 terminal = new Terminal(form, input, output, api, telemetry, passive);
-const scene = new VehicleScene(required<HTMLElement>("#scene"), telemetry);
+const scene = new VehicleScene(required<HTMLElement>("#scene"), telemetry, sceneOptions);
 
 function updateOverlay(): void {
   const status = telemetry.status;
@@ -87,6 +87,7 @@ function updateOverlay(): void {
   const yawMotor = diagValue(diag, "YFF_U");
   const yawTrim = diagValue(diag, "YFF_T");
   const rpm = telemetry.get("RPM");
+  const physicsRpm = telemetry.get("NAMED_VALUE_FLOAT", "rx", "SIM_RPM")?.fields.value;
   const degrees = (value: unknown) => (
     typeof value === "number" ? (value * 180 / Math.PI).toFixed(1) : "n/a"
   );
@@ -105,7 +106,9 @@ function updateOverlay(): void {
   const motorRpm = typeof rpm?.fields.rpm1 === "number" && rpm.fields.rpm1 >= 0
     ? rpm.fields.rpm1
     : null;
-  const rpmText = motorRpm === null
+  const rpmText = typeof physicsRpm === "number" && Number.isFinite(physicsRpm) && physicsRpm >= 0
+    ? `physics rotor ${physicsRpm.toFixed(1)} RPM · motor RPM unavailable`
+    : motorRpm === null
     ? "RPM unavailable"
     : `motor ${motorRpm.toFixed(0)} RPM  rotor ${(motorRpm / MOTOR_TO_ROTOR_GEAR_RATIO).toFixed(1)} RPM`;
   const swash = swashLimits
@@ -216,6 +219,7 @@ telemetry.onRecord((record) => {
     || record.message === "ATTITUDE_TARGET"
     || record.message === "SERVO_OUTPUT_RAW"
     || record.message === "RPM"
+    || (record.message === "NAMED_VALUE_FLOAT" && record.fields.name === "SIM_RPM")
     || isDiagRecord(record)
   )) {
     scheduleOverlay();

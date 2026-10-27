@@ -16,10 +16,9 @@ telemetry store, passive controller, and diagnostic panels. The demo Vite build
 replaces only the `runtime-api` factory. `LinkHubApi` uses an injected in-memory
 `DemoBackend` fetch transport instead of network HTTP. The normal build retains
 the real HTTP transport; neither build monkey-patches global `fetch`.
-Synthetic frames are constructed with the production generated MAVLink message
-classes, so required fields and enum shapes are type-checked against the pinned
-dialect. The fake journal preserves events/transactions and uses LinkHub's
-message-specific snapshot keys when collapsing state.
+The data source is a checked-in, compact recording of one **49.4-second SITL
+pumping cycle**, replayed continuously. The local journal preserves recorded
+events and uses LinkHub's message-specific snapshot keys when collapsing state.
 
 ```powershell
 npm --prefix linkhub-ui run dev:demo
@@ -33,35 +32,65 @@ the GitHub project-site subdirectory and other static hosts. Once loaded, the
 demo needs no network connection; it does not install a service worker for
 offline reloads.
 
-The fake vehicle starts in an active passive run, flying a repeating 30-second
-circle with gentle attitude/altitude changes and a synthetic 1.2 Hz wobble.
-Keyboard controls work immediately. Use `stop` to disarm the fake vehicle,
-then `run passive` to exercise the real startup/settling sequence. Roll/pitch/yaw
-offsets and thrust affect generated telemetry. Nothing can reach hardware.
+The recording is cycle 2 of `test_pumping_cycle_lua_sitl`, journal run
+`56f3e44b-a7ca-46eb-873f-479b050d9da0`: simulation time 123.863564–173.263564 s,
+after the canonical `kinematic_exit` at 60.001 s. It contains 24.6 seconds of
+reel-out followed by 24.8 seconds of reel-in. The header shows the phase and
+playback time. The camera follows the measured vehicle; the live build keeps
+its existing camera behavior. The ground is aligned using the initial offset
+between physics and ArduPilot estimator altitude.
 
-The telemetry profile selector changes synthetic message rates, the throughput
-popover shows estimated traffic (64 bytes per synthetic frame), and Yaw/Wobble
-use the real journal readers and analysis code. The terminal supports parameter
-get/set/list, config check/apply using the real checked-in defaults, mode/arm,
-passive start/stop/recapture, journal queries, message sends, reboot/generation
-changes, and synthetic compass calibration/cancel/accept. Unknown parameters,
-unsupported commands/endpoints, and invalid requests produce explicit errors;
-they are not acknowledged as successful hardware operations. Rates are limited
-to 300 Hz to bound local browser work. Parameter changes last until page reload.
+Data provenance:
 
-The synthetic flight is not a physics simulation or measured recording. The
-real scene's 10:1 RPM interpretation is preserved; the fake telemetry does not
-model a motor driving the autorotating rotor. A persistent **OFFLINE DEMO**
-header distinguishes it from the live UI. All simulated commands and calibration
-results apply only to this browser tab.
+- Attitude, body rates, position, diagnostics, heartbeat, RC, EKF, and status
+  text come from the canonical LinkHub journal. Recorded Euler attitude is
+  converted to quaternion, not regenerated.
+- Applied swash/motor PWM comes from physics CSV because this historical journal
+  lacks `SERVO_OUTPUT_RAW`. Rotor speed comes from recorded `omega_rotor`, exposed
+  as the explicitly simulation-only `SIM_RPM` named value. The overlay labels it
+  **physics rotor RPM**; it is not yaw-motor RPM.
+- `ATTITUDE_TARGET`, `PID_TUNING`, and motor `RPM` were not recorded and remain
+  unavailable. Charts use whatever channels actually exist rather than invented
+  target/PID/motor traces. Historic diagnostic-array padding is discarded.
+- The parameter snapshot starts with the run's `params.json` and incorporates
+  journal `PARAM_VALUE` records before the selected cycle, including Lua
+  parameters and their recorded MAVLink types. Types are inferred only for
+  snapshot entries lacking a wire response. `RAWES_MODE=1` identifies the
+  selected pumping phase. `RAWES_TEL_HZ` is a browser-local display setting,
+  not a claim that a vehicle parameter was changed.
 
-The browser-only stand-in replaces the Rust service and ArduPilot, not the
-frontend control or analysis code. Synthetic flight, parameter storage, journal
-reads, and command/calibration responses are necessarily local approximations;
-this demo does not validate actual ArduPilot behavior, binary MAVLink transport,
-or the Rust service. Integration tests drive the normal `LinkHubApi`,
-`TelemetryStore`, `CommandRunner`, `PassiveController`, `CompassCalibration`,
-`YawRecorder`, and `WobbleRecorder` against that boundary.
+This is **read-only replay**. The full terminal and panels remain present:
+status, parameter reads/listing, config inspection, journal browsing, profile
+selection, and Yaw/Wobble analysis use their normal production paths. Commands,
+arming/disarming, mode changes, raw sends, calibration, reboot, and vehicle
+parameter writes return an explicit read-only error without changing playback.
+Nothing can reach hardware.
+
+Profiles thin browser-local delivery only; they never increase the recorded
+sample rate. Missing messages stay missing. The throughput popover estimates
+traffic at 64 bytes per delivered frame, not measured link bandwidth. Boot and
+arrival timestamps are rebased monotonically each loop so the production chart
+readers keep working. The natural end-to-start cut is not an invented blending
+trajectory. Browser journal history and catch-up after a suspended tab are
+bounded.
+
+The browser-local adapter replaces the Rust service, not the frontend control,
+rendering, or analysis code. This demo does not validate binary MAVLink transport
+or the Rust service. Integration tests exercise the production `LinkHubApi`,
+`TelemetryStore`, `CommandRunner`, `PassiveController` reconciliation,
+`YawRecorder`, and `WobbleRecorder`.
+
+To regenerate the recording from the retained local run artifacts:
+
+```powershell
+uv run python -m analysis.export_demo_cycle simulation\logs\test_pumping_cycle_lua_sitl --journal simulation\logs\test_pumping_cycle_lua_sitl\linkhub\56f3e44b-a7ca-46eb-873f-479b050d9da0 --linkhub linkhub\target\debug\linkhub.exe --cycle 2
+```
+
+The exporter uses `linkhub query ... show --json`, not legacy `mavlink.jsonl`.
+Only the compact `src/demo/pumping-cycle.json` is shipped; raw logs and physics
+CSV files are not published. Its metadata records the source run, channel
+provenance, selected timestamps, and source telemetry SHA-256. Deployment builds
+consume that checked-in recording and do not need a local SITL run or exporter.
 
 To publish, select **Settings > Pages > Build and deployment > GitHub Actions**
 on the repository. `.github/workflows/pages.yml` tests and builds the demo, then
@@ -114,7 +143,7 @@ missing. With both artifacts present, a normal launch needs no Python or uv.
 | --- | --- | --- |
 | `npm run build` | `tsc --noEmit && vite build` | Type-checks, then writes static assets to `dist\`. |
 | `npm run build:demo` | TypeScript check + standalone Vite build | Writes the offline demo to `dist-demo\`. |
-| `npm run dev:demo` | Demo Vite dev server | Runs the full UI against the in-memory fake backend. |
+| `npm run dev:demo` | Demo Vite dev server | Runs the full UI against the recorded SITL replay. |
 | `npm run cli -- <command>` | esbuild runner + Node | Bundles the CLI quickly under `tmp\linkhub-cli\`, then runs it against LinkHub; defaults to `http://127.0.0.1:8999`. |
 | `npm run cli:debug -- <command>` | Node inspector + `vite-node` | Runs the same CLI paused on startup for a VS Code/Chrome debugger. |
 | `npm run dev` | `vite --host 127.0.0.1` | Frontend-only Vite dev server bound to loopback. The command does not set a port, so Vite chooses its default port. |
@@ -464,6 +493,14 @@ message-rate configuration to be requested again.
 
 The instrument-bay antenna and black arrow extend outward from the hub,
 perpendicular to the axle on the FRD -X side, and follow the device's measured attitude.
+
+The airframe model uses +X forward, +Y up toward the rotor, and +Z right.
+Its model-to-FRD mapping is `(x, z, -y)`: model +Y is body -Z, while the
+short tether stub extends along body +Z. A level attitude therefore puts the
+rotor above the instrument bay and the tether below it. Apply the recorded
+body-to-NED attitude before mapping NED into the scene as `(east, -down, -north)`.
+The stub is an airframe detail, not a reconstruction of the full tether to
+the ground anchor.
 
 The yellow reference arrow is driven by `ATTITUDE_TARGET`. Its quaternion `q`
 is interpreted as `[w, x, y, z]`, and the arrow points along the target
