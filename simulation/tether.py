@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
-from scipy.optimize import least_squares
 
 
 DEFAULT_TETHER_MODEL = "tallak_quasi_static"
@@ -178,6 +177,9 @@ class TallakQuasiStaticTether:
             raise ValueError("segments must be an integer >= 2")
         self.properties = properties
         self.segments = segments
+        self._fractions = ((np.arange(segments) + 0.5) / segments)[:, None]
+        self._anchor_fractions = 1.0 - self._fractions
+        self._identity = np.eye(3)
         self._anchor_force: np.ndarray | None = None
         self._tangents: np.ndarray | None = None
         self._segment_tensions: np.ndarray | None = None
@@ -189,10 +191,10 @@ class TallakQuasiStaticTether:
             raise ValueError("quasi-static tether requires distinct endpoints")
         p = self.properties
         ds = inputs.rest_length_m / self.segments
-        fractions = (np.arange(self.segments) + 0.5) / self.segments
+        elastic_identity = self._identity / p.axial_stiffness_n
         velocities = (
-            (1.0 - fractions[:, None]) * inputs.anchor_vel_ned
-            + fractions[:, None] * inputs.attachment_vel_ned
+            self._anchor_fractions * inputs.anchor_vel_ned
+            + self._fractions * inputs.attachment_vel_ned
         )
         tangents = np.tile(chord / distance, (self.segments, 1))
         lengths = np.full(self.segments, distance / self.segments)
@@ -248,32 +250,65 @@ class TallakQuasiStaticTether:
                 spans = ds * (1.0 + magnitudes / p.axial_stiffness_n)
                 return directions, spans, magnitudes
 
-            def residual(force: np.ndarray) -> np.ndarray:
-                directions, spans, _ = geometry(force)
-                return np.sum(directions * spans[:, None], axis=0) - chord
-
-            def jacobian(force: np.ndarray) -> np.ndarray:
-                directions, _, magnitudes = geometry(force)
-                outer = directions[:, :, None] * directions[:, None, :]
-                return ds * np.sum(
-                    (np.eye(3) - outer) / magnitudes[:, None, None]
-                    + np.eye(3) / p.axial_stiffness_n,
+            tangents, lengths, tensions = geometry(anchor_force)
+            endpoint_error = np.sum(tangents * lengths[:, None], axis=0) - chord
+            residual_norm = float(np.linalg.norm(endpoint_error))
+            for _ in range(100):
+                if not np.isfinite(residual_norm):
+                    raise TetherConvergenceError(
+                        "Tallak tether endpoint solve failed: nonfinite residual"
+                    )
+                if residual_norm <= 1e-10:
+                    break
+                outer = tangents[:, :, None] * tangents[:, None, :]
+                jacobian = ds * np.sum(
+                    (self._identity - outer) / tensions[:, None, None]
+                    + elastic_identity,
                     axis=0,
                 )
-
-            solved = least_squares(
-                # SciPy's untyped source infers jac as str, but accepts callables.
-                residual, anchor_force, jac=jacobian, x_scale="jac",  # pyright: ignore[reportArgumentType]
-                ftol=1e-12, xtol=1e-12, gtol=1e-12, max_nfev=100,
-            )
-            anchor_force = solved.x
-            residual_norm = float(np.linalg.norm(residual(anchor_force)))
-            if not solved.success or residual_norm > 1e-6:
+                try:
+                    step = np.linalg.solve(jacobian, -endpoint_error)
+                except np.linalg.LinAlgError as error:
+                    raise TetherConvergenceError(
+                        "Tallak tether endpoint solve failed: singular Jacobian"
+                    ) from error
+                if not np.all(np.isfinite(step)):
+                    raise TetherConvergenceError(
+                        "Tallak tether endpoint solve failed: nonfinite Newton step"
+                    )
+                scale = 1.0
+                # Cold/slack starts can overshoot; require residual decrease.
+                for _ in range(32):
+                    candidate = anchor_force + scale * step
+                    candidate_tangents, candidate_lengths, candidate_tensions = geometry(candidate)
+                    candidate_error = np.sum(
+                        candidate_tangents * candidate_lengths[:, None], axis=0,
+                    ) - chord
+                    candidate_norm = float(np.linalg.norm(candidate_error))
+                    if np.isfinite(candidate_norm) and (
+                        candidate_norm <= 1e-10
+                        or candidate_norm <= (1.0 - 1e-4 * scale) * residual_norm
+                    ):
+                        anchor_force = candidate
+                        endpoint_error = candidate_error
+                        residual_norm = candidate_norm
+                        tangents = candidate_tangents
+                        lengths = candidate_lengths
+                        tensions = candidate_tensions
+                        break
+                    scale *= 0.5
+                else:
+                    raise TetherConvergenceError(
+                        "Tallak tether endpoint solve failed: Newton line search "
+                        f"stalled; residual={residual_norm:.6g} m"
+                    )
+                if residual_norm <= 1e-10:
+                    break
+            else:
                 raise TetherConvergenceError(
-                    f"Tallak tether endpoint solve failed: {solved.message}; "
+                    "Tallak tether endpoint solve failed after 100 Newton steps; "
                     f"residual={residual_norm:.6g} m"
                 )
-            tangents, lengths, tensions = geometry(anchor_force)
             new_loads = segment_loads(tangents, lengths)
             if float(np.max(np.linalg.norm(new_loads - loads, axis=1))) < 1e-7:
                 break

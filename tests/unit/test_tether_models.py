@@ -229,12 +229,114 @@ def test_wind_step_and_payout_warm_start_match_independent_equilibrium() -> None
 
 
 def test_solver_failure_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
-    def failed_solve(fun, initial, **kwargs):
-        return SimpleNamespace(x=initial, success=False, message="test failure")
+    def failed_solve(matrix, rhs):
+        raise np.linalg.LinAlgError("test failure")
 
-    monkeypatch.setattr("simulation.tether.least_squares", failed_solve)
-    with pytest.raises(TetherConvergenceError, match="test failure"):
+    monkeypatch.setattr("simulation.tether.np.linalg.solve", failed_solve)
+    with pytest.raises(TetherConvergenceError, match="singular Jacobian"):
         TallakQuasiStaticTether().evaluate(_inputs())
+
+
+@pytest.mark.parametrize("step,reason", [
+    (np.zeros(3), "line search stalled"),
+    (np.full(3, np.nan), "nonfinite Newton step"),
+])
+def test_newton_invalid_steps_fail_without_updating_cache(
+    monkeypatch: pytest.MonkeyPatch, step: np.ndarray, reason: str,
+) -> None:
+    model = TallakQuasiStaticTether()
+    model.evaluate(_inputs())
+    assert model._anchor_force is not None
+    assert model._tangents is not None
+    assert model._segment_tensions is not None
+    force_before = model._anchor_force.copy()
+    tangents_before = model._tangents.copy()
+    tensions_before = model._segment_tensions.copy()
+    monkeypatch.setattr("simulation.tether.np.linalg.solve", lambda matrix, rhs: step)
+    with pytest.raises(TetherConvergenceError, match=reason):
+        model.evaluate(_inputs(wind_ned=np.array([0.0, 15.0, 0.0])))
+    np.testing.assert_array_equal(model._anchor_force, force_before)
+    np.testing.assert_array_equal(model._tangents, tangents_before)
+    np.testing.assert_array_equal(model._segment_tensions, tensions_before)
+
+
+def test_newton_iteration_limit_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_solve = np.linalg.solve
+    monkeypatch.setattr(
+        "simulation.tether.np.linalg.solve",
+        lambda matrix, rhs: 0.01 * original_solve(matrix, rhs),
+    )
+    with pytest.raises(TetherConvergenceError, match="after 100 Newton steps"):
+        TallakQuasiStaticTether().evaluate(_inputs())
+
+
+@pytest.mark.parametrize("warm_start", [False, True])
+def test_newton_backtracks_oversized_step(
+    monkeypatch: pytest.MonkeyPatch, warm_start: bool,
+) -> None:
+    inputs = _inputs(
+        attachment_pos_ned=np.array([80.0, 0.0, -40.0]),
+        wind_ned=np.array([0.0, 10.0, 0.0]),
+    )
+    expected = TallakQuasiStaticTether().evaluate(inputs)
+    model = TallakQuasiStaticTether()
+    if warm_start:
+        model.evaluate(_inputs())
+    original_solve = np.linalg.solve
+    calls = 0
+
+    def oversized_first_step(matrix, rhs):
+        nonlocal calls
+        calls += 1
+        step = original_solve(matrix, rhs)
+        return 1024.0 * step if calls == 1 else step
+
+    monkeypatch.setattr("simulation.tether.np.linalg.solve", oversized_first_step)
+    actual = model.evaluate(inputs)
+    assert calls > 1
+    assert actual.residual_m <= 1e-10
+    np.testing.assert_allclose(actual.force_on_hub_ned, expected.force_on_hub_ned, atol=1e-8)
+    np.testing.assert_allclose(actual.positions_ned, expected.positions_ned, rtol=1e-8, atol=1e-8)
+    ds = inputs.rest_length_m / model.segments
+    spans = np.linalg.norm(np.diff(actual.positions_ned, axis=0), axis=1)
+    energy_from_shape = float(
+        0.5 * model.properties.axial_stiffness_n / ds * np.sum((spans - ds) ** 2)
+    )
+    assert actual.elastic_energy_j == pytest.approx(energy_from_shape, rel=1e-8)
+
+
+@pytest.mark.parametrize("position,length,wind,hub_force,anchor_force", [
+    (
+        [np.sqrt(3) * 50, 0, -50],
+        100 * (1 - 300 / TetherProperties().axial_stiffness_n), [0, 10, 0],
+        [-276.59448313607135, 6.403203655889415, 160.72126302177531],
+        [276.5943644151062, 6.39635677918011, -158.66356631949353],
+    ),
+    (
+        [80, 0, -40], 100, [0, 10, 0],
+        [-4.655253967380863, 4.877031139263025, 3.2056955987794984],
+        [4.573530481984542, 4.593218629623504, -1.4514586406788008],
+    ),
+    (
+        [100.1, 0, 0], 100, [0, 15, 0],
+        [-357.2935324712722, 14.408053265378058, 1.0294945678634966],
+        [357.2935324712722, 14.408053265378058, 1.0294945678634961],
+    ),
+    (
+        [0, 0, -100.1], 100, [0, 0, 0],
+        [0, 0, 282.2622042168574], [0, 0, -280.20210421685744],
+    ),
+])
+def test_newton_matches_recorded_scipy_equilibria(
+    position, length, wind, hub_force, anchor_force,
+) -> None:
+    result = TallakQuasiStaticTether().evaluate(_inputs(
+        attachment_pos_ned=np.array(position), rest_length_m=length,
+        wind_ned=np.array(wind),
+    ))
+    assert result.residual_m <= 1e-10
+    np.testing.assert_allclose(result.force_on_hub_ned, hub_force, rtol=1e-8, atol=1e-7)
+    np.testing.assert_allclose(result.force_on_anchor_ned, anchor_force, rtol=1e-8, atol=1e-7)
 
 
 @pytest.mark.parametrize("changes", [

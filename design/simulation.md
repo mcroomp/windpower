@@ -245,8 +245,14 @@ between prescribed endpoints, not the Julia solver's rotating-line ODE.
 It does **not** apply a universal quarter-drag multiplier.
 
 At 16 segments by default, segment-midpoint tension and elastic strain determine
-segment length/direction. A three-component anchor-force solve closes the
-endpoint position; an outer iteration updates drag from local transverse
+segment length/direction. A three-component anchor-force Newton solve with an
+analytical Jacobian and residual-decreasing backtracking closes the endpoint
+position to 1e-10 m. Singular/nonfinite steps, failed line search, or exhaustion
+of 100 Newton steps raise `TetherConvergenceError`. Each accepted trial's geometry
+supplies the next Jacobian and the converged line shape; rejected trials never
+replace it. Geometry is recomputed when outer-loop loads change. Segment
+fractions and the identity matrix are precomputed per model.
+An outer iteration updates drag from local transverse
 relative wind and strained segment length. Weight uses mass per unstretched
 length. Endpoint velocities are linearly interpolated along material stations.
 Axial material slip does not directly contribute to this normal-drag law.
