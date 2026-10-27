@@ -182,6 +182,11 @@ journal cursor and flush, finite filtered message reads with generation-change
 protection, decoded message send, arbitrary `COMMAND_LONG`, typed single and
 batch parameter operations, confirmed mode/arm state transitions, and message
 rates/intervals. These methods are used by both the browser and Node runtimes.
+`getParameters(names, timeoutMs, retries)` reads a selected group through one
+pipelined batch operation, returning a map of typed parameter records.
+The yaw chart uses it for the output-9 range and yaw slope, avoiding competing
+single reads with overlapping timeout budgets. API behavior is owned by
+[LinkHub parameter semantics](../design/linkhub.md#parameter-values).
 Core CLI commands print API records as JSON so they can be used in scripts:
 
 ```text
@@ -279,8 +284,20 @@ not enable movement. Confirm secured hardware, then **Enable movement**.
 - Drag the cyclic pad or choose a cardinal-limit or center button.
 - Use the collective slider from 0 to 100% of configured collective travel.
 - Edit `H_COL_MIN`, `H_COL_MAX` (microseconds), and `H_CYC_MAX` (centidegrees)
-  while stopped, then explicitly **Apply limits**. **Reload limits** reads the
-  controller again; limits are not automatically restored on Stop.
+  while stopped, then explicitly **Apply limits**. This also sets
+  `SERVO1_TRIM`, `SERVO2_TRIM`, and `SERVO3_TRIM` to the collective midpoint,
+  rounded down (1200..1557 gives 1378 us). It can move the swash even while
+  disarmed; confirm secured hardware and clearance first. All six values use
+  one batch write, with disarmed checks before submission and after verification.
+  The batch is not atomic and does not guarantee endpoint-write order.
+  Its response and independent readbacks are checked, including equal midpoint trims and valid mixer
+  calibration. Partial writes or inconsistent readbacks are errors, not
+  success; reload and verify before continuing. **Reload limits** refreshes
+  the limits and mixer calibration, including trims. Settings are not
+  automatically restored on Stop.
+- The neutral readout shows the draft midpoint and all three loaded trims,
+  explicitly indicating whether they match. Matching numeric settings do not
+  establish zero blade pitch or mechanical clearance.
 - The read-only calculated S1/S2/S3 min/max updates as the draft limits change,
   without writing parameters. It predicts the full configured cyclic envelope,
   not just the current slider position; see the

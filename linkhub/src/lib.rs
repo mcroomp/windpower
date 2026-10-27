@@ -1,5 +1,6 @@
 pub mod ble;
 pub mod discovery;
+pub mod dronebridge;
 pub mod http;
 pub mod journal;
 pub mod link_events;
@@ -9,3 +10,4 @@ pub mod operations;
 pub mod query;
 pub mod records;
 pub mod transfer;
+pub mod udp;

@@ -1,6 +1,6 @@
 import type { PassiveController } from "./passive";
 import { isArmed } from "./mav";
-import { swashServoEnvelope, type SwashGeometry, type SwashLimits } from "./swashplate";
+import { swashNeutralTrim, swashServoEnvelope, type SwashGeometry, type SwashLimits } from "./swashplate";
 import type { TelemetryStore } from "./telemetry";
 
 export class SwashPanel {
@@ -16,6 +16,7 @@ export class SwashPanel {
   private geometryError: string | null = null;
   private loadEpoch = 0;
   private readonly envelope: HTMLElement;
+  private readonly neutral: HTMLElement;
   private readonly status: HTMLElement;
   private readonly min: HTMLInputElement;
   private readonly max: HTMLInputElement;
@@ -67,7 +68,9 @@ export class SwashPanel {
           <label title="H_COL_MAX">Max (us)<input data-role="max" aria-label="Collective maximum (us)" type="number" min="801" max="2200" step="1"></label>
           <label title="H_CYC_MAX">Cyclic (cdeg)<input data-role="cyclic" aria-label="Cyclic maximum (cdeg)" type="number" min="0" max="4500" step="1"></label>
           <div class="swash-actions"><button data-role="reload" type="button">Reload limits</button><button data-role="apply" type="button">Apply limits</button></div>
-          <small>H_COL_MIN/MAX, H_CYC_MAX. 100 cdeg = 1 degree. Apply while stopped; writes persist.</small>
+          <small>Applies H_COL_MIN/MAX, H_CYC_MAX and all three servo trims at the midpoint (rounded down).
+            Can move servos even while stopped; writes persist. 100 cdeg = 1 degree.</small>
+          <output data-role="neutral" aria-label="Neutral trim consistency"></output>
           <div class="swash-envelope"><strong>Calculated servo min/max (us)</strong>
             <output data-role="envelope" aria-label="Calculated servo minimum and maximum">Reload limits to calculate</output>
             <small>Draft limits + full cyclic, loaded trims/reversal. Estimated, not measured. Clipping is marked.</small></div>
@@ -117,6 +120,7 @@ export class SwashPanel {
     };
     this.status = element("status");
     this.envelope = element("envelope");
+    this.neutral = element("neutral");
     this.min = element("min");
     this.max = element("max");
     this.cyclic = element("cyclic");
@@ -165,13 +169,16 @@ export class SwashPanel {
     this.reload.addEventListener("click", () => void this.run(() => this.load(), true));
     this.apply.addEventListener("click", () => void this.run(async () => {
       if (this.compassActive()) throw new Error("Stop compass calibration before editing swash limits.");
+      if (!this.secured.checked) throw new Error("Confirm secured hardware before applying limits and trims.");
       this.ownsOperation = true;
-      const actual = await this.controller.applySwashLimits({
-        min: this.min.valueAsNumber, max: this.max.valueAsNumber, cyclic: this.cyclic.valueAsNumber,
-      });
-      this.showLimits(actual);
+      const limits = { min: this.min.valueAsNumber, max: this.max.valueAsNumber, cyclic: this.cyclic.valueAsNumber };
+      this.loaded = false;
+      this.geometry = null;
+      this.geometryError = "Settings changed or partially applied; reload limits to verify.";
       this.clearance.checked = false;
-      this.write("Swash limits applied and verified.");
+      await this.controller.applySwashLimits(limits);
+      await this.load();
+      this.write(`Swash limits and S1/S2/S3 midpoint trims (${swashNeutralTrim(limits)} us) applied and verified.`);
     }, true));
     this.collective.addEventListener("input", () => {
       this.clearance.checked = false;
@@ -281,7 +288,9 @@ export class SwashPanel {
       const geometry = await this.controller.readSwashGeometry();
       if (epoch !== this.loadEpoch) throw new Error("Connection changed; reload limits.");
       this.geometry = geometry;
+      this.loaded = true;
     } catch (error) {
+      if (epoch === this.loadEpoch) this.loaded = false;
       if (epoch === this.loadEpoch) this.geometryError = error instanceof Error ? error.message : String(error);
       throw error;
     }
@@ -291,7 +300,6 @@ export class SwashPanel {
     this.min.value = String(limits.min);
     this.max.value = String(limits.max);
     this.cyclic.value = String(limits.cyclic);
-    this.loaded = true;
     this.limitsChanged(limits);
   }
 
@@ -362,6 +370,18 @@ export class SwashPanel {
     this.sweepStatus.textContent = this.error ?? (this.controller.swashSweeping
       ? `Sweeping at fixed collective ${(target.collective * 100).toFixed(0)}%`
       : active ? `Center cyclic before starting. Collective ${(target.collective * 100).toFixed(0)}%` : "Stopped - movement disabled");
+    try {
+      const trim = swashNeutralTrim({
+        min: this.min.valueAsNumber, max: this.max.valueAsNumber, cyclic: this.cyclic.valueAsNumber,
+      });
+      const servos = this.geometry?.servos;
+      this.neutral.textContent = `Apply neutral: ${trim} us for S1/S2/S3. ` + (servos
+        ? `Loaded trims: ${servos.map((servo) => servo.trim).join(" / ")} us`
+          + (servos.every((servo) => servo.trim === trim) ? " (consistent)." : " (differ from draft midpoint).")
+        : "Reload to verify loaded trims.");
+    } catch (error) {
+      this.neutral.textContent = `Neutral unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
     if (!this.geometry) {
       this.envelope.textContent = this.geometryError ? `Unavailable: ${this.geometryError}` : "Loading mixer calibration...";
     } else {

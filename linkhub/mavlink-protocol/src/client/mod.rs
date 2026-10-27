@@ -133,6 +133,13 @@ pub trait Protocol: Send + Sync {
         timeout: Duration,
     ) -> Result<ParameterResult, OperationError>;
 
+    async fn get_parameters(
+        &self,
+        names: &[String],
+        timeout: Duration,
+        retries: usize,
+    ) -> Result<Vec<ParameterResult>, OperationError>;
+
     async fn set_parameter(
         &self,
         name: &str,
@@ -225,6 +232,35 @@ pub trait Protocol: Send + Sync {
 
 #[async_trait::async_trait]
 impl Protocol for ProtocolClient {
+    #[inline(never)]
+    async fn get_parameters(
+        &self,
+        names: &[String],
+        timeout: Duration,
+        retries: usize,
+    ) -> Result<Vec<ParameterResult>, OperationError> {
+        let deadline = time::Instant::now() + timeout;
+        let _guard = lock_until(&self.parameter_lock, deadline).await?;
+        let (target_system, target_component) = self.targets(None, None);
+        let mut requests = Vec::with_capacity(names.len());
+        for name in names {
+            let name = normalize_parameter_name(name)?;
+            if requests.iter().any(|(existing, _)| existing == &name) {
+                return Err(OperationError::Invalid(format!(
+                    "duplicate parameter {name}"
+                )));
+            }
+            let request = MavMessage::PARAM_REQUEST_READ(PARAM_REQUEST_READ_DATA {
+                param_index: -1,
+                target_system,
+                target_component,
+                param_id: CharArray::from(name.as_str()),
+            });
+            requests.push((name, request));
+        }
+        self.parameter_batch(requests, deadline, retries).await
+    }
+
     #[inline(never)]
     async fn command(
         &self,
@@ -333,63 +369,11 @@ impl Protocol for ProtocolClient {
                 )));
             }
             parameter.value.encode_classic()?;
-            requests.push((name, parameter.value));
+            let request = param_set(&name, parameter.value, target_system, target_component)?;
+            requests.push((name, request));
         }
 
-        let mut receiver = self.link.subscribe_messages();
-        let mut pending: BTreeMap<String, ParameterValue> = requests
-            .iter()
-            .map(|(name, value)| (name.clone(), *value))
-            .collect();
-        let mut results = BTreeMap::new();
-        for attempt in 0..=retries {
-            for (name, value) in &pending {
-                self.link
-                    .send_message(
-                        param_set(name, *value, target_system, target_component)?,
-                        None,
-                        None,
-                    )
-                    .await?;
-            }
-            let attempt_deadline = deadline
-                .min(time::Instant::now() + timeout.div_f64((retries.saturating_add(1)) as f64));
-            while !pending.is_empty() {
-                let remaining = attempt_deadline.saturating_duration_since(time::Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                let message = match recv_message(&mut receiver, remaining).await {
-                    Ok(message) => message,
-                    Err(OperationError::Timeout) => break,
-                    Err(error) => return Err(error),
-                };
-                if param_value(&message).is_none()
-                    || message.system_id != target_system
-                    || message.component_id != target_component
-                {
-                    continue;
-                }
-                let result = parameter_result(&message)?;
-                if pending.remove(&result.name).is_some() {
-                    results.insert(result.name.clone(), result);
-                }
-            }
-            if pending.is_empty() {
-                return requests
-                    .iter()
-                    .map(|(name, _)| {
-                        results.remove(name).ok_or_else(|| {
-                            OperationError::Invalid(format!("missing result for {name}"))
-                        })
-                    })
-                    .collect();
-            }
-            if attempt == retries {
-                break;
-            }
-        }
-        Err(OperationError::Timeout)
+        self.parameter_batch(requests, deadline, retries).await
     }
 
     #[inline(never)]
@@ -705,6 +689,74 @@ impl ProtocolClient {
             ftp_sequence: Arc::new(Mutex::new(initial_ftp_sequence)),
             log_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    async fn parameter_batch(
+        &self,
+        requests: Vec<(String, MavMessage)>,
+        deadline: time::Instant,
+        retries: usize,
+    ) -> Result<Vec<ParameterResult>, OperationError> {
+        let (target_system, target_component) = self.targets(None, None);
+        let mut receiver = self.link.subscribe_messages();
+        let mut pending: BTreeMap<_, _> = requests
+            .iter()
+            .map(|(name, request)| (name.clone(), request.clone()))
+            .collect();
+        let mut results = BTreeMap::new();
+        for attempt in 0..=retries {
+            if pending.is_empty() {
+                break;
+            }
+            let remaining = remaining_until(deadline)?;
+            let attempt_deadline = time::Instant::now()
+                + remaining.div_f64((retries.saturating_sub(attempt).saturating_add(1)) as f64);
+            for request in pending.values() {
+                time::timeout_at(
+                    deadline,
+                    self.link.send_message(request.clone(), None, None),
+                )
+                .await
+                .map_err(|_| OperationError::Timeout)??;
+            }
+            while !pending.is_empty() {
+                let remaining = attempt_deadline.saturating_duration_since(time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let message = match recv_message(&mut receiver, remaining).await {
+                    Ok(message) => message,
+                    Err(OperationError::Timeout) => break,
+                    Err(error) => return Err(error),
+                };
+                let Some(value) = param_value(&message) else {
+                    continue;
+                };
+                if message.system_id != target_system || message.component_id != target_component {
+                    continue;
+                }
+                let name = value.param_id.to_str().map_err(|error| {
+                    OperationError::Invalid(format!("invalid parameter name: {error}"))
+                })?;
+                if !pending.contains_key(name) {
+                    continue;
+                }
+                let result = parameter_result(&message)?;
+                pending.remove(&result.name);
+                results.insert(result.name.clone(), result);
+            }
+        }
+        if !pending.is_empty() {
+            return Err(OperationError::Timeout);
+        }
+        requests
+            .iter()
+            .map(|(name, _)| {
+                results
+                    .remove(name)
+                    .ok_or_else(|| OperationError::Invalid(format!("missing result for {name}")))
+            })
+            .collect()
     }
 
     async fn parameter_transaction(

@@ -265,11 +265,13 @@ telemetry.onGeneration(() => wobbleModel.reset());
 
 async function configureYawModel(): Promise<void> {
   try {
-    const [minimum, maximum, slope] = await Promise.all([
-      api.getParameter("SERVO9_MIN"),
-      api.getParameter("SERVO9_MAX"),
-      api.getParameter("RAWES_YAW_SLP"),
-    ]);
+    const parameters = await api.getParameters(["SERVO9_MIN", "SERVO9_MAX", "RAWES_YAW_SLP"]);
+    const minimum = parameters.get("SERVO9_MIN");
+    const maximum = parameters.get("SERVO9_MAX");
+    const slope = parameters.get("RAWES_YAW_SLP");
+    if (!minimum || !maximum || !slope) {
+      throw new Error("Yaw configuration response is missing requested parameters");
+    }
     yawModel.configure(minimum.value, maximum.value, slope.value);
   } catch (error) {
     write(

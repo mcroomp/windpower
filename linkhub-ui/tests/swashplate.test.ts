@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeH3Swashplate, swashControlPositions, swashServoEnvelope, swashSweepTarget, validateSwashLimits, type SwashGeometry } from "../src/swashplate";
+import { decodeH3Swashplate, swashControlPositions, swashNeutralTrim, swashServoEnvelope, swashSweepTarget, validateSwashLimits, type SwashGeometry } from "../src/swashplate";
 
 describe("calculated H3-120 servo envelope", () => {
   function geometry(): SwashGeometry {
@@ -69,6 +69,12 @@ describe("calculated H3-120 servo envelope", () => {
 });
 
 describe("swash calibration bounds", () => {
+  it("uses the collective midpoint rounded down for every neutral trim", () => {
+    expect(swashNeutralTrim({ min: 1200, max: 1557, cyclic: 1000 })).toBe(1378);
+    expect(swashNeutralTrim({ min: 1200, max: 1600, cyclic: 0 })).toBe(1400);
+    expect(() => swashNeutralTrim({ min: NaN, max: 1600, cyclic: 0 })).toThrow();
+  });
+
   it("rejects inverted, non-finite, fractional, or out-of-range limits", () => {
     for (const limits of [
       { min: 1600, max: 1500, cyclic: 1000 },

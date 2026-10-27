@@ -8,6 +8,11 @@ export interface SwashLimits {
   cyclic: number;
 }
 
+export function swashNeutralTrim(limits: SwashLimits): number {
+  validateSwashLimits(limits);
+  return Math.floor((limits.min + limits.max) / 2);
+}
+
 export interface SwashTarget {
   roll: number;
   pitch: number;

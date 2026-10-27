@@ -46,6 +46,23 @@ describe("formatMavResult", () => {
 });
 
 describe("typed wire contract", () => {
+  it("reads selected parameters in one batch operation with timeout and retries", async () => {
+    const records = [
+      { name: "SERVO9_MIN", value: 1000, type: mavEnum(MavParamType.INT16), index: 1, count: 2, after_cursor: "v1:7" },
+      { name: "RAWES_YAW_SLP", value: 0.5, type: mavEnum(MavParamType.REAL32), index: 2, count: 2, after_cursor: "v1:8" },
+    ];
+    const fetchMock = stubFetch({ parameters: records });
+    const result = await new LinkHubApi().getParameters(["SERVO9_MIN", "RAWES_YAW_SLP"], 6000, 1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/mavlink/parameters", expect.objectContaining({ method: "POST" }),
+    );
+    expect(requestBody(fetchMock)).toEqual({
+      names: ["SERVO9_MIN", "RAWES_YAW_SLP"], timeout_ms: 6000, retries: 1,
+    });
+    expect([...result.values()]).toEqual(records);
+  });
+
   it("reads filtered journal messages with generation protection", async () => {
     const fetchMock = stubFetch({ records: [], next_cursor: "v1:8" });
 
@@ -225,6 +242,19 @@ describe("typed wire contract", () => {
     await expect(api.listParameters()).resolves.toEqual(new Map([["TEST", record]]));
     await expect(api.setParameters([record])).resolves.toEqual(new Map([["TEST", record]]));
     expect(requestBody(fetchMock)).toMatchObject({ parameters: [record] });
+  });
+
+  it("forwards the abort signal and retry budget for a batch parameter write", async () => {
+    const record = { name: "SERVO1_TRIM", value: 1378, type: mavEnum(MavParamType.INT32) };
+    const fetchMock = stubFetch({ parameters: [record] });
+    const operation = new AbortController();
+    await expect(new LinkHubApi().setParameters([record], 15_000, 2, operation.signal))
+      .resolves.toEqual(new Map([[record.name, record]]));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/mavlink/parameters",
+      expect.objectContaining({ method: "PUT", signal: operation.signal }),
+    );
+    expect(requestBody(fetchMock)).toEqual({ parameters: [record], timeout_ms: 15_000, retries: 2 });
   });
 
   it("surfaces rejected lossy integer writes", async () => {
