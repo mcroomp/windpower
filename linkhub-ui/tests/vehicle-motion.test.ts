@@ -15,6 +15,28 @@ function pose(q: THREE.Quaternion): MessageRecord {
 }
 
 describe("VehicleMotion", () => {
+  it("uses explicitly labeled physics rotor RPM without inventing motor RPM", () => {
+    const motion = new VehicleMotion();
+    motion.accept(record("RPM", { rpm1: 2000 }), 0);
+    motion.update(2, 2000);
+    expect(motion.rotorRpm).toBeCloseTo(200);
+    motion.accept(record("NAMED_VALUE_FLOAT", { name: "SIM_RPM", value: 300 }), 2000);
+    motion.update(2, 4000);
+    expect(motion.rotorRpm).toBeCloseTo(300);
+    expect(motion.rpm).toBeCloseTo(2000);
+    for (const value of [-1, NaN, Infinity]) {
+      motion.accept(record("NAMED_VALUE_FLOAT", { name: "SIM_RPM", value }), 4000);
+    }
+    motion.accept({ ...record("NAMED_VALUE_FLOAT", { name: "SIM_RPM", value: 99 }), direction: "tx" }, 4000);
+    motion.accept(record("NAMED_VALUE_FLOAT", { name: "OTHER", value: 99 }), 4000);
+    motion.update(2, 6000);
+    expect(motion.rotorRpm).toBeCloseTo(300);
+    motion.reset();
+    motion.accept(record("RPM", { rpm1: 1000 }), 6000);
+    motion.update(2, 8000);
+    expect(motion.rotorRpm).toBeCloseTo(100);
+  });
+
   it("keeps the capture arrow hidden without a valid received target", () => {
     const motion = new VehicleMotion();
     expect(motion.targetVisible).toBe(false);
@@ -40,7 +62,7 @@ describe("VehicleMotion", () => {
     const origin = new THREE.Vector3();
     const direction = new THREE.Vector3();
     motion.targetArrowPose(origin, direction);
-    expect(origin.distanceTo(new THREE.Vector3(0, 5.6, -0.75))).toBeLessThan(1e-10);
+    expect(origin.distanceTo(new THREE.Vector3(0, 4.4, -0.75))).toBeLessThan(1e-10);
     expect(direction.distanceTo(new THREE.Vector3(0, 1, 0))).toBeLessThan(1e-10);
 
     motion.accept(pose(new THREE.Quaternion().setFromAxisAngle(
@@ -48,7 +70,7 @@ describe("VehicleMotion", () => {
     )), 2_000);
     motion.accept(record("LOCAL_POSITION_NED", { x: 2, y: 3, z: -4 }), 2_000);
     motion.targetArrowPose(origin, direction);
-    expect(origin.distanceTo(new THREE.Vector3(3.6, 4, -2.75))).toBeLessThan(1e-10);
+    expect(origin.distanceTo(new THREE.Vector3(2.4, 4, -2.75))).toBeLessThan(1e-10);
     expect(direction.distanceTo(new THREE.Vector3(0, 1, 0))).toBeLessThan(1e-10);
 
     motion.accept(record("ATTITUDE_TARGET", {
@@ -117,19 +139,33 @@ describe("VehicleMotion", () => {
       .toBeCloseTo(Math.PI / 2 * Math.exp(-1 / 0.08), 6);
   });
 
-  it("preserves the existing FRD/model rotation convention", () => {
+  it("puts the rotor above the bay and the tether downward at level attitude", () => {
+    const motion = new VehicleMotion();
+    motion.accept(pose(new THREE.Quaternion()), 0);
+    for (const [model, world] of [
+      [[0, 1, 0], [0, 1, 0]],
+      [[0, -1, 0], [0, -1, 0]],
+      [[1, 0, 0], [0, 0, -1]],
+    ] as const) {
+      expect(new THREE.Vector3(...model).applyQuaternion(motion.attitude)
+        .distanceTo(new THREE.Vector3(...world))).toBeLessThan(1e-10);
+    }
+  });
+
+  it("maps model forward, upper rotor axis and right into FRD before applying attitude", () => {
     const raw = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.4, -0.7, 1.2));
     const motion = new VehicleMotion();
     motion.accept(pose(raw), 0);
-    const expected = new THREE.Matrix4().set(
-      0, 1, 0, 0, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 0, 1,
-    ).multiply(new THREE.Matrix4().makeRotationFromQuaternion(raw)).multiply(
-      new THREE.Matrix4().set(
-        1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1,
-      ),
-    );
-    expect(motion.attitude.angleTo(new THREE.Quaternion().setFromRotationMatrix(expected)))
-      .toBeLessThan(1e-7);
+    for (const [model, body] of [
+      [[1, 0, 0], [1, 0, 0]],
+      [[0, 1, 0], [0, 0, -1]],
+      [[0, 0, 1], [0, 1, 0]],
+    ] as const) {
+      const ned = new THREE.Vector3(...body).applyQuaternion(raw);
+      const expected = new THREE.Vector3(ned.y, -ned.z, -ned.x);
+      expect(new THREE.Vector3(...model).applyQuaternion(motion.attitude).distanceTo(expected))
+        .toBeLessThan(1e-10);
+    }
   });
 
   it("uses the short quaternion arc across the yaw wrap", () => {

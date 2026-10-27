@@ -1,8 +1,13 @@
 import * as THREE from "three";
 import { buildAirframe } from "./airframe";
 import type { TelemetryStore } from "./telemetry";
-import { MOTOR_TO_ROTOR_GEAR_RATIO, VehicleMotion } from "./vehicle-motion";
+import { VehicleMotion } from "./vehicle-motion";
 import type { TargetDirectionError } from "./vehicle-motion";
+
+export interface VehicleSceneOptions {
+  followVehicle?: boolean;
+  groundHeight?: number;
+}
 
 export class VehicleScene {
   private readonly scene = new THREE.Scene();
@@ -32,6 +37,7 @@ export class VehicleScene {
   constructor(
     private readonly container: HTMLElement,
     telemetry: TelemetryStore,
+    private readonly options: VehicleSceneOptions = {},
   ) {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -49,9 +55,10 @@ export class VehicleScene {
       new THREE.MeshBasicMaterial({ color: 0x579b45, side: THREE.DoubleSide }),
     );
     ground.rotation.x = -Math.PI / 2;
+    ground.position.y = options.groundHeight ?? 0;
     this.scene.add(ground);
     const grid = new THREE.GridHelper(20, 20, 0x365e2c, 0x487f38);
-    grid.position.y = 0.01;
+    grid.position.y = ground.position.y + 0.01;
     this.scene.add(grid);
 
     const targetShaft = new THREE.Mesh(
@@ -89,6 +96,8 @@ export class VehicleScene {
       if (record) {
         this.motion.accept(record, performance.now());
       }
+      const rotor = telemetry.get("NAMED_VALUE_FLOAT", "rx", "SIM_RPM");
+      if (rotor) this.motion.accept(rotor, performance.now());
     }
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     this.animate();
@@ -169,13 +178,16 @@ export class VehicleScene {
     }
     const positionChanged = this.vehicle.position.distanceToSquared(this.motion.position) > 1e-10;
     if (positionChanged) {
+      if (this.options.followVehicle) {
+        this.camera.position.add(this.motion.position).sub(this.vehicle.position);
+      }
       this.vehicle.position.copy(this.motion.position);
       this.camera.lookAt(this.vehicle.position);
       changed = true;
     }
     this.spin = (
       this.spin
-      + this.motion.rpm * 2 * Math.PI / 60 * elapsed / MOTOR_TO_ROTOR_GEAR_RATIO
+      + this.motion.rotorRpm * 2 * Math.PI / 60 * elapsed
     )
       % (2 * Math.PI);
     if (this.airframe.rotor.rotation.y !== this.spin) {

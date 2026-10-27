@@ -1,16 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Vector3 } from "three";
 import { ApiError, LinkHubApi, LinkHubGenerationChanged } from "../src/api";
-import { CompassCalibration } from "../src/compass-cal";
 import { CommandRunner } from "../src/commands";
-import { browserConfigProvider, configTargets } from "../src/config";
-import { DemoBackend } from "../src/demo-backend";
-import { demoPose, ORBIT_PERIOD, ORBIT_RADIUS } from "../src/demo-flight";
-import { DIAG_ARRAY_NAME, diagValue } from "../src/diag-array";
-import { MavCmd, MavParamType, MavResult, MavType, PidTuningAxis } from "../src/generated/protocol";
-import { enumIs, isArmed, mavEnum } from "../src/mav";
-import { PassiveController, parseRunPassive } from "../src/passive";
-import { TELEMETRY_PROFILES } from "../src/telemetry-rates";
+import { browserConfigProvider } from "../src/config";
+import { DemoBackend, pumpingCycle } from "../src/demo-backend";
+import recording from "../src/demo/pumping-cycle.json";
+import { diagValue } from "../src/diag-array";
+import { MavCmd, MavParamType, MavType } from "../src/generated/protocol";
+import { enumIs, isArmed } from "../src/mav";
+import { PassiveController } from "../src/passive";
 import { TelemetryStore } from "../src/telemetry";
+import { TELEMETRY_PROFILES } from "../src/telemetry-rates";
 import { VehicleMotion } from "../src/vehicle-motion";
 import { WobbleModel } from "../src/wobble-model";
 import { WobbleRecorder } from "../src/wobble-recorder";
@@ -24,287 +24,208 @@ afterEach(() => {
 
 function fixture() {
   let time = 0;
-  const backend = new DemoBackend(configTargets(true), () => time);
+  const backend = new DemoBackend(() => time);
   const api = new LinkHubApi("", backend.fetch);
   return { backend, api, advance: (milliseconds: number) => { time += milliseconds; } };
 }
 
-describe("full UI offline backend", () => {
-  it("runs the real HTTP client without ever calling global fetch", async () => {
+describe("recorded SITL demo", () => {
+  it("points the rendered tether downward throughout the recorded pumping cycle", () => {
+    const motion = new VehicleMotion();
+    let now = 0;
+    for (const frame of pumpingCycle.records) {
+      if (frame.message !== "ATTITUDE_QUATERNION") continue;
+      now += 2000;
+      motion.accept({
+        message: frame.message, fields: frame.fields, direction: "rx",
+        system_id: 1, component_id: 1, cursor: "v1:1",
+        received_time: "", received_time_ns: 0,
+      }, now);
+      const tether = new Vector3(0, -1, 0).applyQuaternion(motion.attitude);
+      expect(tether.y).toBeLessThan(-0.4);
+    }
+  });
+
+  it("contains exactly one complete measured pumping cycle, with honest channel provenance", () => {
+    expect(recording.source.test).toBe("test_pumping_cycle_lua_sitl");
+    expect(recording.source.cycle).toBe(2);
+    expect(recording.source.startSimSeconds).toBeGreaterThan(recording.source.kinematicExit);
+    expect(pumpingCycle.duration).toBeCloseTo(49.4, 6);
+    expect(recording.phases.map((phase) => phase.name)).toEqual(["reel-out", "reel-in"]);
+    expect(recording.phases[1]?.time).toBeCloseTo(24.6, 6);
+    expect(pumpingCycle.records.length).toBeGreaterThan(3500);
+    for (const frame of pumpingCycle.records) {
+      expect(frame.time).toBeGreaterThanOrEqual(0);
+      expect(frame.time).toBeLessThan(pumpingCycle.duration);
+      expect(["ATTITUDE_TARGET", "PID_TUNING", "RPM"]).not.toContain(frame.message);
+      if (frame.message === "ATTITUDE_QUATERNION") {
+        const q = ["q1", "q2", "q3", "q4"].map((key) => Number(frame.fields[key]));
+        expect(Math.hypot(...q)).toBeCloseTo(1, 8);
+      }
+      if (frame.message === "DEBUG_FLOAT_ARRAY") {
+        expect(frame.fields.data).toHaveLength(18);
+      }
+    }
+  });
+
+  it("runs the production HTTP client and motion path without network access", async () => {
     const network = vi.fn(() => { throw new Error("Network access forbidden"); });
     vi.stubGlobal("fetch", network);
     const { api } = fixture();
-    expect((await api.serviceStatus()).service).toContain("offline demo");
+    expect((await api.serviceStatus()).service).toContain("recorded SITL");
     expect(isArmed(await api.status())).toBe(true);
     expect((await api.status()).custom_mode).toBe(20);
-    const messages = await api.readMessages("v1:0", 0, true);
-    const heartbeat = messages.records.find((record) => record.message === "HEARTBEAT");
+    expect((await api.getParameter("RAWES_MODE")).value).toBe(1);
+    expect(enumIs((await api.getParameter("RAWES_YAW_SLP")).type, MavParamType.REAL32)).toBe(true);
+    expect((await api.listParameters()).size).toBeGreaterThan(1400);
+    const batch = await api.readMessages("v1:0", 0, true);
+    const heartbeat = batch.records.find((record) => record.message === "HEARTBEAT");
     expect(enumIs(heartbeat?.fields.mavtype, MavType.HELICOPTER)).toBe(true);
-    expect(heartbeat?.fields.type).toBeUndefined();
     const motion = new VehicleMotion();
-    for (const record of messages.records) motion.accept(record, 0);
-    expect(motion.position.toArray()).toEqual([0, 4.5, -ORBIT_RADIUS]);
-    expect(motion.targetVisible).toBe(true);
+    for (const record of batch.records) motion.accept(record, 0);
+    motion.update(2, 2000);
+    const position = pumpingCycle.records.find((record) => record.message === "LOCAL_POSITION_NED")?.fields;
+    expect(motion.position.toArray()).toEqual([position?.y, -Number(position?.z), -Number(position?.x)]);
+    expect(motion.rotorRpm).toBeGreaterThan(240);
+    expect(motion.rpm).toBe(0);
+    expect(motion.targetVisible).toBe(false);
     expect(network).not.toHaveBeenCalled();
   });
 
-  it("generates a normalized circular flight with accurate NED velocities and quiet capture", () => {
-    for (let time = 0; time < 60; time += 0.2) {
-      const pose = demoPose(time);
-      expect(Math.hypot(pose.north, pose.east)).toBeCloseTo(ORBIT_RADIUS, 10);
-      expect(pose.attitude.length()).toBeCloseTo(1, 10);
-      const next = demoPose(time + 0.0001);
-      expect((next.north - pose.north) / 0.0001).toBeCloseTo(pose.vn, 4);
-      expect((next.east - pose.east) / 0.0001).toBeCloseTo(pose.ve, 4);
-      expect((next.down - pose.down) / 0.0001).toBeCloseTo(pose.vd, 4);
-    }
-    expect(demoPose(ORBIT_PERIOD / 4).east).toBeCloseTo(ORBIT_RADIUS);
-    expect(demoPose(5, 0, 0, 0, true)).toMatchObject({ rollspeed: 0, pitchspeed: 0, yawspeed: 0 });
-  });
-
-  it("reads, writes and lists typed parameters and rejects unknown ones", async () => {
-    const { api } = fixture();
-    const value = await api.setParameter("RAWES_YAW_SLP", 0.55, false, undefined, 3000, MavParamType.REAL32);
-    expect(value.value).toBe(0.55);
-    expect(enumIs(value.type, MavParamType.REAL32)).toBe(true);
-    expect((await api.getParameter("RAWES_YAW_SLP")).value).toBe(0.55);
-    expect((await api.listParameters()).size).toBeGreaterThan(100);
-    expect((await api.setParameters([value])).get(value.name)).toEqual(value);
-    await expect(api.getParameter("NOT_A_PARAMETER")).rejects.toBeInstanceOf(ApiError);
-    await expect(api.setParameter("NOT_A_PARAMETER", 1)).rejects.toThrow("Unknown demo parameter");
-  });
-
-  it("honors telemetry profiles, collapse, filtering, limits, and lag without losing cursor progress", async () => {
-    const { api, advance } = fixture();
-    await api.setMessageRates(TELEMETRY_PROFILES.radio.rates);
+  it("loops the same samples with monotonic journal and boot clocks", async () => {
+    const { api, backend, advance } = fixture();
+    const initial = await api.readMessages("v1:0", 0, false);
+    expect(backend.playback.phase).toBe("reel-out");
+    advance(25_000);
+    await api.status();
+    expect(backend.playback.phase).toBe("reel-in");
     const before = await api.currentCursor();
-    advance(1000);
-    const all = await api.queryMessages({ after: before, messages: ["ATTITUDE_QUATERNION"], direction: "rx" });
-    expect(all.records).toHaveLength(10);
-    const collapsed = await api.queryMessages({ after: before, messages: ["ATTITUDE_QUATERNION"], collapse: true });
-    expect(collapsed.records).toHaveLength(1);
-    const first = await api.queryMessages({ after: before, messages: ["ATTITUDE_QUATERNION"], limit: 3 });
-    const remaining = await api.queryMessages({ after: first.next_cursor, messages: ["ATTITUDE_QUATERNION"] });
-    expect(first.records.length + remaining.records.length).toBe(10);
-    const fresh = await api.queryMessages({ after: before, messages: ["ATTITUDE_QUATERNION"], maxLagMs: 100 });
-    expect(fresh.records).toHaveLength(2);
-    await expect(api.setMessageRates({ NOT_A_MESSAGE: 1 })).rejects.toThrow("does not synthesize");
+    advance(pumpingCycle.duration * 1000 - 25_000 + 1);
+    const batch = await api.queryMessages({ after: before, limit: 10_000 });
+    const replayStart = batch.records.filter((record) =>
+      Math.abs(record.received_time_ns / 1e9 - pumpingCycle.duration) < 1e-6);
+    expect(backend.playback.phase).toBe("reel-out");
+    expect(replayStart.map((record) => [record.message, record.fields.x, record.fields.q1]))
+      .toEqual(initial.records.map((record) => [record.message, record.fields.x, record.fields.q1]));
+    let previous = 0;
+    for (const record of batch.records) {
+      expect(record.received_time_ns).toBeGreaterThanOrEqual(previous);
+      expect(record.sim_clock?.time_boot_ms).toBe(Math.round(record.received_time_ns / 1e6));
+      if ("time_boot_ms" in record.fields) expect(record.fields.time_boot_ms).toBe(record.sim_clock?.time_boot_ms);
+      previous = record.received_time_ns;
+    }
+    expect((await api.status()).generation).toBe("sitl-replay:1");
   });
 
-  it("journal messages drive real yaw and wobble analysis with finite samples", async () => {
+  it("supports local profiles, journal filters, collapse and finite pagination", async () => {
     const { api, advance } = fixture();
-    const yaw = new YawModel();
-    const wobble = new WobbleModel();
-    let cursor = 0;
-    for (let index = 0; index < 80; index += 1) {
-      advance(100);
-      const batch = await api.queryMessages({ after: `v1:${cursor}`, limit: 5000 });
-      yaw.ingest(batch.records);
-      wobble.ingest(batch.records);
-      cursor = Number(batch.next_cursor.slice(3));
-    }
-    expect(yaw.att.length).toBeGreaterThan(1000);
-    expect(yaw.pid.length).toBeGreaterThan(1000);
-    expect(yaw.rpm.length).toBeGreaterThan(100);
-    expect(yaw.diag.length).toBeGreaterThan(100);
-    expect(yaw.att.v("gyro").every(Number.isFinite)).toBe(true);
-    expect(yaw.pid.v("cmd").every(Number.isFinite)).toBe(true);
-    expect(wobble.spectrum("roll")).not.toBeNull();
+    await api.setMessageRates({ ...TELEMETRY_PROFILES.radio.rates, ATTITUDE_QUATERNION: 2 });
+    await api.setParameter("RAWES_TEL_HZ", 1);
+    const before = await api.currentCursor();
+    advance(4000);
+    const options = { after: before, messages: ["ATTITUDE_QUATERNION"] };
+    const all = await api.queryMessages(options);
+    expect(all.records.length).toBeGreaterThanOrEqual(6);
+    expect(all.records.length).toBeLessThanOrEqual(8);
+    expect((await api.queryMessages({ ...options, collapse: true })).records).toHaveLength(1);
+    const first = await api.queryMessages({ ...options, limit: 2 });
+    const rest = await api.queryMessages({ ...options, after: first.next_cursor });
+    expect(first.records.length + rest.records.length).toBe(all.records.length);
+    expect((await api.queryMessages({ ...options, maxLagMs: 1000 })).records.length).toBeLessThan(all.records.length);
+    expect((await api.queryMessages({ after: before, direction: "tx" })).records).toEqual([]);
+    await expect(api.queryMessages({ after: before, expectedGeneration: "wrong" }))
+      .rejects.toBeInstanceOf(LinkHubGenerationChanged);
   });
 
-  it("preserves events and command transactions when collapsing telemetry", async () => {
-    const { api } = fixture();
-    const initial = await api.readMessages("v1:0", 0, true);
-    expect(initial.records.filter((record) => record.message === "STATUSTEXT")).toHaveLength(2);
-    const after = await api.currentCursor();
-    await api.command(MavCmd.DO_SET_MODE, [1, 1], { targetSystem: 1, targetComponent: 1 });
-    await api.command(MavCmd.DO_SET_MODE, [1, 20]);
-    const batch = await api.readMessages(after, 0, true);
-    expect(batch.records.filter((record) => record.message === "COMMAND_LONG")).toHaveLength(2);
-    expect(batch.records.filter((record) => record.message === "COMMAND_ACK")).toHaveLength(2);
-    const command = batch.records.find((record) => record.message === "COMMAND_LONG");
-    expect(command?.fields).toMatchObject({
-      target_system: 1, target_component: 1, confirmation: 0,
-      param1: 1, param2: 1, param3: 0, param4: 0, param5: 0, param6: 0, param7: 0,
-    });
-    expect(command?.fields.params).toBeUndefined();
-    const heartbeats = batch.records.filter((record) => record.message === "HEARTBEAT");
-    expect(heartbeats).toHaveLength(1);
-    expect(heartbeats[0]?.fields.custom_mode).toBe((await api.status()).custom_mode);
-  });
-
-  it("collapses state by the production per-message keys rather than just its name", async () => {
-    const { api } = fixture();
-    const after = await api.currentCursor();
-    for (const [axis, desired] of [
-      [PidTuningAxis.ROLL, 1], [PidTuningAxis.YAW, 2], [PidTuningAxis.ROLL, 3],
-    ] as const) {
-      await api.sendRawMessage("PID_TUNING", {
-        axis: mavEnum(axis), desired, achieved: 0, FF: 0, P: 0, I: 0, D: 0,
-      });
-    }
-    for (const id of [1, 2]) {
-      await api.sendRawMessage("DEBUG_FLOAT_ARRAY", { array_id: id, name: "same-name", time_usec: 0, data: [id] });
-    }
-    const batch = await api.queryMessages({ after, collapse: true, direction: "tx" });
-    expect(batch.records.filter((record) => record.message === "PID_TUNING").map((record) => record.fields.desired)).toEqual([2, 3]);
-    expect(batch.records.filter((record) => record.message === "DEBUG_FLOAT_ARRAY")).toHaveLength(2);
-  });
-
-  it("feeds the unmodified production chart readers over the injected HTTP transport", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
-    const network = vi.fn(() => { throw new Error("Network access forbidden"); });
-    vi.stubGlobal("fetch", network);
-    const backend = new DemoBackend(configTargets(true));
-    const api = new LinkHubApi("", backend.fetch);
-    const yaw = new YawModel();
-    const wobble = new WobbleModel();
-    const errors: string[] = [];
-    const yawRecorder = new YawRecorder(api, yaw, (error) => errors.push(error.message));
-    const wobbleRecorder = new WobbleRecorder(api, wobble, (error) => errors.push(error.message));
-    try {
-      yawRecorder.start();
-      wobbleRecorder.start();
-      await vi.advanceTimersByTimeAsync(2000);
-      expect(yaw.att.length).toBeGreaterThan(300);
-      expect(yaw.pid.length).toBeGreaterThan(200);
-      expect(wobble.spectrum("roll")).not.toBeNull();
-      expect(errors).toEqual([]);
-      expect(network).not.toHaveBeenCalled();
-    } finally {
-      yawRecorder.stop();
-      wobbleRecorder.stop();
-    }
-  });
-
-  it("changes fake attitude and thrust through production named-value messages", async () => {
+  it("preserves recorded events when collapsing and exposes recorded diagnostics", async () => {
     const { api, advance } = fixture();
-    await api.sendRawMessage("NAMED_VALUE_FLOAT", { name: "RAWES_ROFF", value: 0.2 });
-    await api.sendRawMessage("NAMED_VALUE_FLOAT", { name: "RAWES_THR", value: 0.5 });
-    advance(100);
-    const batch = await api.readMessages("v1:0", 0, true);
-    const target = batch.records.find((record) => record.message === "DEBUG_FLOAT_ARRAY");
-    expect(diagValue(target, "OL_RSP")).toBeGreaterThan(0.29);
-    expect(diagValue(target, "OL_COL")).toBe(0.5);
-    expect(target?.fields.name).toBe(DIAG_ARRAY_NAME);
-    expect(batch.records.some((record) => record.direction === "tx")).toBe(true);
+    advance(10_000);
+    const all = await api.queryMessages({ after: "v1:0", limit: 5000 });
+    const collapsed = await api.queryMessages({ after: "v1:0", collapse: true });
+    expect(collapsed.records.filter((record) => record.message === "STATUSTEXT"))
+      .toEqual(all.records.filter((record) => record.message === "STATUSTEXT"));
+    expect(diagValue(collapsed.records.find((record) => record.message === "DEBUG_FLOAT_ARRAY"), "OL_TEN"))
+      .toBeGreaterThan(0);
   });
 
-  it("runs real terminal status and config check/apply without missing parameters", async () => {
+  it("rejects every vehicle-changing boundary without altering the recording", async () => {
+    const { api } = fixture();
+    const parameter = await api.getParameter("H_COL_MIN");
+    const requests = [
+      api.setParameter("H_COL_MIN", 1200),
+      api.setParameters([{ ...parameter, value: 1200 }]),
+      api.command(MavCmd.COMPONENT_ARM_DISARM, [0]),
+      api.command(MavCmd.PREFLIGHT_REBOOT_SHUTDOWN, [1]),
+      api.command(MavCmd.DO_START_MAG_CAL, [1]),
+      api.sendRawMessage("NAMED_VALUE_FLOAT", { name: "RAWES_THR", value: 0.5 }),
+    ];
+    await Promise.all(requests.map((request) =>
+      expect(request).rejects.toMatchObject({ status: 403, message: expect.stringContaining("read-only") })));
+    expect(await api.getParameter("H_COL_MIN")).toEqual(parameter);
+    expect(isArmed(await api.status())).toBe(true);
+    expect((await api.status()).transmitted_messages).toBe(0);
+    await expect(api.getParameter("MISSING")).rejects.toBeInstanceOf(ApiError);
+    await expect(api.setMessageRates({ ATTITUDE: -1 })).rejects.toThrow("0..300");
+  });
+
+  it("keeps production terminal inspection and passive reconciliation working", async () => {
     const { api } = fixture();
     const telemetry = new TelemetryStore(api);
     const messages: string[] = [];
-    const errors: string[] = [];
-    const write = (message: string, kind?: string) => {
-      messages.push(message);
-      if (kind === "error") errors.push(message);
-    };
+    const write = (message: string) => messages.push(message);
     const passive = new PassiveController(api, telemetry, write, () => {});
     const runner = new CommandRunner(api, telemetry, passive, write, browserConfigProvider);
+    await passive.reconcile();
+    expect(passive.phase).toBe("idle");
     await runner.execute("status");
-    expect(errors).toEqual([]);
-    await runner.execute("config check --all");
-    expect(messages.at(-1)).toContain("0 differ, 0 missing");
-    await api.setArmed(false);
-    await api.setParameter("H_COL_MIN", 1200);
-    await runner.execute("config apply");
-    expect((await api.getParameter("H_COL_MIN")).value).toBe(configTargets(false).get("H_COL_MIN"));
-    expect(errors).toEqual([]);
+    expect(messages.join("\n")).toContain("GUIDED_NOGPS");
+    await runner.execute("config check");
+    expect(messages.join("\n")).toContain("differ");
+    await expect(runner.execute("param set H_COL_MIN 1200")).rejects.toThrow("read-only");
   });
 
-  it("confirms mode and arm changes, gates reboot, and protects journal generations", async () => {
-    const { api } = fixture();
-    expect(enumIs((await api.command(MavCmd.PREFLIGHT_REBOOT_SHUTDOWN, [1])).result, MavResult.DENIED)).toBe(true);
-    await api.setArmedAndWait(false);
-    await api.setModeAndWait(1);
-    const status = await api.status();
-    expect(isArmed(status)).toBe(false);
-    await api.command(MavCmd.PREFLIGHT_REBOOT_SHUTDOWN, [1]);
-    expect((await api.status()).generation).not.toBe(status.generation);
-    await expect(api.queryMessages({ after: status.cursor, expectedGeneration: status.generation })).rejects.toBeInstanceOf(LinkHubGenerationChanged);
-    expect(enumIs((await api.command(MavCmd.NAV_TAKEOFF)).result, MavResult.UNSUPPORTED)).toBe(true);
+  it("drives the real telemetry store and chart readers across a loop", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const api = new LinkHubApi("", new DemoBackend().fetch);
+    const telemetry = new TelemetryStore(api);
+    const yaw = new YawModel();
+    const wobble = new WobbleModel();
+    const errors: string[] = [];
+    telemetry.onWarning((message) => errors.push(message));
+    const yawReader = new YawRecorder(api, yaw, (error) => errors.push(error.message));
+    const wobbleReader = new WobbleRecorder(api, wobble, (error) => errors.push(error.message));
+    try {
+      await telemetry.start();
+      await telemetry.setProfile("radio");
+      yawReader.start();
+      wobbleReader.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(errors).toEqual([]);
+      expect(yaw.att.length).toBeGreaterThan(400);
+      expect(yaw.pid.length).toBe(0);
+      expect(yaw.rpm.length).toBe(0);
+      expect(yaw.diag.length).toBeGreaterThan(80);
+      expect(yaw.att.v("gyro").every(Number.isFinite)).toBe(true);
+      expect(yaw.att.t.at(-1)).toBeGreaterThan(59);
+      expect(wobble.spectrum("roll")).not.toBeNull();
+      expect(telemetry.get("NAMED_VALUE_FLOAT", "rx", "SIM_RPM")).toBeDefined();
+      expect(telemetry.status?.connected).toBe(true);
+    } finally {
+      telemetry.stop();
+      yawReader.stop();
+      wobbleReader.stop();
+    }
   });
 
-  it("aborts long-polls instead of leaving a retry loop running", async () => {
-    const { api } = fixture();
+  it("bounds catch-up after suspension and cancels pending reads", async () => {
+    const { api, advance } = fixture();
+    advance(86_400_000);
+    const batch = await api.queryMessages({ after: "v1:0", limit: 60_000 });
+    expect(batch.records.length).toBeLessThan(8000);
+    expect(batch.records.at(-1)?.sim_clock?.time_boot_ms).toBeGreaterThan(86_399_000);
     const controller = new AbortController();
     const pending = api.readMessages(await api.currentCursor(), 1000, false, controller.signal);
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-  });
-
-  it("runs the actual passive controller through stop, start, adjustments and safe-off", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
-    const backend = new DemoBackend(configTargets(true));
-    const api = new LinkHubApi("", backend.fetch);
-    const telemetry = new TelemetryStore(api);
-    await telemetry.start();
-    const errors: string[] = [];
-    const passive = new PassiveController(api, telemetry, (text, kind) => {
-      if (kind === "error") errors.push(text);
-    }, () => {});
-    try {
-      await passive.reconcile();
-      expect(passive.phase).toBe("running");
-      await passive.stop();
-      let completed = false;
-      const start = passive.start(parseRunPassive([])).then(
-        () => { completed = true; },
-        (error: unknown) => { completed = true; errors.push(String(error)); },
-      );
-      for (let step = 0; step < 120 && !completed; step += 1) {
-        await vi.advanceTimersByTimeAsync(100);
-      }
-      expect(errors).toEqual([]);
-      expect(passive.phase).toBe("running");
-      await start;
-      await passive.adjust("roll", 1);
-      await passive.adjust("collective", 1);
-      await passive.recaptureTarget();
-      await passive.stop();
-      expect(passive.phase).toBe("idle");
-      expect(isArmed(await api.status())).toBe(false);
-      expect((await api.getParameter("SERVO9_FUNCTION")).value).toBe(36);
-      expect((await api.getParameter("RAWES_MODE")).value).toBe(0);
-      expect(errors).toEqual([]);
-    } finally {
-      await passive.stop();
-      telemetry.stop();
-    }
-  });
-
-  it("streams a complete compass calibration through the real controller", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
-    const backend = new DemoBackend(configTargets(true));
-    const api = new LinkHubApi("", backend.fetch);
-    await api.setArmed(false);
-    const telemetry = new TelemetryStore(api);
-    await telemetry.start();
-    const messages: string[] = [];
-    const compass = new CompassCalibration(api, telemetry, (message) => messages.push(message));
-    try {
-      let completed = false;
-      let failure: unknown;
-      const done = compass.start({ mask: 1, retryOnFailure: false, autosave: false, delaySeconds: 0 }).then(
-        () => { completed = true; },
-        (error: unknown) => { completed = true; failure = error; },
-      );
-      for (let step = 0; step < 100 && !completed; step += 1) {
-        await vi.advanceTimersByTimeAsync(100);
-      }
-      expect(failure).toBeUndefined();
-      expect(completed).toBe(true);
-      await done;
-      expect(messages.some((message) => message.includes("SUCCESS"))).toBe(true);
-      await compass.accept();
-      expect(messages.at(-1)).toContain("accepted and saved");
-      const next = compass.start({ mask: 1, retryOnFailure: false, autosave: false, delaySeconds: 0 });
-      await vi.advanceTimersByTimeAsync(100);
-      await compass.cancel();
-      await next;
-      expect(compass.active).toBe(false);
-    } finally {
-      telemetry.stop();
-    }
   });
 });

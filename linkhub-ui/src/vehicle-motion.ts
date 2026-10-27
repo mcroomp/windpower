@@ -12,8 +12,8 @@ const WORLD_FROM_NED = new THREE.Quaternion().setFromRotationMatrix(
 const BODY_FROM_MODEL = new THREE.Quaternion().setFromRotationMatrix(
   new THREE.Matrix4().set(
     1, 0, 0, 0,
-    0, 0, -1, 0,
-    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, -1, 0, 0,
     0, 0, 0, 1,
   ),
 );
@@ -58,6 +58,7 @@ export class VehicleMotion {
   readonly target = new THREE.Quaternion();
   targetVisible = false;
   rpm = 0;
+  rotorRpm = 0;
 
   private readonly desiredPosition = new THREE.Vector3();
   private readonly desiredAttitude = new THREE.Quaternion();
@@ -70,6 +71,7 @@ export class VehicleMotion {
   private attitudeTime = -Infinity;
   private targetTime = -Infinity;
   private desiredRpm = 0;
+  private physicsRotorRpm: number | null = null;
 
   reset(): void {
     this.hasPosition = false;
@@ -77,11 +79,13 @@ export class VehicleMotion {
     this.targetVisible = false;
     this.desiredRpm = 0;
     this.rpm = 0;
+    this.rotorRpm = 0;
+    this.physicsRotorRpm = null;
   }
 
   targetArrowPose(origin: THREE.Vector3, direction: THREE.Vector3): void {
     origin.set(0.75, -0.6, 0).applyQuaternion(this.attitude).add(this.position);
-    // Model -Y maps to FRD -Z, the upper rotor-axis direction.
+    // Model +Y maps to FRD -Z, the upper rotor-axis direction.
     direction.set(0, 0, -1).applyQuaternion(this.target);
   }
 
@@ -147,6 +151,13 @@ export class VehicleMotion {
         }
         break;
       }
+      case "NAMED_VALUE_FLOAT": {
+        const rpm = numberField(record, "value");
+        if (record.fields.name === "SIM_RPM" && rpm !== null && rpm >= 0) {
+          this.physicsRotorRpm = rpm;
+        }
+        break;
+      }
     }
   }
 
@@ -164,6 +175,12 @@ export class VehicleMotion {
     this.rpm += (this.desiredRpm - this.rpm) * blend;
     if (this.rpm < 0.01) {
       this.rpm = 0;
+    }
+    if (this.physicsRotorRpm === null) {
+      this.rotorRpm = this.rpm / MOTOR_TO_ROTOR_GEAR_RATIO;
+    } else {
+      this.rotorRpm += (this.physicsRotorRpm - this.rotorRpm) * blend;
+      if (this.rotorRpm < 0.01) this.rotorRpm = 0;
     }
   }
 }
