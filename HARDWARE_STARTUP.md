@@ -1,6 +1,6 @@
 # Hardware Startup Investigation
 
-Last updated: 2026-10-22
+Last updated: 2026-10-27
 
 This file is a chronological hardware-session evidence log for startup-related
 swash, attitude, and anti-rotation-motor observations. It is not the owner for
@@ -72,6 +72,94 @@ These remain current and safety-relevant:
 Everything below is retained as historical evidence, not as current procedure.
 These observations were not re-proven from code in this audit, but they remain
 relevant to understanding why the current procedure exists.
+
+### 2026-10-27 native-USB passive timeout investigation
+
+- Initial no-argument calibration could not start because the release LinkHub
+  binary was older than source. After rebuilding, no-argument discovery selected
+  COM5 at 115200 baud. COM5/COM6 were positively identified as native Pixhawk
+  USB, `VID:PID=3162:0053`, serial `160031001751343131363538`.
+- Diagnostic journal run `a128e395-124c-4cc7-a9e7-1230c9335342` lives under
+  `simulation/logs/linkhub/`. All tests used LinkHub's JSON HTTP API; the
+  production Node CLI supplied passive orchestration rather than a second
+  MAVLink connection.
+- Fifty sequential passive-startup parameter reads passed in 67-176 ms.
+  A further 100 reads across four concurrent callers passed in 141-478 ms,
+  alongside 20 acknowledged `REQUEST_MESSAGE(AUTOPILOT_VERSION)` commands
+  in 37-95 ms. The service reported one connection attempt, one clock epoch,
+  no reconnect failures, and zero dropped frames.
+- Ordinary passive startup was rejected first by `Hardware safety switch`,
+  then by `Leaning`. These were explicit negative acknowledgements, not
+  transport timeouts. With the operator's secured-hardware, disconnected-drive
+  confirmation and separate force-arm authorization, one five-second
+  `run passive --force` completed runup, `ENTER_GUIDED`, quiet qualification,
+  `ENTER_PASSIVE`, hold, and cleanup. The hardware safety switch was released
+  temporarily with the acknowledged `DO_SET_SAFETY_SWITCH_STATE` command and
+  restored afterward; `BRD_SAFETY_DEFLT=1` was not changed. No Lua upload or
+  reboot occurred.
+- A complete 1078-parameter listing showed `ARMING_CHECK` absent and
+  `ARMING_SKIPCHK` present. Reading the absent name deterministically timed
+  out despite retries. This name was an investigation probe, not an observed
+  request from the current passive startup.
+- A controlled read-only contention test, sequence range
+  `(411891, 417275]`, demonstrated collateral timeouts: an absent-name read
+  with a five-second deadline occupied the protocol's shared parameter lock;
+  a concurrent `RAWES_MODE` read with a three-second deadline returned
+  `operation_timeout` without transmitting its own MAVLink request. After
+  the blocker finished, fresh `RAWES_MODE` and `ARMING_SKIPCHK` reads
+  succeeded in 116 ms and 98 ms. The journal contains five absent-name
+  requests, followed only then by the successful reads. This proves a local
+  queue-timeout mechanism, not the cause of the originally reported
+  intermittent passive failure. Existing lock-deadline behavior was unchanged.
+- Canonical cleanup and shared `verify_safe_off()` passed after every passive
+  attempt. Final state was disarmed ACRO, mode 0, flybar 1, manual swash 0,
+  output-9 function 36, yaw trim 0, and output 9 off; hardware safety was
+  restored with an accepted acknowledgement.
+- Next diagnostic step: capture the exact failing JSON request and concurrent
+  parameter operations during an actual intermittent passive failure. Do not
+  infer USB loss from the generic HTTP `operation_timeout`, or increase
+  deadlines without identifying whether time was spent queued or awaiting a
+  vehicle response.
+
+#### Post-fix validation
+
+- Removed the protocol client's global parameter transaction lock. Reads,
+  writes, batches, and full listings can overlap without a protocol-imposed
+  transaction order. Replies remain correlated by target and parameter name;
+  writes additionally require the requested numeric value, while preserving
+  ArduPilot's native reply type. Stale same-name values no longer falsely
+  confirm writes. Retry intervals and operation deadlines were not increased.
+  The current contract is owned by [design/linkhub.md](design/linkhub.md).
+- The new unrelated-parameter regression failed on the original code and
+  passed after the change. All 155 Rust workspace tests passed, including
+  coverage of missing single/batch reads and writes, stalled listings,
+  overlapping same-name reads, out-of-order same-name write replies, stale
+  values, native type preservation, and unchanged deadlines. The release
+  binary was rebuilt before hardware validation.
+- Post-fix journal run `bc2f2b65-7bbc-4f51-836f-103f5051604b` is under
+  `simulation/logs/linkhub/`. Five repetitions of the original contention
+  reproducer all passed: `RAWES_MODE` succeeded in 32-117 ms while the absent
+  name remained pending for its original five-second timeout. In the first
+  repetition, sequence range `(30505, 35500]`, the healthy request was sent
+  208 ms after the absent-name request and answered at 254 ms, before the
+  absent-name retries at one-second intervals.
+- A further 100 parameter reads across four concurrent callers all passed
+  while another absent-name read was active: 71-100 ms, median 92 ms.
+- After fresh operator confirmation that the mechanism remained secured with
+  hazardous drive power disconnected, one additional five-second forced
+  passive run completed runup, GUIDED entry, quiet qualification, passive
+  capture, hold, and cleanup while six sequential absent-name probes were
+  deliberately active. Only those six expected absent-name probes timed out;
+  the production passive controller and its cleanup completed successfully.
+- Post-fix service status still reported one connection attempt, one clock
+  epoch, zero dropped frames, and no link error. Canonical safe-off was
+  verified and the temporary safety release was restored with an accepted
+  acknowledgement. `BRD_SAFETY_DEFLT` remained 1; no reboot or Lua upload was
+  performed.
+- This fixes the demonstrated collateral timeout and passes a passive retest
+  under contention. It does not prove that every previously reported random
+  timeout had this cause; retain the exact request and journal evidence if
+  another intermittent failure occurs.
 
 ### 2026-10-22 disarmed cyclic neutral-pulse diagnosis
 

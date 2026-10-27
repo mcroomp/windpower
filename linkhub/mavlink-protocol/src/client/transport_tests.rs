@@ -334,26 +334,23 @@ async fn transport_error_retains_concrete_type_and_display() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cloned_clients_share_command_and_parameter_locks() {
+async fn cloned_clients_share_command_locks() {
     let transport = MockTransport::new(|_, _| Response::Messages(vec![]));
     let client = Arc::new(ProtocolClient::new(transport.clone(), 0));
     let clone: Arc<dyn Protocol> = client.clone();
     let command_guard = client.command_lock.lock().await;
-    let parameter_guard = client.parameter_lock.lock().await;
-    let (command, parameter) = tokio::join!(
-        clone.command(
+    let command = clone
+        .command(
             MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
             &[],
             None,
             None,
-            Duration::from_secs(1)
-        ),
-        clone.get_parameter("TEST", Duration::from_secs(1)),
-    );
+            Duration::from_secs(1),
+        )
+        .await;
     assert!(matches!(command, Err(OperationError::Timeout)));
-    assert!(matches!(parameter, Err(OperationError::Timeout)));
     assert!(transport.requests().is_empty());
-    drop((command_guard, parameter_guard));
+    drop(command_guard);
 }
 
 #[tokio::test(start_paused = true)]
@@ -841,6 +838,266 @@ fn batch_parameter_reply(name: &str) -> MavMessage {
         param_count: 2,
         param_index: 0,
     })
+}
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_parameter_does_not_block_unrelated_transactions() {
+    for blocker in 0..5 {
+        let transport = MockTransport::new(|message, _| {
+            let name = match message {
+                MavMessage::PARAM_REQUEST_READ(request) => request.param_id.to_str().unwrap(),
+                MavMessage::PARAM_SET(request) => request.param_id.to_str().unwrap(),
+                MavMessage::PARAM_REQUEST_LIST(_) => return Response::Messages(vec![]),
+                _ => panic!("parameter request"),
+            };
+            Response::Messages(if name == "READY" {
+                vec![batch_parameter_reply(name)]
+            } else {
+                vec![]
+            })
+        });
+        let client = new_protocol(transport, 0);
+        let missing = tokio::spawn({
+            let client = client.clone();
+            async move {
+                let timeout = Duration::from_secs(5);
+                match blocker {
+                    0 => client.get_parameter("MISSING", timeout).await.map(|_| ()),
+                    1 => client
+                        .get_parameters(&["MISSING".into()], Duration::from_secs(5), 2)
+                        .await
+                        .map(|_| ()),
+                    2 => client
+                        .set_parameter("MISSING", ParameterValue::Int16(12), timeout)
+                        .await
+                        .map(|_| ()),
+                    3 => client
+                        .set_parameters(
+                            &[ParameterSetting {
+                                name: "MISSING".into(),
+                                value: ParameterValue::Int16(12),
+                            }],
+                            timeout,
+                            2,
+                        )
+                        .await
+                        .map(|_| ()),
+                    _ => client.list_parameters(timeout).await.map(|_| ()),
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        let started = time::Instant::now();
+        assert_eq!(
+            client
+                .get_parameter("READY", Duration::from_secs(3))
+                .await
+                .expect("unrelated read must not wait for MISSING")
+                .name,
+            "READY"
+        );
+        tokio::task::yield_now().await;
+        client
+            .set_parameter("READY", ParameterValue::Int16(12), Duration::from_secs(3))
+            .await
+            .expect("unrelated write must not wait for MISSING");
+        tokio::task::yield_now().await;
+        client
+            .get_parameters(&["READY".into()], Duration::from_secs(3), 0)
+            .await
+            .expect("unrelated batch read must not wait for MISSING");
+        tokio::task::yield_now().await;
+        client
+            .set_parameters(
+                &[ParameterSetting {
+                    name: "READY".into(),
+                    value: ParameterValue::Int16(12),
+                }],
+                Duration::from_secs(3),
+                0,
+            )
+            .await
+            .expect("unrelated batch write must not wait for MISSING");
+        tokio::task::yield_now().await;
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(matches!(
+            missing.await.unwrap(),
+            Err(OperationError::Timeout)
+        ));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn same_parameter_reads_can_overlap() {
+    let transport = MockTransport::new(|_, index| {
+        Response::Messages(if index == 0 {
+            vec![]
+        } else {
+            vec![batch_parameter_reply("TEST")]
+        })
+    });
+    let client = new_protocol(transport.clone(), 0);
+    let (first, second) = tokio::join!(
+        client.get_parameter("TEST", Duration::from_millis(500)),
+        client.get_parameter(" test ", Duration::from_millis(500)),
+    );
+    assert_eq!(first.unwrap().value, second.unwrap().value);
+    assert_eq!(transport.requests().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_same_parameter_writes_match_values_not_reply_order() {
+    let transport = MockTransport::new(|message, index| {
+        let MavMessage::PARAM_SET(request) = message else {
+            panic!("parameter write")
+        };
+        Response::Messages(if index == 0 {
+            vec![]
+        } else {
+            vec![
+                MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                    param_id: request.param_id,
+                    param_value: request.param_value,
+                    param_type: request.param_type,
+                    ..Default::default()
+                }),
+                MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                    param_id: request.param_id,
+                    param_value: 1.0,
+                    param_type: request.param_type,
+                    ..Default::default()
+                }),
+            ]
+        })
+    });
+    let client = new_protocol(transport.clone(), 0);
+    let settings = [ParameterSetting {
+        name: "TEST".into(),
+        value: ParameterValue::Real32(1.0),
+    }];
+    let (first, second) = tokio::join!(
+        client.set_parameters(&settings, Duration::from_millis(500), 0),
+        client.set_parameter(
+            " test ",
+            ParameterValue::Real32(2.0),
+            Duration::from_millis(500)
+        ),
+    );
+    assert_eq!(first.unwrap()[0].value, ParameterValue::Real32(1.0));
+    assert_eq!(second.unwrap().value, ParameterValue::Real32(2.0));
+    assert_eq!(transport.requests().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn parameter_writes_ignore_stale_same_name_values() {
+    for batch in [false, true] {
+        let transport = MockTransport::new(|message, _| {
+            let MavMessage::PARAM_SET(request) = message else {
+                panic!("parameter write")
+            };
+            Response::Messages(vec![
+                batch_parameter_reply("TEST"),
+                MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                    param_id: request.param_id,
+                    param_value: request.param_value,
+                    param_type: request.param_type,
+                    ..Default::default()
+                }),
+            ])
+        });
+        let client = new_protocol(transport, 0);
+        let timeout = Duration::from_secs(1);
+        let value = ParameterValue::Int16(15);
+        let result = if batch {
+            client
+                .set_parameters(
+                    &[ParameterSetting {
+                        name: "TEST".into(),
+                        value,
+                    }],
+                    timeout,
+                    0,
+                )
+                .await
+                .unwrap()
+                .remove(0)
+        } else {
+            client.set_parameter("TEST", value, timeout).await.unwrap()
+        };
+        assert_eq!(result.value, value);
+        assert_eq!(result.after_cursor, "v1:41");
+    }
+}
+
+#[tokio::test]
+async fn parameter_writes_accept_the_vehicles_native_type_without_losing_it() {
+    let transport = MockTransport::new(|_, _| {
+        Response::Messages(vec![MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+            param_id: CharArray::from("TEST"),
+            param_value: 0.0,
+            param_type: MavParamType::MAV_PARAM_TYPE_INT8,
+            ..Default::default()
+        })])
+    });
+    let client = new_protocol(transport, 0);
+    let timeout = Duration::from_secs(1);
+    let value = ParameterValue::Int32(0);
+    assert_eq!(
+        client
+            .set_parameter("TEST", value, timeout)
+            .await
+            .unwrap()
+            .value,
+        ParameterValue::Int8(0)
+    );
+    assert_eq!(
+        client
+            .set_parameters(
+                &[ParameterSetting {
+                    name: "TEST".into(),
+                    value,
+                }],
+                timeout,
+                0,
+            )
+            .await
+            .unwrap()[0]
+            .value,
+        ParameterValue::Int8(0)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn mismatched_parameter_values_do_not_extend_write_deadlines() {
+    for batch in [false, true] {
+        let transport =
+            MockTransport::new(|_, _| Response::Messages(vec![batch_parameter_reply("TEST")]));
+        let client = new_protocol(transport.clone(), 0);
+        let timeout = Duration::from_secs(3);
+        let started = time::Instant::now();
+        let value = ParameterValue::Int16(15);
+        let result = if batch {
+            client
+                .set_parameters(
+                    &[ParameterSetting {
+                        name: "TEST".into(),
+                        value,
+                    }],
+                    timeout,
+                    2,
+                )
+                .await
+                .map(|_| ())
+        } else {
+            client
+                .set_parameter("TEST", value, timeout)
+                .await
+                .map(|_| ())
+        };
+        assert!(matches!(result, Err(OperationError::Timeout)));
+        assert_eq!(started.elapsed(), timeout);
+        assert_eq!(transport.requests().len(), 3);
+    }
 }
 
 #[tokio::test]

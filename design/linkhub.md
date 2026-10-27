@@ -261,14 +261,26 @@ remain concrete. Erasing the transport or client alone does not erase future
 state machines: the boxed-future boundary is also required. Callers still use
 `.await`, with borrowed inputs and typed results/errors unchanged. Boxing allocates
 per operation, not per transfer packet; the codec frame reader is not part of this
-transaction API. Cloned protocol handles share command,
-parameter and file/log transaction locks and MAVFTP sequence state.
+transaction API. Cloned protocol handles share command and file/log transaction
+locks and MAVFTP sequence state.
 
 Single-parameter reads and writes resend the identical request at one-second
 intervals when no matching `PARAM_VALUE` arrives. Retries share the caller's
-original deadline, including time waiting for the parameter lock; they do not
-extend it. A matching reply ends the transaction, and transport, receive-stream,
-and decoding errors remain explicit failures rather than triggering retries.
+original deadline; they do not extend it. A matching reply ends the transaction,
+and transport, receive-stream, and decoding errors remain explicit failures
+rather than triggering retries.
+
+Parameter reads, writes, batches, and full listings may overlap: MAVLink does
+not require a global parameter transaction order or an atomic multi-parameter
+snapshot. Replies are matched by target system/component and normalized
+parameter name, not arrival order. A write additionally requires the returned
+numeric value to equal the requested value, so an old same-name value from a
+concurrent read/list or another write cannot falsely confirm it. Missing or
+different values remain pending and retry within the original deadline.
+ArduPilot may reply with its native parameter type rather than the requested
+write type; that native type is preserved without rejecting an equal value.
+Conflicting concurrent writes have no promised final-value order; callers that
+require an ordered sequence must await each write themselves.
 
 LinkHub remains the sole connection, transmission, and journal owner. Its adapter
 supplies target selection and observed messages and performs every actual send
