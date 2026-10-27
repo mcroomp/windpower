@@ -42,7 +42,7 @@ pub enum LinkPhase {
     Idle,
     /// Enumerating serial ports or scanning for a BLE peripheral.
     Scanning,
-    /// Opening the resolved serial port or TCP address.
+    /// Opening the resolved serial port or network endpoint.
     Opening,
     /// Transport open, waiting for the first vehicle heartbeat.
     Acquiring,
@@ -59,7 +59,7 @@ pub struct LinkStatus {
     pub phase: LinkPhase,
     pub connection: String,
     /// Serial port currently in use, if connected over serial. `None` while
-    /// scanning, disconnected, or connected over TCP — not connected is an
+    /// scanning, disconnected, or using a non-serial transport — not connected is an
     /// ordinary, frequently-occurring state, not an error.
     pub port: Option<String>,
     /// Baud rate currently in use, if connected over serial.
@@ -93,7 +93,7 @@ pub struct LinkStatus {
     /// Which step produced `error`: `scan`, `open`, `acquire`, or `link`.
     pub last_error_stage: Option<String>,
     pub last_error_ns: Option<u64>,
-    /// Transports opened since start (each successful serial/TCP open).
+    /// Transports opened since start.
     pub attempts: u64,
     /// Failed scans/opens/sessions since the link was last ready.
     pub consecutive_failures: u64,
@@ -211,6 +211,8 @@ pub struct MavlinkLinkConfig {
 #[derive(Clone, Debug)]
 pub enum MavlinkTransport {
     Tcp(SocketAddr),
+    Udp(SocketAddr),
+    UdpIn(SocketAddr),
     /// Discover the serial port by scanning for a MAVLink heartbeat. This is
     /// the normal way a serial link is acquired; a port and/or baud rate in
     /// `DiscoveryConfig` only restrict which candidates are probed, they do
@@ -224,6 +226,8 @@ impl std::fmt::Display for MavlinkTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tcp(address) => write!(formatter, "tcp:{address}"),
+            Self::Udp(address) => write!(formatter, "udp:{address}"),
+            Self::UdpIn(address) => write!(formatter, "udpin:{address}"),
             Self::Serial(discovery) => match &discovery.port_filter {
                 Some(port) => write!(formatter, "auto:{port}"),
                 None => write!(formatter, "auto"),
@@ -234,6 +238,18 @@ impl std::fmt::Display for MavlinkTransport {
 }
 
 impl MavlinkLinkConfig {
+    #[must_use]
+    pub fn udp(address: SocketAddr, listen: bool) -> Self {
+        Self {
+            transport: if listen {
+                MavlinkTransport::UdpIn(address)
+            } else {
+                MavlinkTransport::Udp(address)
+            },
+            ..Self::sitl(address)
+        }
+    }
+
     #[must_use]
     pub fn sitl(address: SocketAddr) -> Self {
         Self {
@@ -484,6 +500,18 @@ async fn run_link(
                     }
                     Err(error) => Err((error.to_string(), format!("{:?}", error.kind()))),
                 },
+                ResolvedTransport::Udp(address, listen) => {
+                    match crate::udp::UdpStream::open(address, listen).await {
+                        Ok(stream) => {
+                            let (reader, writer) = tokio::io::split(stream);
+                            Ok((
+                                Box::new(reader) as Box<dyn AsyncRead + Unpin + Send>,
+                                Box::new(writer) as Box<dyn AsyncWrite + Unpin + Send>,
+                            ))
+                        }
+                        Err(error) => Err((error.to_string(), format!("{:?}", error.kind()))),
+                    }
+                }
                 // Discovery hands over the already-open probe stream.
                 ResolvedTransport::Serial(found) => {
                     let (reader, writer) = tokio::io::split(found.stream);
@@ -564,6 +592,7 @@ fn millis(duration: Duration) -> u64 {
 /// A transport the link can actually connect to, after discovery.
 enum ResolvedTransport {
     Tcp(SocketAddr),
+    Udp(SocketAddr, bool),
     Serial(crate::discovery::DiscoveredSerial),
     Ble(crate::ble::BleConnection),
 }
@@ -572,6 +601,9 @@ impl ResolvedTransport {
     fn target(&self) -> String {
         match self {
             Self::Tcp(address) => format!("tcp:{address}"),
+            Self::Udp(address, listen) => {
+                format!("{}:{address}", if *listen { "udpin" } else { "udp" })
+            }
             Self::Serial(found) => format!("serial:{}:{}", found.port, found.baud),
             Self::Ble(found) => format!("ble:{}", found.device_name),
         }
@@ -602,6 +634,8 @@ async fn resolve_transport(
 ) -> Option<ResolvedTransport> {
     match transport {
         MavlinkTransport::Tcp(address) => Some(ResolvedTransport::Tcp(*address)),
+        MavlinkTransport::Udp(address) => Some(ResolvedTransport::Udp(*address, false)),
+        MavlinkTransport::UdpIn(address) => Some(ResolvedTransport::Udp(*address, true)),
         MavlinkTransport::Serial(discovery) => {
             status_tx.send_modify(|status| {
                 status.connected = false;
@@ -1171,7 +1205,7 @@ fn decoded_frame(link_id: &str, direction: Direction, decoded: &DecodedMessage) 
     }
 }
 
-pub(crate) fn heartbeat_message() -> MavMessage {
+pub fn heartbeat_message() -> MavMessage {
     MavMessage::HEARTBEAT(HEARTBEAT_DATA {
         custom_mode: 0,
         mavtype: MavType::MAV_TYPE_GCS,
@@ -1207,6 +1241,68 @@ mod tests {
     use uuid::Uuid;
 
     use crate::journal::JournalConfig;
+
+    #[tokio::test]
+    async fn udp_link_receives_multiple_frames_and_journals_both_directions() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut buffer = [0; 1024];
+            let (length, client) = server.recv_from(&mut buffer).await.unwrap();
+            let heartbeat = decode_raw_bytes(&buffer[..length]).unwrap();
+            assert_eq!(heartbeat.message_id, 0);
+            assert_eq!(heartbeat.system_id, 255);
+            let mut packet = autopilot_heartbeat(1, 1, 1);
+            packet.extend(autopilot_heartbeat(2, 1, 1));
+            server.send_to(&packet, client).await.unwrap();
+        });
+        let temp = TempDir::new().unwrap();
+        let (journal, journal_task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .unwrap();
+        let (link, task) = start_link(MavlinkLinkConfig::udp(address, false), journal.clone());
+        let mut status = link.subscribe_status();
+        time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = status.borrow_and_update().clone();
+                if snapshot.ready && snapshot.received_messages == 2 {
+                    assert_eq!(snapshot.target_system, 1);
+                    assert_eq!(snapshot.target_component, 1);
+                    assert_eq!(snapshot.received_bytes, 42);
+                    assert!(snapshot.transmitted_messages >= 1);
+                    break;
+                }
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        peer.await.unwrap();
+        task.abort();
+        task.await.unwrap_err();
+        let records = journal.records_after(0).await.unwrap();
+        let frames: Vec<_> = records
+            .iter()
+            .filter_map(|record| {
+                if let RecordPayload::MavlinkFrame(frame) = &record.payload {
+                    Some(frame)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.direction == Direction::Rx)
+                .count(),
+            2
+        );
+        assert!(frames.iter().any(|frame| frame.direction == Direction::Tx));
+        journal.shutdown().await.unwrap();
+        journal_task.await.unwrap();
+    }
 
     #[test]
     fn throughput_uses_bits_and_actual_elapsed_time() {

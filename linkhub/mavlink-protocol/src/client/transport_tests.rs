@@ -59,6 +59,7 @@ fn public_operations_return_boxed_send_futures_and_stay_lazy() {
         timeout,
     ));
     assert_boxed(client.get_parameter(&name, timeout));
+    assert_boxed(client.get_parameters(std::slice::from_ref(&name), timeout, 2));
     assert_boxed(client.set_parameter(&name, ParameterValue::Real32(0.0), timeout));
     assert_boxed(client.list_parameters(timeout));
     assert_boxed(client.set_parameters(&settings, timeout, 2));
@@ -830,6 +831,173 @@ async fn parameter_writes_retry_the_identical_request_after_a_lost_reply() {
         message_fields(&requests[0]).unwrap(),
         message_fields(&requests[1]).unwrap()
     );
+}
+
+fn batch_parameter_reply(name: &str) -> MavMessage {
+    MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+        param_id: CharArray::from(name),
+        param_value: 12.0,
+        param_type: MavParamType::MAV_PARAM_TYPE_INT16,
+        param_count: 2,
+        param_index: 0,
+    })
+}
+
+#[tokio::test]
+async fn batch_reads_ignore_other_systems_and_components() {
+    let transport = MockTransport::new(|_, _| Response::Messages(vec![]));
+    let client = new_protocol(transport.clone(), 0);
+    let operation = tokio::spawn(async move {
+        client
+            .get_parameters(&["A".into()], Duration::from_secs(2), 0)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(transport.requests().len(), 1);
+    let sender = transport.sender.lock().unwrap().as_ref().unwrap().clone();
+    for (system_id, component_id) in [(2, 1), (1, 68), (1, 1)] {
+        let message = batch_parameter_reply("A");
+        sender
+            .send(Arc::new(ReceivedMessage {
+                cursor: "v1:50".into(),
+                system_id,
+                component_id,
+                name: "PARAM_VALUE".into(),
+                fields: message_fields(&message).unwrap(),
+                message,
+            }))
+            .unwrap();
+        tokio::task::yield_now().await;
+        if (system_id, component_id) != (1, 1) {
+            assert!(!operation.is_finished());
+        }
+    }
+    assert_eq!(operation.await.unwrap().unwrap()[0].name, "A");
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_reads_pipeline_before_waiting_and_preserve_requested_order() {
+    let transport = MockTransport::new(|message, index| {
+        let MavMessage::PARAM_REQUEST_READ(request) = message else {
+            panic!("read request")
+        };
+        assert_eq!(
+            (
+                request.target_system,
+                request.target_component,
+                request.param_index
+            ),
+            (1, 1, -1)
+        );
+        Response::Messages(match index {
+            0 => vec![],
+            1 => vec![batch_parameter_reply("B"), batch_parameter_reply("A")],
+            _ => panic!("unexpected retry"),
+        })
+    });
+    let client = new_protocol(transport.clone(), 0);
+    let start = time::Instant::now();
+    let result = client
+        .get_parameters(&[" b ".into(), "a".into()], Duration::from_secs(3), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .iter()
+            .map(|result| result.name.as_str())
+            .collect::<Vec<_>>(),
+        ["B", "A"]
+    );
+    assert_eq!(result[0].value, ParameterValue::Int16(12));
+    assert!(
+        result
+            .iter()
+            .all(|result| result.after_cursor.starts_with("v1:"))
+    );
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    assert_eq!(transport.requests().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_reads_retry_only_missing_parameters() {
+    let transport = MockTransport::new(|message, index| {
+        let MavMessage::PARAM_REQUEST_READ(request) = message else {
+            panic!("read request")
+        };
+        let name = request.param_id.to_str().unwrap();
+        Response::Messages(match index {
+            0 => vec![batch_parameter_reply(name)],
+            1 => vec![batch_parameter_reply("UNRELATED")],
+            2 => {
+                assert_eq!(name, "B");
+                vec![batch_parameter_reply(name)]
+            }
+            _ => panic!("unexpected request"),
+        })
+    });
+    let start = time::Instant::now();
+    let client = new_protocol(transport.clone(), 0);
+    let results = client
+        .get_parameters(&["A".into(), "B".into()], Duration::from_secs(3), 2)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(start.elapsed(), Duration::from_secs(1));
+    assert_eq!(transport.requests().len(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_reads_validate_all_names_before_sending() {
+    let transport = MockTransport::new(|_, _| panic!("invalid batch sent requests"));
+    let client = new_protocol(transport.clone(), 0);
+    for names in [
+        vec!["A".into(), " a ".into()],
+        vec!["A".into(), "INVALID-NAME".into()],
+    ] {
+        assert!(matches!(
+            client
+                .get_parameters(&names, Duration::from_secs(3), 2)
+                .await,
+            Err(OperationError::Invalid(_))
+        ));
+    }
+    assert!(
+        client
+            .get_parameters(&[], Duration::from_secs(1), 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_reads_keep_one_deadline_and_surface_stream_failures() {
+    for (response, expected) in [
+        (0, "timed out"),
+        (1, "closed"),
+        (2, "lagged"),
+        (3, "test transport failed"),
+    ] {
+        let transport = MockTransport::new(move |_, _| match response {
+            0 => Response::Messages(vec![]),
+            1 => Response::Close,
+            2 => Response::Messages(vec![MavMessage::HEARTBEAT(Default::default()); 4]),
+            _ => Response::Fail,
+        });
+        let client = new_protocol(transport.clone(), 0);
+        let start = time::Instant::now();
+        let timeout = Duration::from_secs(3);
+        let error = client
+            .get_parameters(&["A".into()], timeout, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        if response == 0 {
+            assert_eq!(start.elapsed(), timeout);
+            assert_eq!(transport.requests().len(), 3);
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

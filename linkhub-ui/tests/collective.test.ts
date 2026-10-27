@@ -49,6 +49,10 @@ function setup() {
     params.set(name, value);
     return { name, value, type: mavEnum(MavParamType.REAL32) };
   });
+  const setParameters = vi.spyOn(api, "setParameters").mockImplementation(async (parameters) => {
+    for (const parameter of parameters) params.set(parameter.name, parameter.value);
+    return new Map(parameters.map((parameter) => [parameter.name, parameter]));
+  });
   const mode = vi.spyOn(api, "setModeAndWait").mockResolvedValue();
   vi.spyOn(api, "setMode").mockResolvedValue();
   const arm = vi.spyOn(api, "setArmed").mockImplementation(async () => {
@@ -76,7 +80,7 @@ function setup() {
     api, telemetry, controller, (line) => output.push(line),
     { sources: () => [], targets: () => new Map() },
   );
-  return { api, status, params, setParameter, mode, arm, send, output, controller, runner, feedServos };
+  return { api, status, params, setParameter, setParameters, mode, arm, send, output, controller, runner, feedServos };
 }
 
 describe("run collective", () => {
@@ -211,37 +215,126 @@ describe("run collective", () => {
       expect(controller.phase).toBe("idle");
     });
 
-    it("writes verified limits only while idle and disarmed, preserving endpoint order", async () => {
-      const { controller, setParameter, params } = setup();
-      const expected = { min: 2100, max: 2150, cyclic: 1500 };
+    it("writes all six settings in one typed batch without single-parameter writes", async () => {
+      const { controller, setParameter, setParameters, params } = setup();
+      params.set("H_COL_MAX", 1300);
+      const expected = { min: 1400, max: 1600, cyclic: 1500 };
       expect(await controller.applySwashLimits(expected)).toEqual(expected);
-      expect(setParameter.mock.calls.map(([name, value]) => [name, value])).toEqual([
-        ["H_COL_MAX", 2150], ["H_COL_MIN", 2100], ["H_CYC_MAX", 1500],
-      ]);
-      expect(params.get("H_COL_MIN")).toBe(2100);
+      expect(setParameters).toHaveBeenCalledOnce();
+      expect(setParameters.mock.calls[0]?.[0]).toEqual([
+        ["H_COL_MIN", 1400], ["H_COL_MAX", 1600], ["H_CYC_MAX", 1500],
+        ["SERVO1_TRIM", 1500], ["SERVO2_TRIM", 1500], ["SERVO3_TRIM", 1500],
+      ].map(([name, value]) => ({ name, value, type: mavEnum(MavParamType.INT32) })));
+      expect(setParameters.mock.calls[0]?.slice(1)).toEqual([15_000, 2, expect.any(AbortSignal)]);
+      expect(setParameter).not.toHaveBeenCalled();
+      expect(params.get("H_COL_MIN")).toBe(1400);
       expect(controller.phase).toBe("idle");
     });
 
+    it("centers all three trims at the rounded-down midpoint of the new limits", async () => {
+      const { controller, params, setParameters } = setup();
+      const limits = { min: 1200, max: 1557, cyclic: 1000 };
+      expect(await controller.applySwashLimits(limits)).toEqual(limits);
+      expect(setParameters.mock.calls[0]?.[0].map(({ name, value }) => [name, value])).toEqual([
+        ["H_COL_MIN", 1200], ["H_COL_MAX", 1557], ["H_CYC_MAX", 1000],
+        ["SERVO1_TRIM", 1378], ["SERVO2_TRIM", 1378], ["SERVO3_TRIM", 1378],
+      ]);
+      for (let channel = 1; channel <= 3; channel++) {
+        expect(params.get(`SERVO${channel}_TRIM`)).toBe(1378);
+      }
+    });
+
+    it.each(["H_COL_MIN", "H_COL_MAX", "H_CYC_MAX", "SERVO1_TRIM", "SERVO2_TRIM", "SERVO3_TRIM"])(
+      "rejects inconsistent final readback for %s", async (changed) => {
+        const { controller, api, params, setParameters } = setup();
+        vi.mocked(api.getParameter).mockImplementation(async (name) => {
+          const value = params.get(name);
+          if (value === undefined) throw new Error(`Unexpected parameter ${name}`);
+          return {
+            name, value: value + (name === changed && setParameters.mock.calls.length === 1 ? 1 : 0),
+            type: mavEnum(MavParamType.REAL32),
+          };
+        });
+        await expect(controller.applySwashLimits({ min: 1200, max: 1557, cyclic: 1000 }))
+          .rejects.toThrow("partially applied");
+        expect(controller.phase).toBe("idle");
+      },
+    );
+
+    it("rejects a midpoint outside a servo's calibrated endpoints before writing", async () => {
+      const { controller, params, setParameter, setParameters } = setup();
+      params.set("SERVO2_MIN", 1400);
+      await expect(controller.applySwashLimits({ min: 1200, max: 1557, cyclic: 1000 }))
+        .rejects.toThrow("trim calibration");
+      expect(setParameter).not.toHaveBeenCalled();
+      expect(setParameters).not.toHaveBeenCalled();
+    });
+
+    it("does not claim success if the vehicle becomes armed after the batch", async () => {
+      const { controller, api, status, setParameters } = setup();
+      vi.mocked(api.status).mockImplementation(async () => ({
+        ...status, base_mode: setParameters.mock.calls.length > 0 ? MavModeFlag.SAFETY_ARMED : "",
+      }));
+      await expect(controller.applySwashLimits({ min: 1200, max: 1557, cyclic: 1000 }))
+        .rejects.toThrow("partially applied");
+      expect(setParameters).toHaveBeenCalledOnce();
+    });
+
+    it("reports a failed trim write without claiming the settings are consistent", async () => {
+      const { controller, params, setParameters } = setup();
+      setParameters.mockImplementation(async (parameters) => {
+        for (const { name, value } of parameters) {
+          if (name === "SERVO2_TRIM") throw new Error("Trim ACK lost");
+          params.set(name, value);
+        }
+        throw new Error("Expected failed batch");
+      });
+      await expect(controller.applySwashLimits({ min: 1200, max: 1557, cyclic: 1000 }))
+        .rejects.toThrow("Limits and trims may be partially applied");
+      expect(params.get("SERVO1_TRIM")).toBe(1378);
+      expect(params.get("SERVO2_TRIM")).toBe(1517);
+      expect(params.get("SERVO3_TRIM")).toBe(1517);
+    });
+
     it("refuses armed limit edits and active-run edits without writing", async () => {
-      const { controller, status, setParameter, feedServos } = setup();
+      const { controller, status, setParameter, setParameters, feedServos } = setup();
       const limits = { min: 1100, max: 1900, cyclic: 1200 };
       status.base_mode = MavModeFlag.SAFETY_ARMED;
       await expect(controller.applySwashLimits(limits)).rejects.toThrow("disarmed");
       expect(setParameter).not.toHaveBeenCalled();
+      expect(setParameters).not.toHaveBeenCalled();
       status.base_mode = "";
       feedServos();
       await controller.startSwash();
       setParameter.mockClear();
       await expect(controller.applySwashLimits(limits)).rejects.toThrow("Stop");
       expect(setParameter).not.toHaveBeenCalled();
+      expect(setParameters).not.toHaveBeenCalled();
     });
 
     it("reports uncertain or partial writes instead of claiming success", async () => {
-      const { controller, setParameter } = setup();
-      setParameter.mockRejectedValueOnce(new Error("ACK lost"));
+      const { controller, setParameters } = setup();
+      setParameters.mockRejectedValueOnce(new Error("ACK lost"));
       await expect(controller.applySwashLimits({ min: 1100, max: 1900, cyclic: 1200 }))
         .rejects.toThrow("partially applied");
-      expect(setParameter).toHaveBeenCalledOnce();
+      expect(setParameters).toHaveBeenCalledOnce();
+      expect(controller.phase).toBe("idle");
+    });
+
+    it.each(["missing", "mismatched", "non-finite"])("rejects a %s batch result", async (failure) => {
+      const { controller, setParameters } = setup();
+      setParameters.mockImplementation(async (parameters) => new Map(
+        parameters
+          .filter(({ name }) => failure !== "missing" || name !== "SERVO2_TRIM")
+          .map((parameter) => [parameter.name, {
+            ...parameter,
+            value: parameter.name === "SERVO2_TRIM"
+              ? failure === "non-finite" ? NaN : parameter.value + 1
+              : parameter.value,
+          }]),
+      ));
+      await expect(controller.applySwashLimits({ min: 1200, max: 1557, cyclic: 1000 }))
+        .rejects.toThrow("SERVO2_TRIM batch readback");
       expect(controller.phase).toBe("idle");
     });
 

@@ -2,15 +2,16 @@ import { formatMavResult, type LinkHubApi } from "./api";
 import {
   MavCmd,
   MavLandedState,
+  MavParamType,
   MavResult,
   MavState,
   NamedValueFloat,
 } from "./generated/protocol";
-import { enumIs, isArmed, isVehicleHeartbeat } from "./mav";
+import { enumIs, isArmed, isVehicleHeartbeat, mavEnum } from "./mav";
 import type { TelemetryStore } from "./telemetry";
 import { DISPLAY_TELEMETRY_RATES } from "./telemetry-rates";
 import type { MessageRecord } from "./types";
-import { swashSweepTarget, validateSwashLimits, validateSwashTarget, type SwashGeometry, type SwashLimits, type SwashServo, type SwashTarget } from "./swashplate";
+import { swashNeutralTrim, swashServoEnvelope, swashSweepTarget, validateSwashLimits, validateSwashTarget, type SwashGeometry, type SwashLimits, type SwashServo, type SwashTarget } from "./swashplate";
 
 const MODE_ACRO = 1;
 const MODE_GUIDED_NOGPS = 20;
@@ -387,9 +388,10 @@ export class PassiveController {
     return limits;
   }
 
-  async readSwashGeometry(): Promise<SwashGeometry> {
+  async readSwashGeometry(signal?: AbortSignal): Promise<SwashGeometry> {
     const read = async (name: string) => {
-      const parameter = await this.api.getParameter(name);
+      const parameter = await this.api.getParameter(name, signal);
+      signal?.throwIfAborted();
       if (!Number.isFinite(parameter.value)) throw new Error(`${name} is not finite.`);
       return parameter.value;
     };
@@ -415,7 +417,7 @@ export class PassiveController {
   }
 
   async applySwashLimits(limits: SwashLimits): Promise<SwashLimits> {
-    validateSwashLimits(limits);
+    const trim = swashNeutralTrim(limits);
     if (this.currentPhase !== "idle") throw new Error("Stop the active run before applying swash limits.");
     const operation = new AbortController();
     this.operation = operation;
@@ -423,32 +425,60 @@ export class PassiveController {
     this.setPhase("configuring");
     let written = false;
     try {
-      const current = await this.readSwashLimits(signal);
+      const geometry = await this.readSwashGeometry(signal);
+      const centered: SwashGeometry = {
+        ...geometry,
+        servos: [
+          { ...geometry.servos[0], trim },
+          { ...geometry.servos[1], trim },
+          { ...geometry.servos[2], trim },
+        ],
+      };
+      swashServoEnvelope(limits, centered);
       const [mode, manual] = await Promise.all([
         this.api.getParameter("RAWES_MODE", signal), this.api.getParameter("H_SV_MAN", signal),
       ]);
       if (mode.value !== 0 || manual.value !== 0) throw new Error("Limit changes require RAWES_MODE=0 and H_SV_MAN=0.");
-      const endpoints: [string, number][] = limits.min >= current.max
-        ? [["H_COL_MAX", limits.max], ["H_COL_MIN", limits.min]]
-        : [["H_COL_MIN", limits.min], ["H_COL_MAX", limits.max]];
-      const writes: [string, number][] = [...endpoints, ["H_CYC_MAX", limits.cyclic]];
+      const writes: [string, number][] = [
+        ["H_COL_MIN", limits.min], ["H_COL_MAX", limits.max], ["H_CYC_MAX", limits.cyclic],
+        ["SERVO1_TRIM", trim], ["SERVO2_TRIM", trim], ["SERVO3_TRIM", trim],
+      ];
+      const before = await this.api.status(signal);
+      signal.throwIfAborted();
+      if (!before.connected || !before.ready || isArmed(before)) {
+        throw new Error("Swash limits require a connected, ready, confirmed disarmed vehicle.");
+      }
+      written = true;
+      const verified = await this.api.setParameters(writes.map(([name, value]) => ({
+        name, value, type: mavEnum(MavParamType.INT32),
+      })), 15_000, 2, signal);
+      signal.throwIfAborted();
       for (const [name, value] of writes) {
-        const status = await this.api.status(signal);
-        signal.throwIfAborted();
-        if (!status.connected || !status.ready || isArmed(status)) {
-          throw new Error("Swash limits require a connected, ready, confirmed disarmed vehicle.");
+        const actual = verified.get(name)?.value;
+        if (actual !== value) {
+          throw new Error(`${name} batch readback is ${actual ?? "missing"}, expected ${value}.`);
         }
-        written = true;
-        await this.setParameter(name, value, signal);
       }
       signal.throwIfAborted();
       const actual = await this.readSwashLimits(signal);
       if (actual.min !== limits.min || actual.max !== limits.max || actual.cyclic !== limits.cyclic) {
         throw new Error("Swash limit readback does not match the requested values.");
       }
+      const actualGeometry = await this.readSwashGeometry(signal);
+      for (const [index, servo] of actualGeometry.servos.entries()) {
+        if (servo.trim !== trim) {
+          throw new Error(`SERVO${index + 1}_TRIM read back as ${servo.trim}, expected midpoint ${trim}.`);
+        }
+      }
+      swashServoEnvelope(actual, actualGeometry);
+      const status = await this.api.status(signal);
+      signal.throwIfAborted();
+      if (!status.connected || !status.ready || isArmed(status)) {
+        throw new Error("Cannot verify swash settings without a connected, ready, confirmed disarmed vehicle.");
+      }
       return actual;
     } catch (error) {
-      throw new Error(`${error instanceof Error ? error.message : String(error)}${written ? " Limits may be partially applied; reload and verify." : ""}`);
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${written ? " Limits and trims may be partially applied; reload and verify." : ""}`);
     } finally {
       if (this.operation === operation) {
         this.resetLocalState();

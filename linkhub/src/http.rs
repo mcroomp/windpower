@@ -191,7 +191,9 @@ pub fn router_with_motor_and_static(
         .route("/v1/mavlink/components", get(components))
         .route(
             "/v1/mavlink/parameters",
-            get(list_parameters).put(set_parameters),
+            get(list_parameters)
+                .post(get_parameters)
+                .put(set_parameters),
         )
         .route(
             "/v1/mavlink/parameters/{name}",
@@ -1054,6 +1056,29 @@ async fn list_parameters(
 }
 
 #[derive(Debug, Deserialize)]
+struct GetParametersRequest {
+    names: Vec<String>,
+    #[serde(default = "default_batch_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default = "default_parameter_retries")]
+    retries: usize,
+}
+
+async fn get_parameters(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<GetParametersRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let parameters = require_operations(&state)?
+        .get_parameters(
+            &request.names,
+            operation_timeout(request.timeout_ms)?,
+            request.retries,
+        )
+        .await?;
+    Ok(Json(json!({"parameters": parameters})))
+}
+
+#[derive(Debug, Deserialize)]
 struct SetParametersRequest {
     parameters: Vec<ParameterSetting>,
     #[serde(default = "default_batch_timeout_ms")]
@@ -1733,6 +1758,34 @@ mod tests {
             settings.push(setting);
         }
         let listed = call(&app, "GET", "/v1/mavlink/parameters", Value::Null).await;
+        let selected = call(
+            &app,
+            "POST",
+            "/v1/mavlink/parameters",
+            json!({"names": ["REAL32", "INT8"], "timeout_ms": 3000, "retries": 2}),
+        )
+        .await;
+        let selected = selected["parameters"].as_array().unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0]["name"], "REAL32");
+        assert_eq!(selected[0]["value"], 1.25);
+        assert_eq!(selected[1]["name"], "INT8");
+        assert_eq!(selected[1]["value"], -12);
+        for names in [json!(["INT8", "int8"]), json!(["INVALID-NAME"])] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/mavlink/parameters")
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(json!({"names": names}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
         let written = call(
             &app,
             "PUT",

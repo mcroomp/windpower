@@ -23,7 +23,7 @@ Bluetooth support, including the DroneBridge BLE transport and the optional
 Bluetooth motor backend, is included in ordinary builds.
 On Debian/Ubuntu, building requires `pkg-config` and `libdbus-1-dev`; the
 executable requires `libdbus-1-3` at runtime. The stack Dockerfile installs
-these dependencies. TCP/serial operation does not require a running Bluetooth
+these dependencies. TCP/UDP/serial operation does not require a running Bluetooth
 adapter or D-Bus service.
 
 The MAVLink dialect is generated at build time from ArduPilot's own definitions,
@@ -79,7 +79,9 @@ Check a DroneBridge BLE connection without starting the LinkHub service:
 ```
 
 The command exits successfully only after receiving a MAVLink heartbeat. It
-does not start the HTTP server or send MAVLink messages. Use `--connection
+does not start the HTTP server. TCP, BLE, serial, and UDP listener checks send
+no MAVLink messages; a UDP remote-peer check sends one GCS heartbeat to register
+its reply address with the peer (no commands or parameter changes). Use `--connection
 tcp:127.0.0.1:5760` for SITL, or `--connection auto` (the default) to scan
 serial ports. For serial checks, `--baud` restricts the baud rate;
 `--discovery-bauds` selects the ordered baud rates to probe otherwise.
@@ -108,6 +110,57 @@ DroneBridge BLE:
   --data-dir .\simulation\logs\linkhub
 ```
 
+UDP remote peer (for example DroneBridge):
+
+```powershell
+.\linkhub\target\release\linkhub.exe serve `
+  --connection udp:192.168.9.143:14550 `
+  --data-dir .\simulation\logs\linkhub
+```
+
+For exclusive use of a DroneBridge, add its HTTP origin:
+
+```powershell
+.\linkhub\target\release\linkhub.exe serve `
+  --connection udp:192.168.9.143:14550 `
+  --dronebridge-url http://192.168.9.143 `
+  --data-dir .\simulation\logs\linkhub
+```
+
+The GCS heartbeat registers LinkHub automatically. On graceful stop, LinkHub
+stops sending UDP, clears **all** DroneBridge UDP clients (including its saved
+target), and queries the client list to verify it is empty. This is an explicit
+exclusive-use option: do not enable it when other UDP clients must be preserved.
+It is only supported with the remote-peer `udp:` connection, not `udpin:`.
+The same flag is available on `test-connection`; it cleans up after a successful,
+failed, or interrupted check.
+
+Use Ctrl+C (or Ctrl+Break on Windows) to stop normally; Unix SIGTERM is also
+handled. Forced termination, a crash, or loss of network connectivity cannot
+guarantee cleanup. Firmware timeout handling and verification requirements
+are described in [UDP lifecycle semantics](../design/linkhub.md#exclusive-dronebridge-udp-lifecycle).
+
+UDP listener:
+
+```powershell
+.\linkhub\target\release\linkhub.exe serve `
+  --connection udpin:0.0.0.0:14550 `
+  --data-dir .\simulation\logs\linkhub
+```
+
+For a listener, configure the sender's UDP destination as this PC's LAN IP and
+port 14550, and allow inbound UDP on that port through the host firewall.
+`0.0.0.0` is a local bind address, not the destination to enter on the sender.
+For DroneBridge WiFi client mode, open its web interface and use the `+` under
+**connected UDP clients** to add that destination IP/port. In remote-peer mode, LinkHub's
+GCS heartbeat lets compatible bridges learn the return address automatically.
+See [DroneBridge WiFi modes](https://dronebridge.gitbook.io/docs/dronebridge-for-esp32/configuration/wifi-modes)
+for its endpoint-registration procedure.
+See [UDP transport semantics](../design/linkhub.md#udp-transport) for peer
+selection, idle timeout, and delivery guarantees.
+Both UDP forms require an explicit numeric IP and port; IPv6 uses brackets,
+for example `udp:[::1]:14550`.
+
 Static UI serving:
 
 ```powershell
@@ -124,7 +177,8 @@ Defaults come from `linkhub\src\main.rs`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--connection` | `auto` | `tcp:HOST:PORT`, `ble:DEVICE_NAME_OR_ADDRESS`, bare `HOST:PORT`, `auto`, or a serial-port restriction such as `COM7` / `serial:COM7`. Serial values still go through heartbeat-based discovery. |
+| `--connection` | `auto` | `tcp:IP:PORT`, `udp:IP:PORT` (remote peer), `udpin:IP:PORT` (local listener), `ble:DEVICE_NAME_OR_ADDRESS`, bare `IP:PORT` (TCP), `auto`, or a serial-port restriction such as `COM7` / `serial:COM7`. Serial values still go through heartbeat-based discovery. |
+| `--dronebridge-url` | unset | Exclusive DroneBridge HTTP origin, e.g. `http://192.168.9.143`. Requires `udp:`. Clears ALL UDP clients and the saved target on graceful stop, then verifies an empty list. Also available through `LINKHUB_DRONEBRIDGE_URL` and on `test-connection`. |
 | `--listen` | `127.0.0.1` | HTTP bind address. |
 | `--port` | `8999` | HTTP port. |
 | `--data-dir` | `linkhub-data` | Parent directory where each run creates `<run-id>\run.json` and `<run-id>\journal\`. |
@@ -185,7 +239,7 @@ Routes come from `linkhub\src\http.rs`.
 | `/v1/mavlink/version` | `GET` | Request `AUTOPILOT_VERSION`. |
 | `/v1/mavlink/capabilities` | `GET` | Capability summary. |
 | `/v1/mavlink/components` | `GET` | Known heartbeat senders. |
-| `/v1/mavlink/parameters` | `GET`, `PUT` | List all parameters or set a batch. |
+| `/v1/mavlink/parameters` | `GET`, `POST`, `PUT` | List all parameters, read a selected batch by name, or set a batch. |
 | `/v1/mavlink/parameters/{name}` | `GET`, `PUT` | Read or write one parameter. |
 | `/v1/mavlink/message-rates` | `PUT` | Set explicit message-rate requests. |
 | `/v1/mavlink/message-rates/{message}` | `GET` | Read one configured message interval. |
@@ -301,6 +355,19 @@ per-message rate maps use the same window and are empty while disconnected;
 message types with no traffic in the window are omitted.
 
 ### Example requests
+
+Read a selected group of parameters without fetching the entire table:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8999/v1/mavlink/parameters `
+  -ContentType application/json `
+  -Body '{"names":["SERVO9_MIN","SERVO9_MAX","RAWES_YAW_SLP"],"timeout_ms":15000,"retries":2}'
+```
+
+Returns `{"parameters":[...]}` with typed records in requested order.
+Timeout/retry and validation semantics are owned by
+[Parameter values](../design/linkhub.md#parameter-values).
 
 Read readiness and live transport state:
 
