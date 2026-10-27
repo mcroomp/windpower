@@ -17,8 +17,6 @@ from scipy.spatial.transform import Rotation
 from arduloop import GuidedAttitudeController, HeliParams
 from simulation.controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
                         compute_rate_cmd, compute_rate_cmd_sqrt,
-                        compute_crosswind_rate_cmd,
-                        apply_crosswind_rate_to_body_rates,
                         slerp_body_z, update_plane_azimuth,
                         YawTrimObserver)
 from groundstation.landing_planner import LandingCommand
@@ -38,7 +36,6 @@ def _load_rawes_pumping_constants() -> dict[str, float]:
         "KP_ALT": get_ap_param("RAWES_KP_ALT", params=params),
         "KI_ALT": get_ap_param("RAWES_KI_ALT", params=params),
         "KD_VZ": get_ap_param("RAWES_KD_VZ", params=params),
-        "KP_EL": get_ap_param("RAWES_KP_EL", params=params),
         "TRP_S": params.get("RAWES_TRP", 2.0),  # tension ramp τ; default from Lua param:add_param
         "THRUST_SLEW_MAX": lua_constants["THRUST_SLEW_MAX"],
         "POST_RELEASE_BLEND_S": lua_constants["POST_RELEASE_BLEND_S"],
@@ -420,9 +417,10 @@ def _blend_bz(bz_now: "np.ndarray", bz_goal: "np.ndarray", alpha: float) -> "np.
 
 
 class _PumpingPythonMode:
-    """Python-equivalent of rawes.lua do_steady_loop_inner().
+    """Python pumping model with Lua-related altitude and tension math.
 
-    Variable names mirror the Lua originals so the two can be diffed line-by-line.
+    The cyclic path still forms body-z-error rate targets; it is not exact
+    parity with rawes.lua run_flight()'s absolute-angle command.
     """
 
     CMD_TIMEOUT_S: float = 0.5
@@ -432,7 +430,9 @@ class _PumpingPythonMode:
     KP_ALT:                float = _RAWES_PUMPING_CONSTANTS["KP_ALT"]
     KI_ALT:                float = _RAWES_PUMPING_CONSTANTS["KI_ALT"]
     KD_VZ:                 float = _RAWES_PUMPING_CONSTANTS["KD_VZ"]
-    KP_EL:                 float = _RAWES_PUMPING_CONSTANTS["KP_EL"]
+    # Python-only body-z error -> rate gain for compute_rate_cmd_sqrt(); Lua has
+    # no counterpart because it sends absolute angles.
+    KP_OUTER:              float = 2.5
     THRUST_SLEW_MAX:       float = _RAWES_PUMPING_CONSTANTS["THRUST_SLEW_MAX"]
     POST_RELEASE_BLEND_S:     float = _RAWES_PUMPING_CONSTANTS["POST_RELEASE_BLEND_S"]
     POST_RELEASE_RECOVERY_S:  float = _RAWES_PUMPING_CONSTANTS["POST_RELEASE_RECOVERY_S"]
@@ -448,15 +448,12 @@ class _PumpingPythonMode:
         warm_thrust         : float,
         tension_ic          : float,
         cmd_timeout_s       : float = CMD_TIMEOUT_S,
-        kp_outer            : float = KP_EL,
+        kp_outer            : float = KP_OUTER,
         kp_alt              : float = KP_ALT,
         ki_alt              : float = KI_ALT,
         kd_vz               : float = KD_VZ,
         rate_accel_max_radss: float = 0.0,
         az_ref_tau_s        : float = AZ_REF_TAU_S,
-        cw_rate_kp          : float = 0.0,
-        cw_rate_kd          : float = 0.0,
-        cw_rate_max         : float = 0.6,
         events              = None,
     ) -> None:
         self._mass_kg        = float(mass_kg)
@@ -478,9 +475,6 @@ class _PumpingPythonMode:
         self._ki_alt         = float(ki_alt)
         self._kd_vz          = float(kd_vz)
         self._rate_accel_max = float(rate_accel_max_radss) if rate_accel_max_radss else 4.0
-        self._cw_rate_kp     = float(cw_rate_kp)
-        self._cw_rate_kd     = float(cw_rate_kd)
-        self._cw_rate_max    = float(cw_rate_max)
 
         # Mirror rawes.lua: _ic_thrust (from RAWES_THR), _thrust_trim, _last_thrust, _alt_i
         self._ic_thrust      = float(warm_thrust)   # mirrors _ic_thrust; updated from RAWES_THR NVF in Lua
@@ -495,7 +489,6 @@ class _PumpingPythonMode:
         self._comms_ok       = True
         self._t_sim          = 0.0
         self._pos_ned        = np.asarray(ic_pos, dtype=float)
-        self._pos_design     = np.asarray(ic_pos, dtype=float)
 
         # Mirror rawes.lua: _capture_ms (None = not-yet-captured → recovery_alpha stays 1.0)
         self._capture_t: "float | None" = None
@@ -602,7 +595,7 @@ class _PumpingPythonMode:
             if blend < 1.0:
                 bz_goal = _blend_bz(bz_now, bz_goal, blend)
 
-        # body-z rate command: mirrors rawes.lua compute_rate_cmd_sqrt() → send_guided_angle_rate_throttle()
+        # Python-only cyclic path; Lua run_flight sends absolute angles instead.
         rate_sp = compute_rate_cmd_sqrt(
             bz_now, bz_goal, R,
             kp=self._kp_outer,
@@ -610,18 +603,6 @@ class _PumpingPythonMode:
             dt=dt,
             kd=0.0,
         )
-
-        # Crosswind rate damping: mirrors rawes.lua rate_roll_cw / rate_pitch_cw block
-        if self._cw_rate_kp > 0.0 or self._cw_rate_kd > 0.0:
-            omega_east_cmd  = compute_crosswind_rate_cmd(
-                obs.pos, obs.vel, self._pos_design,
-                kp=self._cw_rate_kp, kd=self._cw_rate_kd,
-                rate_max=self._cw_rate_max,
-            )
-            omega_body_corr = apply_crosswind_rate_to_body_rates(omega_east_cmd, R)
-            rate_sp = np.asarray(rate_sp, dtype=float).copy()
-            rate_sp[0] += float(omega_body_corr[0])
-            rate_sp[1] += float(omega_body_corr[1])
 
         self._bz_goal      = bz_goal
         self._last_roll_sp = float(rate_sp[0])
@@ -867,7 +848,6 @@ class MockArdupilot:
         "KP_ALT": _PumpingPythonMode.KP_ALT,
         "KI_ALT": _PumpingPythonMode.KI_ALT,
         "KD_VZ": _PumpingPythonMode.KD_VZ,
-        "KP_EL": _PumpingPythonMode.KP_EL,
     }
     LANDING_CONSTANTS = {
         "KP_VZ": _LandingPythonMode.KP_VZ,
@@ -932,7 +912,7 @@ class MockArdupilot:
         dt: float,
         kp_vz: float = _LandingPythonMode.KP_VZ,
         ki_vz: float = _LandingPythonMode.KI_VZ,
-        kp_outer: float = _PumpingPythonMode.KP_EL,
+        kp_outer: float = _PumpingPythonMode.KP_OUTER,
     ):
         return cls.for_python(
             mode="landing",

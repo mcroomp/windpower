@@ -12,7 +12,7 @@ Use the real Bash scripts from the repo root:
 |---|---|
 | Build the stack image | `bash setup.sh build` |
 | Run one stack selection | `bash test.sh stack -n 1 -k test_name` |
-| Run the full stack suite | `bash test.sh stack -n 2` |
+| Run the full stack suite | `bash test.sh stack -n 4` (effective concurrency capped at 2) |
 | Profile lockstep timing | `bash test.sh stack -n 1 --profile-lockstep -k test_name` |
 
 Important current behavior verified from `test.sh` and `setup.sh`:
@@ -50,7 +50,7 @@ Verified behavior from `test.sh`:
   i.e. three physics frames per 400 Hz ArduPilot control-loop tick.
 - LinkHub is the **only** MAVLink owner and journal. The mediator does not read
   MAVLink merely to decorate telemetry, and the stack does **not** export a
-  duplicate `mavlink.jsonl`.
+  duplicate transport log.
 - Post-run enrichment is owned by the harness: mediator physics telemetry is
   copied to `telemetry.physics.csv`, then
   `analysis/enrich_sitl_telemetry.py` samples LinkHub observations onto that
@@ -69,7 +69,8 @@ Common current artifacts:
 | `gcs.log` | stack-side GCS/setup helpers |
 | `linkhub.log` | LinkHub service process |
 | `linkhub\` | copied LinkHub journal root for the run |
-| `arducopter.log` | ArduPilot DataFlash/log artifact, when produced |
+| `arducopter.log` | ArduPilot text process/crash output, when produced |
+| `dataflash.BIN` | Recovered binary DataFlash log, when produced |
 
 Mediator-backed fixtures also add:
 
@@ -80,37 +81,34 @@ Mediator-backed fixtures also add:
 | `telemetry.physics.csv` | raw mediator physics telemetry before enrichment |
 | `telemetry.csv` | enriched telemetry sampled with LinkHub observations |
 
-There is **no current `suite_summary.json` emitter in `test.sh`**. Do not rely
-on it in new documentation or tooling.
-
 ## Diagnosis workflow
 
-Always start with the current repo tools:
+Always query the canonical LinkHub journal first:
 
 ```powershell
-uv run python analysis/diagnose_sitl.py <test_name>
-uv run python analysis/analyse_run.py <test_name>
+linkhub query simulation\logs\<test_name>\linkhub types
+linkhub query simulation\logs\<test_name>\linkhub diagnostics
+linkhub query simulation\logs\<test_name>\linkhub statustext
 ```
 
 Decision order:
 
-1. `diagnose_sitl.py` CHECK 1: was the EKF healthy and GPS-aiding at
-   `kinematic_exit`?
-2. `diagnose_sitl.py` CHECK 2: did the kinematic hand-off land at the expected
-   IC position, disk tilt, and rotor RPM?
-3. Only if both pass should you treat the failure as a post-release controller
-   or physics bug and continue with `analyse_run.py`.
+1. Check the artifacts are from this run and complete, then confirm from the
+   journal / enriched telemetry that the EKF was healthy and GPS-aided at
+   `kinematic_exit` (details: [EKF_GATING.md](EKF_GATING.md)).
+2. Check the hand-off: IC position, disk tilt, and rotor RPM at release.
+3. Only if both pass, analyse post-release controller or physics behavior.
 
-Other current entry points:
+A missing sample or field is missing evidence, not a pass.
+
+Other entry points:
 
 | Task | Command |
 |---|---|
-| Torque-stack diagnosis | `uv run python analysis/diagnose_torque.py test_yaw_regulation_sitl` |
 | Raw LinkHub journal inspection | `linkhub query simulation\logs\<test_name>\linkhub show --json` |
 | Visualize telemetry | `visualize.cmd simulation\logs\<test_name>\telemetry.csv` |
 
-Prefer `diagnose_sitl.py`, `analyse_run.py`, and `linkhub query` over older
-helpers that still expect a legacy `mavlink.jsonl`.
+Before trusting an `analysis/` helper, check which artifacts it actually reads.
 
 Journal records and `linkhub_client` messages carry MAVLink enumerations and
 bitmasks as names, not numbers: the client decodes them to
@@ -118,9 +116,7 @@ bitmasks as names, not numbers: the client decodes them to
 `EkfStatusFlags`, ...; bitmasks are frozensets, test with `flag in
 message.base_mode`). Raw journal fields from `linkhub query ... show --json`
 use `{"type": "MAV_X"}` objects and `"A | B"` strings; decode them with
-`decode_message(RawMessage(...))`. Only the legacy `mavlink.jsonl` readers
-(`flight_log.py`, `diagnose_sitl.py`, `ekf_flags.py` integer masks) see numeric
-pymavlink values. Fixture STATUSTEXT log lines print the severity name
+`decode_message(RawMessage(...))`. Fixture STATUSTEXT log lines print the severity name
 (`[sev=MAV_SEVERITY_INFO]`).
 
 ## Lockstep protocol: one non-negotiable rule
@@ -140,39 +136,25 @@ For lower-level lockstep ownership, see
 
 ## SITL scripting-thread starvation
 
-Every generated `AP_Vehicle` Lua binding in ArduPilot 4.7.1 is marked
-`scheduler-semaphore`. The main loop holds that semaphore while it runs and
-releases it only inside `AP::ins().wait_for_sample()`. In SITL the stack
-reached a state where the main thread almost never released it, so
-`vehicle:*` calls from Lua blocked for seconds. RC4/RC8 overrides then expired
-(`RC_OVERRIDE_TIME`), output 8 dropped, and heli runup restarted. Do not hide
-this by raising or disabling `RC_OVERRIDE_TIME`.
+Lua `vehicle:*` bindings must take ArduPilot's scheduler semaphore, which the
+main loop releases only while waiting for the next IMU sample. In lockstep
+SITL, each scheduler delay advances at least one physics frame:
 
-**Root cause: `SIM_RATE_HZ=400`.** A gdb stall snapshot
-(`tests/sitl/thread_trace.py`, `stall_snapshot_s`) taken while Lua was blocked
-in `HALSITL::Semaphore::take` from
-`AP_Vehicle_set_target_angle_and_rate_and_throttle` showed the main thread in
-`AP_Scheduler::loop` → `delay_microseconds` → `SITL_State::wait_clock` →
-`JSON::recv_fdm` → `sync_frame_time`. That is the SITL-only
-`delay_microseconds(1)` that `AP_Scheduler::loop()` runs *after* `run()`, while
-it still holds the semaphore. In lockstep, any delay must step at least one
-physics frame. At 400 Hz one frame is the whole 2.5 ms loop, so the full
-wall-clock frame (including the real-time pacing sleep) elapsed with the lock
-held. `wait_for_sample()` then found its sample already due and returned
-immediately, so the unlocked window was effectively zero.
+- At `SIM_RATE_HZ=1200` a frame is 0.83 ms, so the main loop still waits for
+  later samples with the semaphore released and Lua gets to run.
+- At 400 Hz one frame is the whole 2.5 ms loop, so the semaphore is almost
+  never free: Lua calls block for seconds, RC overrides time out, and heli
+  runup restarts.
 
-At ArduPilot's SITL default of `SIM_RATE_HZ=1200`, the locked delay advances
-one 0.83 ms frame and `wait_for_sample()` steps the remaining frames unlocked.
-Keep `SIM_RATE_HZ` at 1200 in `tests/sitl/rawes_sitl_defaults.parm` and the
-torque boot params; the mediator follows the servo-packet frame rate. This is a
-lockstep artifact; hardware does not step physics inside the scheduler.
+Keep `SIM_RATE_HZ=1200` in `tests/sitl/rawes_sitl_defaults.parm` and the torque
+boot params; the mediator follows the servo-packet frame rate. Do not raise or
+disable `RC_OVERRIDE_TIME` to hide such stalls. This is a SITL-only effect.
 
 The static GUIDED holds (the entry hold after `ENTER_GUIDED` and the passive
 hold after `ENTER_PASSIVE`) never poll `vehicle:get_mode()`. They call
 `vehicle:set_target_angle_and_rate_and_throttle()` only when the target changes
 (at most every 50 ms) and otherwise once per second as a keepalive inside
-`GUID_TIMEOUT` (3 s). This keeps scheduler-locked calls to a minimum but was
-not, by itself, sufficient at 400 Hz.
+`GUID_TIMEOUT` (3 s). This keeps semaphore-taking calls to a minimum.
 
 ## Kinematic hold: current shared implementation
 

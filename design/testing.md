@@ -19,8 +19,12 @@ into a long static table:
 ```powershell
 uv run python -m pytest --collect-only -q tests\unit
 uv run python -m pytest --collect-only -q tests\simtests
-uv run python -m pytest --collect-only -q tests\sitl
 ```
+
+List SITL tests through the Docker runner ([sitl_testing.md](sitl_testing.md)),
+never host-side pytest. `tests/envelope/` and `tests/hil/` are separate suites
+not covered by the commands above; `tests/hil/` talks to real hardware and has
+its own prerequisites.
 
 ## Running unit and simtests
 
@@ -89,9 +93,9 @@ and run on the host Python environment, not in Docker.
 | `test_steady_flight_offplane.py` | Off-plane steady-flight boundedness from a rotated launch plane |
 | `test_pump_cycle_unified.py` | Python pumping-cycle controller plus governed winch |
 | `test_pump_cycle_lua.py` | Lua pumping-cycle mirror of the unified pumping test |
-| `test_landing.py` | Python landing sequence with landing planner and winch |
-| `test_landing_lua.py` | Lua landing-mode mirror of the Python landing test |
-| `test_sensor_closed_loop.py` | PhysicalSensor consistency during sustained closed-loop flight |
+| `test_landing.py` | Python landing prototype; currently skipped pending controller rework |
+| `test_landing_lua.py` | Lua landing prototype; currently skipped (Lua landing mode 4 is not implemented) |
+| `test_sensor_closed_loop.py` | Sensor consistency tests; the sustained closed-loop case is currently skipped for rotation-matrix drift |
 | `test_ground_liftoff.py` | Takeoff-to-steady transition scenario; currently marked skipped while behavior is investigated |
 | `test_yaw_regulation_lua.py` | Closed-loop Lua yaw-trim observer against the torque plant |
 
@@ -135,9 +139,11 @@ Keep these in sync:
 
 - When `scripts/rawes.lua` gains a new module-level local that tests need,
   export it from `scripts/rawes_test_surface.lua` in the same change.
-- `_PumpingPythonMode` in `tests/common/mock_ardupilot.py` is a mechanical port
-  of the Lua steady-loop behavior; when Lua altitude/tension logic changes,
-  update the Python port in the same commit.
+- Keep `_PumpingPythonMode` altitude/tension logic aligned with Lua. Its cyclic
+  path differs: Python computes body-z-error rate targets, Lua sends absolute
+  angles with zero rate inputs. Use Lua-backed tests and SITL to
+  test deployed cyclic behavior (see
+  [flight_stack.md](flight_stack.md#49-simulation-mapping)).
 
 ## Simtest outputs and telemetry
 

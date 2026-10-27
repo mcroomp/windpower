@@ -10,20 +10,19 @@ the aero call sits inside the runtime, see [simulation.md](simulation.md).
 
 ## Current runtime usage
 
-- `simulation\physics_core.py` and `tests\simtests\simtest_runner.py`
-  create the live model with `dynbem.create_aero(...)`.
+- `simulation\physics_core.py` creates the live model with
+  `dynbem.create_aero(...)`; `tests\simtests\simtest_runner.py` delegates to
+  that core. Envelope tools also create their own model instances.
 - The production/default model key in this repo is `quasi_static`.
 - Alternative model keys such as `oye`, `pitt_peters`, and `vpm` appear
   only when a test or tool opts into them explicitly.
 - The call shape used throughout the repo is:
   `result, state = aero.step(inputs, state, dt)`.
 
-Older docs that describe an in-repo `compute_forces()` API or a local
-`RotorOutput` type are obsolete.
-
 ## `RotorInputs` fields windpower currently passes
 
-Every current call site in this repo populates these fields:
+The shared physics runtime populates these fields; individual probes may
+use `RotorInputs` defaults for optional values:
 
 | Field | Meaning in windpower | Evidence |
 |---|---|---|
@@ -119,9 +118,6 @@ When investigating sign bugs, use these tests first:
   root cutout, 0.125 m chord, aspect ratio 12, `CD_structural` 0.021);
   `tests\unit\test_rotor_definition.py` loads it and checks the derived
   geometry.
-- `archive\aero\aero_deschutter.py` is the archived in-repo strip-theory
-  implementation, kept only for offline comparison. It is not used by
-  `PhysicsCore`, `PhysicsRunner`, or `mediator.py`.
 - De Schutter J., Leuthold R., Diehl M. (2018), "Optimal Control of a
   Rigid-Wing Rotary Kite System for Airborne Wind Energy"
   ([PDF](../documents/DeSchutter2018.pdf)). The repo's pumping logic is a

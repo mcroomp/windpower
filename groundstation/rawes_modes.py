@@ -29,7 +29,7 @@ from linkhub_client.messages import MavCmd, MavResult, NamedValueInt
 
 # ── Mode numbers (RAWES_MODE script-generated param) ──────────────────────────
 
-MODE_NONE     = 0   # script passive: no control-channel overrides (CH8 interlock hold still applies while armed)
+MODE_NONE     = 0   # no GUIDED guidance; neutral swash while disarmed, shared interlock safety
 MODE_STEADY   = 1   # bz_altitude_hold cyclic (commanded tension) + altitude-PID collective
 MODE_ACRO_MANUAL = 2  # normalized NVP roll/pitch/collective through ACRO flybar
 MODE_PASSIVE  = 3   # kinematic capture helper: hold IC attitude during release
@@ -70,12 +70,12 @@ def send_rawes_command(
 
 # ── Named-float control values ────────────────────────────────────────────────
 
-NV_ARMON_KEY   = "RAWES_ARM"    # named-float key: arm vehicle and start disarm countdown
+NV_ARMON_KEY   = "RAWES_ARM"    # disarm countdown for an already-armed vehicle; never arms
                                   # value = countdown milliseconds; re-send to refresh
 
 # ── Named-float tuning key ────────────────────────────────────────────────────
 
-NV_SLEW_KEY     = "RAWES_SLW"    # body_z / elevation slew rate limit [rad/s] — also a RAWES_* param (override via NVF for runtime changes)
+NV_SLEW_KEY     = "RAWES_SLW"    # parameter name; current Lua does not consume an NVF override
 NV_MANUAL_ROLL_KEY = "RAWES_RLL"  # normalized ACRO-manual roll [-1,1]
 NV_MANUAL_PITCH_KEY = "RAWES_PIT" # normalized ACRO-manual pitch [-1,1]
 NV_MANUAL_COL_KEY = "RAWES_COL"   # normalized ACRO-manual collective [0,1]

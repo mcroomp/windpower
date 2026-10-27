@@ -21,13 +21,15 @@ From the active rotor definition:
 |---|---:|---|
 | Blade count | 4 | `n_blades` |
 | Root cutout radius | 0.5 m | `root_cutout_m` |
-| Blade span (cutout to tip) | 1.5 m | rotor definition description |
+| Modeled radial span (cutout to tip) | 2.0 m | `radius_m - root_cutout_m` |
+| Physical foam-blade length in the description | 1.5 m | rotor definition description; not the modeled radial span |
 | Total rotor radius | 2.5 m | `radius_m` |
 | Chord | 0.20 m | `chord_m` |
 | Twist | 0° | `twist_deg` |
 
-The rotor definition itself asks for a tape-measure confirmation of these
-dimensions on the physical rotor.
+The rotor definition describes a 1.5 m foam blade on a 1.0 m boom; the model
+treats 0.5–2.5 m from the hub centre as the aerodynamic span (2.0 m). The
+definition asks for tape-measure confirmation of the physical dimensions.
 
 ## Components
 
@@ -79,10 +81,11 @@ Output 9 must stay mapped at boot (see the safe-off invariant in
 [arming.md](arming.md)).
 
 **SITL exclusion.** ArduCopter-heli SITL does not compile the BLHeli backend and
-drives output 9 as plain PWM, so the stack harness excludes `SERVO9_*`,
-`SERVO_BLH_*`, `SERVO_DSHOT_*`, and `RPM1_*` from boot verification
-(`SITL_UNSUPPORTED_PARAMS` in [stack_utils.py](../tests/sitl/stack_utils.py);
-see [sitl_testing.md](sitl_testing.md)).
+drives output 9 as plain PWM, so the stack harness excludes only the names in
+`SITL_UNSUPPORTED_PARAMS` in [stack_utils.py](../tests/sitl/stack_utils.py).
+The exact list is maintained in
+[sitl_testing.md](sitl_testing.md#dshotblheli-parameters-excluded-from-sitl-verification).
+Every other parameter, including `SERVO9_FUNCTION`, is still verified.
 
 To validate on hardware: confirm the output mapping and DShot masks against the
 parm file, then check that `watch esc` in `calibrate` shows RPM updating while

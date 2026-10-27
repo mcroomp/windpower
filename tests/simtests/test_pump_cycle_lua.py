@@ -293,11 +293,10 @@ def test_lua_pumping_constants():
     for name, _ in _cmd_to_nv(dummy):
         assert len(name) <= 10, f"NV name '{name}' exceeds 10-char MAVLink limit"
 
-    # Lua pumping now matches Python-mode altitude PID + rate-only body_z path.
+    # Lua and Python-mode altitude PID gains match.
     assert float(f.KP_ALT)                == pytest.approx(0.0263, rel=1e-3)
     assert float(f.KI_ALT)                == pytest.approx(0.0026, rel=1e-3)
     assert float(f.KD_VZ)                 == pytest.approx(0.105, rel=1e-3)
-    assert float(f.KP_EL)                 == pytest.approx(2.5, rel=1e-3)
 
 
 def test_lua_pumping_unified(simtest_log):

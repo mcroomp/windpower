@@ -246,7 +246,7 @@ Routes come from `linkhub\src\http.rs`.
 | `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/start-upload/remove by `path`. |
 | `/v1/mavlink/directories` | `POST` | MAVFTP create-directory operation. |
 | `/v1/mavlink/logs` | `GET` | List DataFlash logs. |
-| `/v1/mavlink/transfers` | `GET`, `POST` | List background file/log downloads, or start one. |
+| `/v1/mavlink/transfers` | `GET`, `POST` | List upload/download jobs, or start a file/log download. |
 | `/v1/mavlink/transfers/{id}` | `GET`, `DELETE` | Poll one transfer; cancel it, or forget it once finished. |
 | `/v1/mavlink/transfers/{id}/content` | `GET` | The verified bytes of a completed transfer. |
 | `/v1/mavlink/status` | `GET` | Live link + vehicle status snapshot. |
@@ -422,6 +422,10 @@ Root syntax:
 ```
 
 `--after` and `--through` bound the offline scan in journal-sequence space.
+Offline queries do not read a running process's in-memory active chunk.
+For a live disk-based check, call `POST /v1/journal/flush` first; use live
+HTTP reads when the current unflushed tail is needed. Force-stopping a service
+can lose the unflushed tail even though graceful shutdown normally flushes it.
 
 ### Subcommands
 
@@ -459,9 +463,13 @@ Implemented today:
 - 1-second sampling with a 3-second moving average window;
 - `rx_bps` / `tx_bps` reported as `null` while disconnected.
 
-Proposed, not implemented:
+The browser has its own explicit connection/baud-selected display profiles;
+see [UI telemetry behavior](../linkhub-ui/README.md#telemetry-behavior).
+These are not automatic LinkHub congestion management.
 
-- USB/radio bandwidth profiles;
+Proposed, not implemented in LinkHub:
+
+- transport-owned USB/radio bandwidth profiles;
 - priority tiers;
 - rate leases;
 - adaptive shedding or automatic delivered-rate arbitration.

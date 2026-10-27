@@ -5,10 +5,10 @@ hardware and SITL startup sequences, safe-off requirements, traditional-heli
 ArduPilot behavior that affects those sequences, and the evidence required
 before changing them.
 
-`HARDWARE_STARTUP.md` is the chronological hardware-session log. Record ports,
-commands, measurements, and final state there after a hardware session, but
-update this document whenever a finding changes the current arm/disarm model or
-procedure.
+[HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md) preserves historical hardware
+investigations and mistakes. Consult it when diagnosing a recurring problem,
+but use this document for current procedure. Update this owner whenever source
+or tests change arm/disarm behavior.
 
 The ArduPilot source facts below are verified against Copter 4.7.1,
 `dbe792162d06cab66c3475fd5556bf7a120f119e`.
@@ -46,9 +46,13 @@ SITL is unaffected: the stack harness sets its own `INITIAL_MODE`. The other
 safe-off items are still verified after a reboot, so run `stop` / `disarm`
 before an armed test.
 
+During a live armed bench test, do not change compass/EKF yaw-source parameters.
+Use LinkHub as the sole physical-transport owner, and inspect attitude with
+quaternion/target evidence rather than wrapped Euler-yaw subtraction alone.
+
 Disarmed does not by itself mean that the swash is neutral or that an output is
-unassigned. Verify the complete invariant. Do not use historical port or baud
-values: the first hardware operation in a conversation must run
+unassigned. Verify the complete invariant. Discover the connection live: the
+first hardware operation in a conversation must run
 `python -m calibrate` without connection arguments and reuse the detected
 native Pixhawk USB connection only for that session.
 
@@ -72,6 +76,9 @@ Disarm behavior is:
 5. Apply and verify the complete safe-off invariant.
 
 Cleanup must run after partial startup failures as well as successful runs.
+This is a required cleanup path, not a hard wall-clock guarantee: HTTP
+connection/operation timeouts can delay mode release and disarm. A CLI observation
+duration is not an independent vehicle-side armed watchdog.
 
 ## Traditional-heli facts relevant to startup
 
@@ -256,8 +263,8 @@ through the common safe-off path.
 
 ## Disarmed collective setup
 
-`run collective [--duration S] [--trim thr=0.5]` and the browser's **Swash**
-calibration panel share `RAWES_MODE=6`. This is an explicit **servos-live setup
+`rawes run collective [--duration S] [--trim thr=0.5]` (the Node CLI) and the
+browser's **Swash** calibration panel share `RAWES_MODE=6`. This is an explicit **servos-live setup
 state**, not normal safe-off and not a flight-staging mode. The rotor and swash
 must be physically secured before use. It never arms or enters GUIDED.
 
@@ -265,9 +272,9 @@ Startup requires a connected, ready, disarmed vehicle, `H_FLYBAR_MODE=1`,
 `IM_ACRO_COL_EXP=0`, and the boot-established `H_TAIL_TYPE=3` /
 `SERVO9_FUNCTION=36` configuration. The command selects ACRO, sets `H_SV_MAN=0`
 and `H_YAW_TRIM=0`, then sends normalized `RAWES_COL`. The default is 50%
-collective, not a promise of zero blade pitch. The terminal command provides
-collective-only adjustment; the panel also sends normalized `RAWES_RLL` and
-`RAWES_PIT`. Passive-flight attitude and yaw hotkeys remain inactive.
+collective, not a promise of zero blade pitch. The CLI adjusts collective
+only; the panel also sends normalized `RAWES_RLL` and `RAWES_PIT`.
+Passive-flight attitude and yaw hotkeys are inactive.
 
 Lua holds yaw neutral and interlock low on every setup tick; ArduPilot continues
 to own swash mixing, configured travel limits, and disarmed DDFP inhibition.
@@ -320,12 +327,17 @@ manual input cancels the sweep. This does not run native `H_SV_MAN=5` or cycle
 collective through its endpoints. Software bounds do not establish physical
 clearance: expanding configured limits can bind or damage the mechanism.
 
-Limit writes (`H_COL_MIN`, `H_COL_MAX`, `H_CYC_MAX`) require an idle controller,
-`RAWES_MODE=0`, `H_SV_MAN=0`, and confirmed disarmed status before each write.
-Edits apply only on explicit Apply, preserve a valid endpoint ordering during
-writes, and verify readbacks. An uncertain/partial write is reported as a
-failure requiring reload and verification; it is not silently rolled back or
-reported as successful.
+The browser's **Apply limits** writes `H_COL_MIN`, `H_COL_MAX`, `H_CYC_MAX`,
+and sets `SERVO1/2/3_TRIM` to the collective midpoint (rounded down).
+
+- **Before writing**, it requires: no active run, `RAWES_MODE=0`,
+  `H_SV_MAN=0`, and a connected, ready, disarmed vehicle.
+- **The six values go in one batch.** The batch is not atomic and the write
+  order is not guaranteed, so the swash can move while it is applied — keep
+  the mechanism secured.
+- **Afterwards**, it reads everything back and re-checks that the vehicle is
+  still disarmed. Any mismatch or partial write is reported as a failure
+  (nothing is rolled back); reload and verify before continuing.
 
 `tests/unit/test_collective_lua.py` checks the actual Lua mode, mapping,
 freshness/timeout boundaries, neutralization and arm/configuration rejection.
@@ -391,4 +403,4 @@ inspection changes any critical fact about:
 - required telemetry gates, tests, or safe-off state.
 
 Do not leave a changed arm/disarm rule only in a test, code comment, pull
-request discussion, or hardware-session log.
+request discussion, or run artifact.

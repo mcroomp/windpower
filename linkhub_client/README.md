@@ -137,6 +137,15 @@ MAVLink command and parameter helpers:
 - `set_message_rates(rates, timeout=10.0)`
 - `set_message_interval(message_id, interval_us)`
 
+LinkHub also supports reading a chosen list of parameters in one request
+(`POST /v1/mavlink/parameters`). The TypeScript client uses it; the Python
+client has no wrapper for it yet (`fetch_all_params()` reads the whole table).
+
+Error handling: `get_param()` returns `None` and `set_param()` returns `False`
+when LinkHub reports an error. Local connection failures (for example a socket
+timeout) are **not** caught and raise to the caller, so workflows must still
+run their own cleanup.
+
 MAVFTP, DataFlash, and optional motor helpers:
 
 - `list_files(path)`

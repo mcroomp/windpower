@@ -7,7 +7,7 @@ RAWES MAVLink stack.
 
 One LinkHub process owns each configured physical link. For MAVLink this means:
 
-- one TCP, serial, or BLE connection;
+- one TCP, UDP peer/listener, serial, or BLE transport;
 - one GCS heartbeat source;
 - one outbound frame writer;
 - one component and capability model;
@@ -23,6 +23,49 @@ one raw MAVLink byte stream; outgoing writes are fragmented to fit the
 negotiated ATT payload size. BLE support is built into LinkHub. The BLE
 peripheral must be advertising, in Bluetooth LE mode, and configured to forward
 MAVLink from its UART.
+
+### UDP transport
+
+`linkhub/src/udp.rs::UdpStream` adapts datagrams to the common MAVLink frame
+reader/writer:
+
+- `udp:IP:PORT` binds an ephemeral local port and sends only to that configured
+  remote peer. Incoming datagrams from other addresses are ignored.
+- `udpin:IP:PORT` binds the given local address and pairs with the sender of
+  the first non-empty datagram. Sends wait until a peer is paired; other
+  senders are then ignored. (Pairing only selects the peer — it does not
+  authenticate it or imply a heartbeat.)
+- Each datagram is buffered whole, so the frame reader can consume it in
+  smaller reads. Empty datagrams are ignored.
+- With a peer selected (always for `udp:`, after pairing for `udpin:`), five
+  seconds without a datagram from it ends the transport; the normal reconnect
+  and generation-change handling follows. An unpaired listener waits
+  indefinitely.
+- UDP adds no reliability, ordering, or retransmission. Command/parameter
+  retries happen in the protocol layer above, and a successful local send is
+  not a vehicle acknowledgement.
+
+Connection forms require numeric IP/port addresses; IPv6 uses brackets.
+See the [service examples](../linkhub/README.md#run-the-service) for remote
+DroneBridge registration and listener setup.
+
+### Exclusive DroneBridge UDP lifecycle
+
+`--dronebridge-url` is an explicit **exclusive-use** option, accepted only
+with a remote-peer `udp:` connection. It queries the bridge's client list
+before startup. On graceful service exit, LinkHub stops its transport writer,
+clears **all** bridge UDP clients including the saved target, and queries the
+list again to verify it is empty. The standalone connection check also attempts
+cleanup after success, failure, or interruption.
+
+`linkhub/src/dronebridge.rs` talks to the bridge's HTTP origin (no redirects,
+no proxy) and checks that the reported client count matches the list. Some
+bridge firmware clears the list without answering the DELETE request, so a
+timeout is accepted only if the follow-up query shows an empty list; HTTP
+errors or remaining clients are reported as cleanup failures.
+
+Do not enable this option on a shared bridge. A killed process, a crash, or
+lost HTTP access to the bridge skips cleanup; check the bridge afterwards.
 
 ## Unified journal
 
@@ -79,43 +122,18 @@ HTTP/JSON API.
 
 ## HTTP API
 
-The live router currently exposes:
-
-| Route | Methods | Purpose |
-| --- | --- | --- |
-| `/health/live` | `GET` | Liveness probe. |
-| `/health/ready` | `GET` | Ready when MAVLink is connected and has a heartbeat. |
-| `/v1/status` | `GET` | Service/run/journal status. |
-| `/v1/journal/flush` | `POST` | Flush the active in-memory chunk. |
-| `/v1/records` | `GET` | Mixed journal projection over diagnostic + MAVLink records. |
-| `/v1/diagnostics/events` | `GET`, `POST` | Diagnostic-event projection and diagnostic ingestion. |
-| `/v1/mavlink/frames` | `GET`, `POST` | Raw/decoded MAVLink frame projection and raw frame injection. |
-| `/v1/mavlink/messages` | `GET`, `POST` | Decoded MAVLink message projection and decoded message send. |
-| `/v1/mavlink/commands` | `POST` | `COMMAND_LONG` execution. |
-| `/v1/mavlink/message-requests` | `POST` | One-shot message request by name. |
-| `/v1/mavlink/version` | `GET` | `AUTOPILOT_VERSION` request. |
-| `/v1/mavlink/capabilities` | `GET` | Capability summary. |
-| `/v1/mavlink/components` | `GET` | Known heartbeat senders. |
-| `/v1/mavlink/parameters` | `GET`, `PUT` | Bulk parameter list / batch set. |
-| `/v1/mavlink/parameters/{name}` | `GET`, `PUT` | Single parameter read/write. |
-| `/v1/mavlink/message-rates` | `PUT` | Explicit message-rate requests. |
-| `/v1/mavlink/message-rates/{message}` | `GET` | Read one configured interval. |
-| `/v1/mavlink/files` | `GET`, `PUT`, `DELETE` | MAVFTP list/start-upload/remove. |
-| `/v1/mavlink/directories` | `POST` | MAVFTP create-directory operation. |
-| `/v1/mavlink/logs` | `GET` | DataFlash log list. |
-| `/v1/mavlink/transfers[/{id}[/content]]` | `GET`, `POST`, `DELETE` | Background MAVFTP uploads and MAVFTP/DataFlash downloads: poll, collect downloads, cancel. |
+The route/method inventory and request examples are in
+[linkhub/README.md](../linkhub/README.md#route-inventory) (source:
+`linkhub/src/http.rs`). This document covers what the routes mean.
 
 File transfers are jobs rather than long-lived or streamed responses because
 HTTP cannot reliably represent link stalls or mid-body failures. A job's
 progress and loss statistics are its own state and it survives client
 disconnects. Download content is released only once it is whole and verified;
-uploads complete only after the remote CRC matches. The engines live in
-`linkhub/src/transfer/` (including the pure, deterministic MAVFTP burst reader)
-and `linkhub/src/operations/{files,logs}.rs`.
-| `/v1/mavlink/status` | `GET` | Live link + vehicle status snapshot. |
-| `/v1/motor` | `GET`, `PUT` | Optional Bluetooth motor status and set-running command. |
-| `/v1/motor/stop` | `POST` | Optional Bluetooth motor stop. |
-| `/v1/motor/reconnect` | `POST` | Optional Bluetooth motor reconnect. |
+uploads complete only after the remote CRC matches. The application job registry
+lives in `linkhub/src/transfer/` and scheduling in
+`linkhub/src/operations/mod.rs`; MAVFTP/DataFlash engines live in
+`linkhub/mavlink-protocol/src/`.
 
 Route-by-route invocation examples, request bodies, and CLI usage live in
 [linkhub/README.md](../linkhub/README.md); this document keeps the shared API
@@ -282,6 +300,13 @@ write type; that native type is preserved without rejecting an equal value.
 Conflicting concurrent writes have no promised final-value order; callers that
 require an ordered sequence must await each write themselves.
 
+Selected batch reads use `POST /v1/mavlink/parameters` with `names`,
+`timeout_ms`, and `retries`; `GET` lists the full table and `PUT` writes a
+batch. The selected-read implementation normalizes all names and rejects
+duplicates before transmission, then pipelines requests through the shared
+batch transaction. A batch is not an atomic parameter snapshot or an ordered
+multi-write operation.
+
 LinkHub remains the sole connection, transmission, and journal owner. Its adapter
 supplies target selection and observed messages and performs every actual send
 through the existing link/journal boundary. HTTP/CLI projections, transfer job
@@ -366,14 +391,20 @@ LinkHub's message-rate API. LinkHub measures `rx_bps` and `tx_bps` in the link
 task with 1-second samples and a 3-second moving average. Rates are null while
 disconnected and until the first sample after reconnect.
 
-**Proposed, not implemented:** USB/radio bandwidth profiles, priority tiers,
-rate leases, and adaptive shedding.
+The browser's telemetry profiles (`linkhub-ui/src/telemetry-profiles.json`)
+pick message rates by connection type and baud. They are ordinary rate requests
+from the client; LinkHub itself does not adapt rates.
+
+**Proposed, not implemented in LinkHub:** transport-owned bandwidth profiles,
+priority tiers, rate leases, and adaptive shedding.
 
 ## Journal query
 
 For a running LinkHub, prefer the live HTTP range query on
 `GET /v1/mavlink/messages`; `linkhub query` is the offline reader for
-immutable `.lhc` chunks of stopped runs.
+immutable `.lhc` chunks. It cannot see records still in a running service's
+in-memory chunk: call `POST /v1/journal/flush` first. A graceful shutdown also
+flushes; a killed process can lose that unflushed tail.
 
 The query CLI accepts a journal directory, its parent run directory, or a data
 directory containing exactly one run. Parent options `--after <sequence>` and

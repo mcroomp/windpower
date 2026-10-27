@@ -8,8 +8,9 @@ and rate-control stack. It has two layers:
 | **Outer (attitude)** | `GuidedAttitudeController` | `AC_AttitudeControl::input_quaternion` + `attitude_controller_run_quat` (GUIDED mode) |
 | **Inner (rate)** | `HeliRateController` | `AC_AttitudeControl_Heli` rate PID wrapper |
 
-Both layers use parameter names that are 1:1 with ArduPilot. Gains tuned here
-transfer directly to a `.parm` file.
+Both layers use ArduPilot-style parameter names. This models the control math
+only, not mode entry, arming/spool state, or failsafes — validate those in
+SITL. Python tuning results are not hardware acceptance.
 
 Current RAWES Lua steady/passive/takeoff behavior uses the direct-thrust Guided
 angle path (`set_target_angle_and_rate_and_throttle(...)`). This package also
@@ -81,22 +82,22 @@ gp = GuidedAttitudeParams.from_heli_params(hp)
 ctrl = GuidedAttitudeController(hp, gp)
 rot = Rotation.identity()
 
-# -- 50 Hz outer tick (mirrors current rawes.lua steady path) --
+# -- One outer tick (current Lua steady uses this API at 50 Hz) --
 ctrl.set_target_angle_and_rate_and_throttle(
     roll_deg=0.0, pitch_deg=-65.0, yaw_deg=0.0,
     roll_rate_degs=0.0, pitch_rate_degs=0.0, yaw_rate_degs=0.0,
-    throttle=0.26, sim_time=t_outer)
+    throttle=0.26, sim_time=0.0)
 
 # Alternatively, from a 3×3 rotation matrix (body columns in NED):
 # ctrl.set_target_rotation(R_body_ned, sim_time=t_outer)
 
 # -- 400 Hz inner tick (mirrors physics runner) --
 out = ctrl.update(
-    q_body_ned=rot.as_quat(),        # [x,y,z,w] scipy passive body-to-NED
-    gyro_body_rads=(roll_rate, pitch_rate, yaw_rate),
+    q_body_ned=rot.as_quat(),        # [x,y,z,w], body-to-NED
+    gyro_body_rads=(0.0, 0.0, 0.0),
     dt=0.0025,
     collective_norm=0.5,
-    sim_time=t_inner)
+    sim_time=0.0025)
 
 # out.roll_cyclic  -> swashplate roll  [-1, 1]
 # out.pitch_cyclic -> swashplate pitch [-1, 1]
@@ -105,63 +106,27 @@ out = ctrl.update(
 
 ### How `GuidedAttitudeController` maps to ArduPilot
 
-Regardless of whether the caller uses direct thrust or the climbrate-compatible
-path, every 400 Hz tick runs the same target-slew / attitude / rate machinery
-as ArduPilot:
-
-```
-set_target_angle_and_climbrate(roll, pitch, yaw)
-    stores _q_commanded
-
-400 Hz update():
-  Step 1  update_attitude_target()
-             _attitude_target *= from_rotvec(_ang_vel_target * dt)
-             [slews the internal target, NOT a jump to commanded]
-
-  Step 2  attitude error:
-             err_rot = _attitude_target.inv * _q_commanded
-             err_rotvec = axis_angle(err_rot)
-
-  Step 3  input_shaping_angle (per axis) -> update _ang_vel_target
-             shaped by ATC_INPUT_TC + ATC_ACCEL_R/P/Y_MAX
-
-  Step 4  attitude_controller_run_quat():
-    a. thrust_vector_rotation_angles(_attitude_target, q_body)
-          -> att_error (body-frame roll/pitch/yaw)
-    b. update_ang_vel_target_from_att_error(att_error)
-          -> P-correction via sqrt_controller
-    c. ang_vel_ff = rot_t2b * _ang_vel_target   (feedforward in body frame)
-    d. blend feedforward based on thrust_error_angle:
-          < 30 deg  : add full ff (roll+pitch+yaw)
-          30–60 deg : partial ff, yaw blends toward gyro
-          > 60 deg  : no roll/pitch ff; yaw rate target = gyro (locked)
-    e. (roll_rate_target, pitch_rate_target, yaw_rate_target) -> HeliRateController
-```
-
-### The 30/60 degree feedforward blending threshold
-
-This behavior is easy to miss:
-
-- The threshold is on the angle between **`_attitude_target`** and **`q_body`**,
-  NOT between `_q_commanded` and `q_body`.
-- Because `_attitude_target` slews slowly (via `ATC_INPUT_TC`), it usually
-  stays close to the body. The `>60 deg` locked branch only fires when the
-  body has been physically pushed far from where AP last computed the target.
-- When locked: `yaw_rate_target = gyro[2]` — yaw PID error = 0, `yaw_cmd ≈ 0`.
-  This prevents yaw I-term windup while the thrust vector is being recovered.
+The master walkthrough for target integration, third-order angle shaping,
+thrust/heading decomposition, the heading-error clamp, and 30/60-degree
+feedforward blending is
+[GUIDED_CONTROL_LOOPS.md](../design/GUIDED_CONTROL_LOOPS.md).
+This README owns package APIs/examples, not a second set of loop equations.
 
 ### Timeout behaviour
 
-If `set_target_angle_and_climbrate` is not called for `timeout_s` (default 3 s),
+If no target setter is called for `timeout_s` (default 3 s),
 the next `update()` snap-resets `_q_commanded` and `_attitude_target` to the
 current body attitude, zeroes `_ang_vel_target`, and resets the rate PIDs.
-This matches ArduPilot re-init behaviour on GUIDED mode entry.
+It also clears direct thrust and returns to the port's simplified vertical
+path. This is Python-adapter behavior, not a model of firmware `GUID_TIMEOUT`
+or a supported hardware recovery procedure.
 
 ### Quaternion convention
 
 `q_body_ned` throughout this module is `[x, y, z, w]` (scipy convention),
-passive body-to-NED rotation. This matches `ahrs:get_quaternion()` in Lua.
-To convert from a rotation matrix: `Rotation.from_matrix(R.T).as_quat()`.
+body-to-NED rotation. The scalar ordering differs from Lua/MAVLink `[w,x,y,z]`.
+For a matrix whose columns are body axes in NED, use
+`Rotation.from_matrix(R).as_quat()`; do not transpose it.
 
 ### `set_target_rotation` vs `set_target_angle_and_climbrate`
 
@@ -170,6 +135,11 @@ body axes expressed in NED — the same `R_hub` used in the physics runner.
 It skips the Euler round-trip, which matters at extreme tilts (>80°) where
 gimbal lock degrades the ZYX decomposition. Prefer this when you have
 the full rotation matrix.
+
+The climb-rate path is a simplified vertical controller, not a full port of
+ArduPilot's `AC_PosControl`. Setters do not all clear each other's state, so
+use a new controller instance when switching between API paths in an
+experiment.
 
 ---
 
@@ -238,27 +208,11 @@ Anti-windup saturation flags (AP `_motors.limit.roll/pitch/yaw`) are computed
 internally each tick from the combined roll/pitch cyclic magnitude vs
 `H_CYC_MAX` (and yaw vs the output limit), then fed into the NEXT tick's
 `update_all(limit=...)` — mirroring AP's one-cycle-delayed feedback from
-`AP_MotorsHeli_Single::move_actuators`. There is no external `saturated`
-parameter to pass in.
+`AP_MotorsHeli_Single::move_actuators`.
 
 
-Signal path per axis (`pid.py` / `AC_PID::update_all`):
-
-```
-target  -> [NTF notch] -> [FLTT lowpass] -> _target
-                                              |
-gyro  ------------------------------------------+
-                           error = _target - gyro
-                                              |
-         +------ [NEF notch] -> [FLTE lowpass] -> _error
-         |
-         P  = p * _error
-         D  = d * FLTD(d(_error)/dt)
-         I  = integral(i * _error) clamped ±IMAX  [gated by saturated flag]
-         FF = ff * _target
-         DFF= d_ff * d(_target)/dt
-         sum -> [swash phase rotation H_SW_H3_PHANG] -> cyclic output
-```
+PID filtering, leakage, P+D derating, and pirouette-compensation equations
+are owned by [the control-loop reference](../design/GUIDED_CONTROL_LOOPS.md#6-rate-control-loop-helicopter-specific).
 
 `reset()` clears all integrators and filter states. Call after a mode
 transition to prevent stale I-term from spiking the output.
@@ -279,28 +233,31 @@ runtime model.
 
 In ArduPilot, `set_target_angle_and_climbrate` stores the commanded quaternion
 but does NOT immediately set `_attitude_target` to it. Instead, every 400 Hz
-tick, `input_shaping_angle` advances `_attitude_target` a small step toward
-`_q_commanded`, capped by `ATC_ACCEL_*_MAX` and `ATC_INPUT_TC`. A simplified
-controller that skips this no longer matches the guided-path dynamics that
-`arduloop` is trying to preserve.
+tick, the port integrates its previous target rate and uses
+`attitude_command_model` to update jerk-limited rate/acceleration toward
+`_q_commanded`. Skipping this step would change the transient response the
+model is meant to reproduce.
 
 ### Why `_attitude_target` is initialised to body attitude
 
 If `_attitude_target` started at identity while the body was already tilted,
 the first tick would see a large step error and command spike. `update()` sets `_attitude_target = q_body` on the very first call to
-avoid this. This matches ArduPilot's `input_quaternion` initialisation.
+avoid this. (Firmware mode-entry behavior is described in
+[arming.md](../design/arming.md).)
 
 ### Why notches are applied before FLTE/FLTD
 
-ArduPilot applies notch filters on the raw signal before the smoothing
-low-passes. Reversing the order shifts the effective notch centre frequency
-and reduces its depth. `pid.py` preserves the AP ordering.
+`pid.py` applies target/error notch filters before their low-passes. The D
+derivative is taken from filtered error, then passed through FLTD; FF uses
+filtered target. SMAX derates P+D rather than rate-limiting the complete
+output. Detailed equations and control-layer distinctions are owned by
+[GUIDED_CONTROL_LOOPS.md](../design/GUIDED_CONTROL_LOOPS.md).
 
 ---
 
 ## C++ source cross-references
 
-Use the parity-oriented docstrings in `guided.py`, `attitude_heli.py`, and
-`pid.py` as the verified in-repo pointers. If you need an exact ArduPilot
-mapping, compare those against the current ArduPilot checkout rather than
-relying on a static table here.
+Use the implementations in `guided.py`, `attitude_heli.py`, and `pid.py`,
+together with the [control-loop owner](../design/GUIDED_CONTROL_LOOPS.md).
+To compare against firmware, use the ArduPilot release pinned in
+`simulation/Dockerfile`.

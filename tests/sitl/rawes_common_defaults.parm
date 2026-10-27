@@ -59,11 +59,11 @@ H_RSC_MODE        1      # passthrough: no main rotor motor
 RC_SPEED          333    # PWM refresh rate for heli swash servos [Hz]
 
 # GB4008 anti-rotation (yaw) motor.
-# Canonical hardware wiring (read live from the Pixhawk 6C, 2026-07-08):
+# Canonical hardware wiring:
 #   - The motor is on OUTPUT 9 (SERVO9_FUNCTION=36 = Motor4), NOT MAIN OUT 4.
 #     Output 4 shares timer group TIM1 with the PWM swash servos (ch1-3), and
-#     DShot is all-or-nothing per group, so the motor was relocated to a
-#     DShot-capable AUX output; SERVO4 is released (FUNCTION=0).
+#     DShot is all-or-nothing per group. Output 9 uses a DShot-capable AUX
+#     group; output 4 has FUNCTION=0.
 #   - Output 9 runs bidirectional DShot so the ESC returns eRPM in-band, which
 #     RPM1 consumes for omega_spin.  See the DShot block at the end of this file.
 H_TAIL_TYPE       3
@@ -84,15 +84,11 @@ ATC_RAT_YAW_I     0.018
 # RAWES_MODE is set per-test; defaults here cover steady/pumping flight gains.
 #
 # RAWES_* quick reference:
-#   RAWES_MODE    mode selector (0=none,1=steady,2=ACRO-manual,3=passive,4=landing)
+#   RAWES_MODE    0=none,1=steady,2=ACRO-manual,3=passive,4=reserved,5=takeoff,6=setup
 #   RAWES_YAW_SLP yaw motor slope [RPM/us], 0 = bench fallback in script
 #   RAWES_KP_ALT  altitude P gain [thrust/m]
 #   RAWES_KI_ALT  altitude I gain [thrust/(m*s)]
 #   RAWES_KD_VZ   vertical-speed damping [thrust/(m/s)]
-#   RAWES_KP_EL   in-plane (elevation) position rate-P [rad/s per m]
-#   RAWES_KP_AZ   crosswind (azimuth) position rate-P [rad/s per m]
-#   RAWES_KD_EL   in-plane position rate-D [rad/s per (m/s)]
-#   RAWES_CWMAX   position rate saturation [rad/s]
 #   RAWES_SLW     elevation/body_z slew limit [rad/s]
 #   RAWES_TEL_HZ  diagnostic DEBUG_FLOAT_ARRAY emission rate [Hz]
 #   RAWES_YFF_MAX yaw trim clamp upper bound [throttle fraction]
@@ -102,25 +98,20 @@ ATC_RAT_YAW_I     0.018
 # RAWES_YAW_SLP: yaw motor slope override [RPM/µs].  0 -> use bench default 0.504.
 # Set from bench measurement of d(shaft_RPM)/d(PWM_us) for the installed motor.
 # The correct value for the GB4008 66KV + 10:1 gear is RAWES_YAW_SLP = RPM_SCALE/(GEAR_RATIO * SERVO9_SPAN_US * 2pi/60)
-# (see torque_model.py for RPM_SCALE and GEAR_RATIO). Bench measurement gives 0.504 for the old 80:44 gear.
+# (see simulation/torque_model.py for RPM_SCALE and GEAR_RATIO).
 RAWES_YAW_SLP     0
 
 # Lua steady/pumping control gains (thrust [0..1] space; AP maps thrust\u2192collective via H_COL_MIN/MAX).
 RAWES_KP_ALT      0.0263
 RAWES_KI_ALT      0.0026
 RAWES_KD_VZ       0.105
-RAWES_KP_EL       2.5     # in-plane (elevation) position rate-P gain [rad/s per m]
-RAWES_KP_AZ       0.5     # crosswind (azimuth) position rate-P gain   [rad/s per m]
-RAWES_KD_EL       0.0     # in-plane position rate-D gain [rad/s per (m/s)]
-RAWES_CWMAX       0.6     # position rate saturation [rad/s]
 RAWES_SLW         0.40    # elevation/body_z slew rate limit [rad/s]
 RAWES_TEL_HZ      2.0     # diagnostic DEBUG_FLOAT_ARRAY telemetry emission rate [Hz]
 RAWES_YFF_MAX     0.7     # yaw trim clamp upper bound [throttle fraction]
 RAWES_YFF_TAU     0.3     # yaw trim low-pass time constant [s]
 
 # --- Yaw motor output wiring + bidirectional DShot (hardware canonical) --------
-# Read live from the Pixhawk 6C, 2026-07-08.  SERVO4 is released; the GB4008 yaw
-# motor is Motor4 on OUTPUT 9 with a 1000-2000 us DShot range.
+# The GB4008 yaw motor is Motor4 on OUTPUT 9 with a 1000-2000 us DShot range.
 SERVO4_FUNCTION   0
 SERVO9_FUNCTION   36
 SERVO9_MIN        1000
