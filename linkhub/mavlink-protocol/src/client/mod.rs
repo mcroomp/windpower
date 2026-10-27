@@ -48,7 +48,6 @@ const PARAM_FLOAT: MavProtocolCapability =
 struct ProtocolClient {
     link: Arc<dyn Transport>,
     command_lock: Arc<Mutex<()>>,
-    parameter_lock: Arc<Mutex<()>>,
     ftp_sequence: Arc<Mutex<u16>>,
     log_lock: Arc<Mutex<()>>,
 }
@@ -240,7 +239,6 @@ impl Protocol for ProtocolClient {
         retries: usize,
     ) -> Result<Vec<ParameterResult>, OperationError> {
         let deadline = time::Instant::now() + timeout;
-        let _guard = lock_until(&self.parameter_lock, deadline).await?;
         let (target_system, target_component) = self.targets(None, None);
         let mut requests = Vec::with_capacity(names.len());
         for name in names {
@@ -330,7 +328,6 @@ impl Protocol for ProtocolClient {
         timeout: Duration,
     ) -> Result<ParameterResult, OperationError> {
         let deadline = time::Instant::now() + timeout;
-        let _guard = lock_until(&self.parameter_lock, deadline).await?;
         self.parameter_transaction(name, None, deadline).await
     }
 
@@ -342,7 +339,6 @@ impl Protocol for ProtocolClient {
         timeout: Duration,
     ) -> Result<ParameterResult, OperationError> {
         let deadline = time::Instant::now() + timeout;
-        let _guard = lock_until(&self.parameter_lock, deadline).await?;
         self.parameter_transaction(name, Some(value), deadline)
             .await
     }
@@ -355,7 +351,6 @@ impl Protocol for ProtocolClient {
         retries: usize,
     ) -> Result<Vec<ParameterResult>, OperationError> {
         let deadline = time::Instant::now() + timeout;
-        let _guard = lock_until(&self.parameter_lock, deadline).await?;
         if parameters.is_empty() {
             return Ok(Vec::new());
         }
@@ -515,7 +510,6 @@ impl Protocol for ProtocolClient {
         timeout: Duration,
     ) -> Result<Vec<ParameterResult>, OperationError> {
         let deadline = time::Instant::now() + timeout;
-        let _guard = lock_until(&self.parameter_lock, deadline).await?;
         let (target_system, target_component) = self.targets(None, None);
         let mut receiver = self.link.subscribe_messages();
         self.link
@@ -685,7 +679,6 @@ impl ProtocolClient {
         Self {
             link,
             command_lock: Arc::new(Mutex::new(())),
-            parameter_lock: Arc::new(Mutex::new(())),
             ftp_sequence: Arc::new(Mutex::new(initial_ftp_sequence)),
             log_lock: Arc::new(Mutex::new(())),
         }
@@ -738,10 +731,15 @@ impl ProtocolClient {
                 let name = value.param_id.to_str().map_err(|error| {
                     OperationError::Invalid(format!("invalid parameter name: {error}"))
                 })?;
-                if !pending.contains_key(name) {
+                let Some(request) = pending.get(name) else {
+                    continue;
+                };
+                let result = parameter_result(&message)?;
+                if let MavMessage::PARAM_SET(request) = request
+                    && result.value.encode_classic()? != request.param_value
+                {
                     continue;
                 }
-                let result = parameter_result(&message)?;
                 pending.remove(&result.name);
                 results.insert(result.name.clone(), result);
             }
@@ -780,14 +778,16 @@ impl ProtocolClient {
         loop {
             remaining_until(deadline)?;
             self.link.send_message(request.clone(), None, None).await?;
-            match wait_for_message(
+            match wait_for_parameter(
                 &mut receiver,
                 remaining_until(deadline)?.min(Duration::from_secs(1)),
-                |message| parameter_matches(message, &normalized, target_system, target_component),
+                &normalized,
+                (target_system, target_component),
+                value,
             )
             .await
             {
-                Ok(message) => return parameter_result(&message),
+                Ok(result) => return Ok(result),
                 Err(OperationError::Timeout) if time::Instant::now() < deadline => {}
                 Err(error) => return Err(error),
             }
@@ -891,6 +891,30 @@ async fn wait_for_message(
         if predicate(&message) {
             return Ok(message);
         }
+    }
+}
+
+async fn wait_for_parameter(
+    receiver: &mut broadcast::Receiver<Arc<ReceivedMessage>>,
+    timeout: Duration,
+    name: &str,
+    target: (u8, u8),
+    expected: Option<ParameterValue>,
+) -> Result<ParameterResult, OperationError> {
+    let deadline = time::Instant::now() + timeout;
+    loop {
+        let message = wait_for_message(receiver, remaining_until(deadline)?, |message| {
+            parameter_matches(message, name, target.0, target.1)
+        })
+        .await?;
+        let result = parameter_result(&message)?;
+        // A concurrent read/list can publish the old value of the same parameter.
+        if let Some(value) = expected
+            && result.value.encode_classic()? != value.encode_classic()?
+        {
+            continue;
+        }
+        return Ok(result);
     }
 }
 
