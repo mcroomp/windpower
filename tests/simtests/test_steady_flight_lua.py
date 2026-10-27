@@ -46,8 +46,8 @@ WIND         = np.array([0.0, 10.0, 0.0])
 FLOOR_ALT_M  = 1.0
 
 
-def _run_steady(log) -> dict:
-    """rawes.lua mode=1: 90 s altitude-hold steady flight from IC."""
+def _run_steady(log, *, tether_model: str = "spring_damper", duration_s: float = T_SIM) -> dict:
+    """rawes.lua mode=1 altitude-hold flight from IC."""
     sim = RawesLua(mode=MODE_STEADY)
     sim.armed        = True
     sim.healthy      = True
@@ -61,7 +61,7 @@ def _run_steady(log) -> dict:
     # the anchor is at the mock EKF origin (NED offset zero).
     send_anchor_ned(sim, 0.0, 0.0, 0.0)
 
-    runner  = PhysicsRunner(_ROTOR, _IC, WIND)
+    runner  = PhysicsRunner(_ROTOR, _IC, WIND, tether_model=tether_model)
     lua     = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
 
     events           = BadEventLog()
@@ -77,14 +77,15 @@ def _run_steady(log) -> dict:
 
     lua.tel_fn = lambda r, sr: dict(winch_speed_ms=v_winch)
 
-    for i in range(int(T_SIM / DT)):
+    steady_start = max(0.0, duration_s - 30.0)
+    for i in range(int(duration_s / DT)):
         t = i * DT
 
         if i % LUA_EVERY == 0:
             lua.tick(t, runner,
                      inject=lambda s, r: s.send_message(NamedValueFloat(name="RAWES_TEN", value=300.0)))
 
-        dT       = runner.tension_now - tension_target
+        dT       = runner.anchor_tension - tension_target
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
         rest_now += v_winch * DT
         sr = lua.step(runner, DT, rest_length=rest_now)
@@ -93,12 +94,12 @@ def _run_steady(log) -> dict:
         altitude    = runner.altitude
         tension_now = runner.tension_now
 
-        if runner.tether._last_info.get("slack", False):
+        if runner.tether_result.slack:
             events.record("slack", t, "flight", altitude, tension=tension_now)
         if runner.hub_state["pos"][2] >= -FLOOR_ALT_M:
             events.record("floor_hit", t, "flight", altitude)
 
-        if t >= 60.0:
+        if t >= steady_start:
             # FRD: body_z points hub→anchor (= −pos/|pos| in anchor-origin frame).
             bz   = runner.hub_state["R"][:, 2]
             pos  = runner.hub_state["pos"]
@@ -111,15 +112,15 @@ def _run_steady(log) -> dict:
         pos_hist.append(runner.hub_state["pos"].copy())
 
     if max_axle_err_deg > 45.0:
-        events.record("axle_misaligned", 60.0, "steady_state", 0.0,
+        events.record("axle_misaligned", steady_start, "steady_state", 0.0,
                       max_deg=round(max_axle_err_deg, 1))
 
     pos_arr    = np.array(pos_hist)
     alts       = -pos_arr[:, 2]
     tensions   = [tel.tether_tension for tel in lua.telemetry]
 
-    # Horizontal radius over last 30 s (steady state)
-    steady_pos = pos_arr[int(60.0 / DT):]
+    # Horizontal radius over the final 30 s, or the whole shorter smoke run.
+    steady_pos = pos_arr[int(steady_start / DT):]
     centroid   = steady_pos.mean(axis=0)
     radii      = np.linalg.norm(steady_pos[:, :2] - centroid[:2], axis=1)
 
@@ -138,6 +139,9 @@ def _run_steady(log) -> dict:
     return dict(
         events      = events,
         min_alt     = float(alts.min()),
+        max_alt     = float(alts.max()),
+        min_tension = min(tensions),
+        max_tension = max(max(tensions), max(tel.tether_anchor_tension for tel in lua.telemetry)),
         orbit_r_max = float(radii.max()),
     )
 
@@ -147,6 +151,20 @@ def _run_steady(log) -> dict:
 def test_steady_flight_lua(simtest_log):
     """rawes.lua mode=1: hub aloft, lateral motion bounded, tether taut, axle aligned for 90 s."""
     r = _run_steady(simtest_log)
+    _assert_steady(r)
+
+
+def test_tallak_tether_lua_flight(simtest_log):
+    """The loaded cable remains bounded under the real Lua controller for 10 s."""
+    r = _run_steady(simtest_log, tether_model="tallak_quasi_static", duration_s=10.0)
+    _assert_steady(r)
+    assert r["min_tension"] >= 50.0
+    assert r["max_tension"] <= 496.0
+    assert max(abs(r["min_alt"] + _IC.pos[2]), abs(r["max_alt"] + _IC.pos[2])) < 2.0
+    assert r["orbit_r_max"] < 5.0
+
+
+def _assert_steady(r: dict) -> None:
     failures = []
     if r["events"]:
         failures.append(r["events"].summary())

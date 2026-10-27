@@ -12,7 +12,7 @@ Architecture (mirrors test_pump_cycle_lua.py unit test):
             to Lua so measured-tension feed-forward + altitude hold run in-flight.
   Mediator (400 Hz):
     - GovernedWinchNode hosts the fast tension-governing loop (same control law
-      as the simtest), owns core.tether.rest_length.
+      as the simtest), supplies core.rest_length.
   rawes.lua (50 Hz):
         - Altitude PID collective controlled by RAWES_ALT NVF.
         - Rate-only bz_altitude_hold cyclic uses RAWES_TEN feed-forward.

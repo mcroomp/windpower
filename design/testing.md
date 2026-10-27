@@ -77,6 +77,35 @@ integration bugs that simple round-trip checks miss:
   `tests/unit/test_cyclic_direction_mapping.py` guard sign and ordering
   conventions through the control chain.
 
+### Tether model validation
+
+The cable contract and model limitations are owned by
+[simulation.md](simulation.md#two-ended-tether-physics).
+
+`tests/unit/test_tether_models.py` checks the original spring constitutive
+law, payout-relative damping, elastic energy/force consistency, slack,
+analytical gravity-only catenaries, endpoint reaction balance, quadratic
+transverse drag, and zero drag for parallel flow. It checks 8/16/32-segment
+convergence and sweeps 50/100/200 m spans, nominal 30/300 N preload, and
+0/10/15 m/s crosswind. Operating-envelope endpoint forces must agree with the
+32-segment reference within 1% plus 0.02 N. Warm-start wind steps must agree
+with independent cold solves; failed solves must raise explicitly.
+
+Boundary tests verify attachment position/rotational velocity, attachment
+moment, distinct kite/winch readings in telemetry, and local-load-cell drum
+energy accounting.
+
+```powershell
+uv run python -m pytest tests\unit\test_tether_models.py tests\unit\test_tether_stability.py -q
+uv run python -m pytest tests\simtests\test_steady_flight_lua.py::test_tallak_tether_lua_flight -q
+```
+
+The Tallak flight smoke test runs the real Lua controller for 10 simulated
+seconds. It requires no bad events, 50--496 N tension, altitude within 2 m
+of its starting point, and horizontal radius below 5 m. This is not a
+gust-transient or long-duration qualification. The original 90-second Lua
+steady-flight and pumping-cycle tests remain the default-model regressions.
+
 ## Simtests (`tests/simtests/`)
 
 All simtests are current, repo-local scenarios. They use the `simtest` marker

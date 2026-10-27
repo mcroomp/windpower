@@ -84,6 +84,7 @@ class TelRow:
     tether_length:      float = 0.0
     tether_extension:   float = 0.0
     tether_tension:     float = 0.0
+    tether_anchor_tension: float = 0.0
     tether_rest_length: float = 0.0
     tether_slack:       int   = 0
 
@@ -519,7 +520,7 @@ class TelRow:
         body_z_eq    optional NED unit vector (body-z setpoint).
         """
         hub_state   = runner.hub_state
-        tether      = runner.tether
+        tether_result = runner.tether_result
         tension_now = runner.tension_now
         omega_spin  = runner.omega_spin
         t_sim       = runner.t_sim
@@ -538,7 +539,6 @@ class TelRow:
         pos = np.asarray(hub_state["pos"], dtype=float)
         vel = np.asarray(hub_state["vel"], dtype=float)
         R   = np.asarray(hub_state["R"],   dtype=float)
-        ti  = tether._last_info
 
         roll  = math.atan2(float(R[2, 1]), float(R[2, 2]))
         pitch = -math.asin(float(np.clip(R[2, 0], -1.0, 1.0)))
@@ -556,13 +556,10 @@ class TelRow:
         acc_body = R.T @ acc
         bzeq = np.asarray(body_z_eq, dtype=float).tolist() if body_z_eq is not None else [0.0, 0.0, 0.0]
 
-        tf_raw = ti.get("force")
         if tether_force is not None:
             tf = np.asarray(tether_force, dtype=float)
-        elif tf_raw is not None:
-            tf = np.asarray(tf_raw, dtype=float)
         else:
-            tf = np.zeros(3)
+            tf = tether_result.force_on_hub_ned
 
         aero_fx = aero_fy = aero_fz = 0.0
         aero_mx = aero_my = aero_mz = 0.0
@@ -582,8 +579,8 @@ class TelRow:
 
         tm = np.asarray(tether_moment, dtype=float) if tether_moment is not None else np.zeros(3)
 
-        trl = float(tether.rest_length)
-        tl  = float(np.linalg.norm(pos))
+        trl = float(runner.rest_length)
+        tl  = tether_result.length_m
         wind = [float(v) for v in wind_ned]
 
         pos_h = pos[:2]
@@ -659,10 +656,11 @@ class TelRow:
             accel_z             = float(acc[2]),
             omega_rotor         = float(omega_spin),
             tether_length       = tl,
-            tether_extension    = tl - trl,
+            tether_extension    = tether_result.extension_m,
             tether_tension      = float(tension_now),
+            tether_anchor_tension = tether_result.anchor_tension_n,
             tether_rest_length  = trl,
-            tether_slack        = int(bool(ti.get("slack", False))),
+            tether_slack        = int(tether_result.slack),
             tether_fx           = float(tf[0]),
             tether_fy           = float(tf[1]),
             tether_fz           = float(tf[2]),

@@ -38,6 +38,7 @@ import numpy as np
 
 
 from simulation.physics_core import PhysicsCore, HubObservation
+from simulation.tether import Tether, TetherResult
 from simulation.controller import HeliCyclicController
 from simulation.param_defaults import load_collective_phys_range as _load_col_range
 
@@ -64,7 +65,8 @@ class PhysicsRunner:
     T_AERO_OFFSET = PhysicsCore.T_AERO_OFFSET
 
     def __init__(self, rotor, ic, wind, *, z_floor: float = -1.0,
-                 aero_model: str = "quasi_static", aero_override=None):
+                 aero_model: str = "quasi_static", aero_override=None,
+                 tether_model: str = "spring_damper", tether_override: Tether | None = None):
         """
         Parameters
         ----------
@@ -77,7 +79,8 @@ class PhysicsRunner:
         aero_override : if provided, used directly instead of create_aero()
         """
         self._core = PhysicsCore(rotor, ic, wind, z_floor=z_floor,
-                                 aero_model=aero_model, aero_override=aero_override)
+                                 aero_model=aero_model, aero_override=aero_override,
+                                 tether_model=tether_model, tether_override=tether_override)
         self._col_min, self._col_max = _load_col_range()
         self._tilt_lon_trim = float(getattr(ic, "trim_tilt_lon", 0.0))
         self._tilt_lat_trim = float(getattr(ic, "trim_tilt_lat", 0.0))
@@ -112,6 +115,18 @@ class PhysicsRunner:
     @property
     def tension_now(self) -> float:
         return self._core.tension_now
+
+    @property
+    def anchor_tension(self) -> float:
+        return self._core.anchor_tension
+
+    @property
+    def tether_result(self) -> TetherResult:
+        return self._core.tether_result
+
+    @property
+    def rest_length(self) -> float:
+        return self._core.rest_length
 
     @property
     def omega_spin(self) -> float:

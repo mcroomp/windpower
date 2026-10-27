@@ -40,7 +40,6 @@ import numpy as np
 
 # Local modules (same directory)
 from simulation.physics_core import PhysicsCore
-from simulation.tether import TetherModel, ConstantTensionTether   # noqa: F401 — re-exported for test callers
 from simulation.sitl_interface import SITLInterface, SIM_CLOCK_HZ
 from simulation.swashplate import ardupilot_h3_120_inverse, collective_out_to_rad
 from simulation.param_defaults import load_collective_phys_range as _load_col_range
@@ -243,21 +242,6 @@ def run_mediator(args, trajectory=None):
         eq_thrust  = 0.0,
         omega_spin = _omega_spin_init,
     )
-    # Optional constant-tension tether: tether_model="constant_tension" in config.
-    # Direction toward anchor; magnitude fixed at tether_constant_tension_n [N].
-    _tether_override = None
-    if cfg.get("tether_model") == "constant_tension":
-        _tension_n = float(cfg.get("tether_constant_tension_n", 300.0))
-        _anchor    = np.array(cfg.get("anchor_ned", [0.0, 0.0, 0.0]), dtype=float)
-        _axle      = float(rotor.control.axle_attachment_length_m)
-        _tether_override = ConstantTensionTether(
-            tension_n              = _tension_n,
-            anchor_ned             = _anchor,
-            axle_attachment_length = _axle,
-        )
-        log.info("Using ConstantTensionTether: %.0f N toward anchor %s",
-                 _tension_n, _anchor.tolist())
-
     core = PhysicsCore(
         rotor, _ic, wind_world,
         base_k_ang         = float(cfg["base_k_ang"]),
@@ -269,7 +253,9 @@ def run_mediator(args, trajectory=None):
             cfg["kinematic_nul_rate_gain_rads_per_rad"]
         ),
         z_floor            = -1.0,
-        tether_override    = _tether_override,
+        tether_model       = cfg["tether_model"],
+        anchor_ned         = np.asarray(cfg["anchor_ned"], dtype=float),
+        tether_constant_tension_n = float(cfg.get("tether_constant_tension_n", 300.0)),
     )
     sensor_sim = make_sensor(
         home_ned_z = float(_pos0_arr[2]),
@@ -279,10 +265,10 @@ def run_mediator(args, trajectory=None):
     )
     ev.write("config", t_sim=0.0,
              spin_sensor_sigma=round(spin_sensor._sigma, 3),
-             tether_EA_kN=round(core.tether.EA / 1000),
-             tether_rest_length_m=round(core.tether.rest_length, 1),
-             tether_damping=round(core.tether.damping, 1),
-             tether_break_load_N=round(core.tether.BREAK_LOAD_N))
+             tether_model=cfg["tether_model"],
+             tether_EA_kN=round(core.tether.properties.axial_stiffness_n / 1000),
+             tether_rest_length_m=round(core.rest_length, 1),
+             tether_break_load_N=round(core.tether.properties.break_load_n))
 
     # -- Connect ---------------------------------------------------------------
     log.info("Binding SITL UDP sockets...")
@@ -415,14 +401,15 @@ def run_mediator(args, trajectory=None):
 
         # ── Ground-station planner + winch node (free flight only) ───────
         if not _is_kinematic:
-            _ti_prev = core.tether._last_info
-            if _ti_prev.get("tension", 0) > 0.8 * core.tether.BREAK_LOAD_N:
+            _ti_prev = core.tether_result
+            _max_tension = max(_ti_prev.hub_tension_n, _ti_prev.anchor_tension_n)
+            if _max_tension > 0.8 * core.tether.properties.break_load_n:
                 log.warning(
                     "t=%.1f TETHER TENSION %.0f N is >80%% of break load (%.0f N)!",
-                    core.t_sim, _ti_prev["tension"], core.tether.BREAK_LOAD_N,
+                    core.t_sim, _max_tension, core.tether.properties.break_load_n,
                 )
             # Winch node feels its load cell + anemometer (physics side).
-            _winch_node.update_sensors(core.tension_now, wind_world)
+            _winch_node.update_sensors(core.anchor_tension, wind_world)
 
             # ── Winch command socket: receive WinchCommand from test ─────
             if _winch_sock is not None:
@@ -470,7 +457,7 @@ def run_mediator(args, trajectory=None):
             }
             _traj_cmd = _trajectory.step(
                 _state_pkt, _dt,
-                tension_n       = core.tension_now,
+                tension_n       = core.anchor_tension,
                 tether_length_m = _winch_node.rest_length,
             )
             # Telemetry phase: socket-driven reel direction overrides the
@@ -527,13 +514,17 @@ def run_mediator(args, trajectory=None):
         # tether strain mismatch at kinematic exit.  During kinematic, the position
         # is prescribed externally; rest_length must be kept in sync so that when
         # kinematic ends, the tether is pre-tensioned correctly without huge spike.
-        core.tether.rest_length = _winch_node.rest_length
 
         # SITL temporarily uses damping-only yaw again.  We still log SERVO9,
         # but do not feed the tail-motor throttle into the shared physics core.
         # This keeps the release behavior simple while we focus on logging and
         # documentation work.
-        result = core.step(_dt, collective_rad, _tilt_lon, _tilt_lat, yaw_throttle=None)
+        result = core.step(
+            _dt, collective_rad, _tilt_lon, _tilt_lat,
+            rest_length=_winch_node.rest_length,
+            payout_rate_ms=_winch_node.telemetry().speed_ms,
+            yaw_throttle=None,
+        )
         _damp_alpha = float(result.get("damp_alpha", 0.0))
 
         # Unified phase label for telemetry CSV.
@@ -562,15 +553,16 @@ def run_mediator(args, trajectory=None):
         if (not bool(result.get("is_kinematic", False))) and not _logged_transition:
             _logged_transition = True
             _tel_note = "kinematic_exit"
-            _ti = core.tether._last_info
+            _ti = core.tether_result
             ev.write("kinematic_exit", t_sim=core.t_sim,
                      pos_ned=[round(v, 4) for v in hub_state["pos"].tolist()],
                      vel_ned=[round(v, 4) for v in hub_state["vel"].tolist()],
                      body_z=[round(v, 4) for v in hub_state["R"][:, 2].tolist()],
                      omega=[round(v, 4) for v in hub_state["omega"].tolist()],
-                     tether_length_m=round(_ti.get("length", 0.0), 4),
-                     tether_tension_n=round(_ti.get("tension", 0.0), 2),
-                     tether_slack=bool(_ti.get("slack", True)),
+                     tether_length_m=round(_ti.length_m, 4),
+                     tether_tension_n=round(_ti.hub_tension_n, 2),
+                     tether_anchor_tension_n=round(_ti.anchor_tension_n, 2),
+                     tether_slack=_ti.slack,
                      T_aero_n=round(T_est, 2),
                      omega_spin_rad_s=round(core.omega_spin, 3),
                      collective_rad=round(collective_rad, 4))
@@ -591,7 +583,7 @@ def run_mediator(args, trajectory=None):
         # ── Telemetry CSV ─────────────────────────────────────────────────
         if _telemetry_writer is not None and (step % _telemetry_stride == 0):
             _rpy = sensor_data["rpy"]
-            _ti  = core.tether._last_info
+            _ti  = core.tether_result
             _aero_v_i = 0.0
             _cur_phase = _phase_label
             if _cur_phase and _cur_phase != _prev_phase and not _tel_note:
@@ -618,11 +610,12 @@ def run_mediator(args, trajectory=None):
                 "accel_y":         accel_world[1],
                 "accel_z":         accel_world[2],
                 "omega_rotor":     core.omega_spin,
-                "tether_length":   _ti.get("length",    0.0),
-                "tether_extension":_ti.get("extension", 0.0),
-                "tether_tension":  _ti.get("tension",   0.0),
-                "tether_rest_length": core.tether.rest_length,
-                "tether_slack":    1 if _ti.get("slack", True) else 0,
+                "tether_length":   _ti.length_m,
+                "tether_extension":_ti.extension_m,
+                "tether_tension":  _ti.hub_tension_n,
+                "tether_anchor_tension": _ti.anchor_tension_n,
+                "tether_rest_length": core.rest_length,
+                "tether_slack":    int(_ti.slack),
                 "tether_fx":       tether_force[0],
                 "tether_fy":       tether_force[1],
                 "tether_fz":       tether_force[2],

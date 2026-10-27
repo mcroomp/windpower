@@ -49,7 +49,6 @@ from tests.simtests.simtest_ic import load_ic
 from tests.simtests._rotor_helpers import load_default_rotor
 from simulation.frames import build_orb_frame
 from simulation.rotor_physics import resolve_i_spin_kgm2
-from simulation.tether import TetherModel
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 WIND     = np.array([0.0, 10.0, 0.0])   # NED: 10 m/s East
@@ -68,48 +67,11 @@ OFFPLANE_NORTH_DISP = 20.0   # m — crosswind displacement for off-plane cases
 LOG_DIR = SIM / "logs" / "offplane_drift_probe"
 
 
-class ForceOnlyTether:
-    """Wrap TetherModel but suppress its moment while preserving force/tension."""
+class ForceOnlyTetherCore(PhysicsCore):
+    """Diagnostic: suppress attachment moment without changing cable geometry."""
 
-    def __init__(self, base: TetherModel):
-        self._base = base
-        self._last_info: dict = {}
-
-    @property
-    def rest_length(self) -> float:
-        return self._base.rest_length
-
-    @rest_length.setter
-    def rest_length(self, value: float) -> None:
-        self._base.rest_length = float(value)
-
-    @property
-    def EA(self) -> float:
-        return self._base.EA
-
-    @property
-    def BREAK_LOAD_N(self) -> float:
-        return self._base.BREAK_LOAD_N
-
-    @property
-    def damping(self) -> float:
-        return self._base.damping
-
-    def compute(self, hub_pos: np.ndarray, hub_vel: np.ndarray, R_hub: np.ndarray = None) -> tuple:
-        force, _moment = self._base.compute(hub_pos, hub_vel, R_hub)
-        self._last_info = dict(self._base._last_info)
-        return force, np.zeros(3)
-
-
-def _force_only_tether(rotor, rest_length: float) -> ForceOnlyTether:
-    if rotor.control is None or rotor.control.axle_attachment_length_m is None:
-        raise ValueError("rotor.control.axle_attachment_length_m must be set")
-    base = TetherModel(
-        anchor_ned=np.zeros(3),
-        rest_length=float(rest_length),
-        axle_attachment_length=float(rotor.control.axle_attachment_length_m),
-    )
-    return ForceOnlyTether(base)
+    def _tether_moment(self, force_ned: np.ndarray) -> np.ndarray:
+        return np.zeros(3)
 
 
 def _rotor_with_i_spin(rotor, i_spin_kgm2: float):
@@ -217,10 +179,8 @@ def _run_free_short(
         pos=pos0, vel=np.zeros(3), R0=R0,
         rest_length=ic.rest_length, coll_eq_rad=ic.coll_eq_rad, omega_spin=ic.omega_spin,
     )
-    tether_override = (_force_only_tether(rotor, ic.rest_length)
-                       if suppress_tether_moment else None)
-    core  = PhysicsCore(rotor, ic_adj, WIND, z_floor=-1.0,
-                        tether_override=tether_override)
+    core_type = ForceOnlyTetherCore if suppress_tether_moment else PhysicsCore
+    core = core_type(rotor, ic_adj, WIND, z_floor=-1.0)
     mass  = float(rotor.inertia.mass_kg)
     g     = 9.81
     steps = int(duration / DT)
@@ -398,4 +358,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

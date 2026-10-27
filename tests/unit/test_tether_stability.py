@@ -29,7 +29,7 @@ import numpy as np
 import simulation.mediator as _mediator_module
 from tests.unit._aero_probe import make_probe, probe_steady
 
-TetherModel = _mediator_module.TetherModel
+from simulation.tether import SpringDamperTether, TetherInputs
 
 # ── Physical constants ────────────────────────────────────────────────────────
 MASS   = 5.0                        # kg  (matches test_force_balance.py)
@@ -67,6 +67,17 @@ def _R_from_body_z(body_z_world: np.ndarray) -> np.ndarray:
     x /= np.linalg.norm(x)
     y = np.cross(z, x)
     return np.column_stack([x, y, z])
+
+
+def _tether_moment(pos: np.ndarray, rotation: np.ndarray) -> np.ndarray:
+    offset = 0.3 * rotation[:, 2]
+    rest_length = float(np.linalg.norm(pos + offset)) - 0.01
+    result = SpringDamperTether().evaluate(TetherInputs(
+        anchor_pos_ned=np.zeros(3), anchor_vel_ned=np.zeros(3),
+        attachment_pos_ned=pos + offset, attachment_vel_ned=np.zeros(3),
+        rest_length_m=rest_length,
+    ))
+    return np.cross(offset, result.force_on_hub_ned)
 
 
 def _compute_equilibrium_collective(
@@ -132,11 +143,7 @@ def test_restoring_moment_zero_when_axle_aligned():
     tether_dir = pos / np.linalg.norm(pos)     # unit vector from anchor to hub
     R_aligned  = _R_from_body_z(tether_dir)    # body Z aligned with tether
 
-    tether = TetherModel(
-        anchor_ned  = np.zeros(3),
-        rest_length = L_TETHER - 0.01,          # 10 mm extension → taut
-    )
-    _, moment = tether.compute(pos, np.zeros(3), R_aligned)
+    moment = _tether_moment(pos, R_aligned)
 
     np.testing.assert_allclose(
         moment, np.zeros(3), atol=1e-9,
@@ -152,11 +159,7 @@ def test_restoring_moment_nonzero_when_axle_misaligned():
     pos    = _hub_pos()
     R_vert = np.eye(3)   # body Z = [0,0,1], tether at 30° → misaligned
 
-    tether = TetherModel(
-        anchor_ned  = np.zeros(3),
-        rest_length = L_TETHER - 0.01,
-    )
-    _, moment = tether.compute(pos, np.zeros(3), R_vert)
+    moment = _tether_moment(pos, R_vert)
 
     assert np.linalg.norm(moment) > 1e-4, (
         f"Expected non-zero restoring moment, got |M|={np.linalg.norm(moment):.2e} N·m"
@@ -177,11 +180,7 @@ def test_restoring_moment_tilts_axle_toward_anchor():
     pos    = _hub_pos()                  # East=cos30°·L, Alt=sin30°·L
     R_vert = np.eye(3)                   # FRD: body_z = [0,0,1] = Down (level disk)
 
-    tether = TetherModel(
-        anchor_ned  = np.zeros(3),
-        rest_length = L_TETHER - 0.01,
-    )
-    _, moment = tether.compute(pos, np.zeros(3), R_vert)
+    moment = _tether_moment(pos, R_vert)
 
     # Expected rotation axis (from kinematics): bz_now × bz_target.
     bz_now    = R_vert[:, 2]
@@ -210,8 +209,7 @@ def test_restoring_moment_sign_for_horizontal_offset():
     """
     pos = np.array([0.0, 50.0, 0.0])     # East, level
     R_vert = np.eye(3)                   # body_z = [0,0,1] (down)
-    tether = TetherModel(anchor_ned=np.zeros(3), rest_length=49.99)
-    _, moment = tether.compute(pos, np.zeros(3), R_vert)
+    moment = _tether_moment(pos, R_vert)
     assert moment[0] > 0.0, f"Moment X must be > 0 (toward +North) — got {moment.round(3)}"
     assert abs(moment[1]) < 1e-6
     assert abs(moment[2]) < 1e-6
@@ -228,4 +226,3 @@ def test_equilibrium_collective_is_at_or_below_neutral():
     assert coll_eq <= 0.0, (
         f"Equilibrium collective at 30° should be ≤ 0°, got {math.degrees(coll_eq):.1f}°"
     )
-

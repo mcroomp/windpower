@@ -156,7 +156,7 @@ def _run_landing(log) -> "tuple[dict, object]":
 
         # ── Winch 400 Hz ──────────────────────────────────────────────────
         len_before = winch.rest_length
-        winch.step(tension_now, DT)
+        winch.step(runner.anchor_tension, DT)
         speed_now = (winch.rest_length - len_before) / DT
 
         # ── AP 50 Hz ──────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ def _run_landing(log) -> "tuple[dict, object]":
             altitudes_desc.append(altitude)
 
         # ── Bad-event tracking ────────────────────────────────────────────
-        if runner.tether._last_info.get("slack", False):
+        if runner.tether_result.slack:
             events.record("slack", t_sim, phase, altitude)
         if runner.tension_now > BREAK_LOAD_N:
             events.record("tension_spike", t_sim, phase, altitude,

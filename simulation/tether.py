@@ -1,237 +1,330 @@
-"""
-tether.py — Tension-only elastic tether model for RAWES simulation.
+"""Two-ended tether physics, with forces expressed in NED world coordinates."""
 
-Models a Dyneema SK75 1.9 mm braided tether attached from a fixed ground
-anchor to the hub.  Force is zero when slack; elastic + damped when taut.
-"""
+from dataclasses import dataclass, field
+from typing import Protocol
 
 import numpy as np
+from scipy.optimize import least_squares
 
-from simulation.frames import cross3
+
+@dataclass(frozen=True)
+class TetherProperties:
+    """Nominal Dyneema SK75 1.9 mm properties; EA includes braid efficiency."""
+
+    axial_stiffness_n: float = 109e9 * np.pi * (0.0019 / 2.0) ** 2 * 0.91
+    diameter_m: float = 0.0019
+    linear_mass_kg_m: float = 0.0021
+    break_load_n: float = 620.0
+    drag_coefficient: float = 1.1
+
+    def __post_init__(self) -> None:
+        for name in ("axial_stiffness_n", "diameter_m", "break_load_n"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+        for name in ("linear_mass_kg_m", "drag_coefficient"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
 
 
-class TetherModel:
-    """
-    Tension-only elastic tether.
+@dataclass(frozen=True)
+class TetherInputs:
+    """Physical endpoint kinematics and deployed unstretched length.
 
-    Models a Dyneema SK75 1.9 mm braided tether attached from a fixed ground
-    anchor to the hub node.  Force is zero when the tether is slack (hub
-    closer to anchor than rest_length) and elastic when taut.
-
-    Physical basis — Dyneema SK75 1.9 mm braided
-    -----------------------------------------------
-    Fibre:      UHMWPE (Dyneema SK75)
-    Diameter:   1.9 mm (nominal)
-    Area:       A = π × (0.00095 m)² = 2.835 × 10⁻⁶ m²
-    Fibre E:    109 GPa  (DSM Dyneema SK75 datasheet)
-    Braid eff.: ~0.91 (typical braid efficiency for a tight 12-strand braid)
-    EA:         109 × 10⁹ × 2.835 × 10⁻⁶ × 0.91 ≈ 281 kN → use 280 kN
-    Break load: ≈ 620 N  (DSM SK75, 2 mm; conservative for 1.9 mm)
-    Lin. mass:  ρ_fibre × A × braid_fill = 970 × 2.835e-6 / 0.91 ≈ 3.0 g/m
-                (fill factor inverted because braid is looser than solid rod)
-                Practical value: ~2.1 g/m (manufacturer data for 2 mm SK75)
-
-    Stiffness at operating length L
-    --------------------------------
-    k(L) = EA / L          [N/m]  — nonlinear: stiffer for shorter tether
-
-    Structural damping
-    ------------------
-    Damping uses a constant damping ratio ζ (fraction of critical):
-        c_eff(L) = ζ · 2 · √(k_eff · m)  where k_eff = EA / L
-    This keeps ζ constant regardless of tether length, correctly scaling
-    with the 4× stiffness change between L=200 m and L=50 m.
-    UHMWPE material loss tangent: δ ≈ 0.04 → ζ_material ≈ 0.02.
-    UHMWPE material loss tangent: δ ≈ 0.04 → ζ_material ≈ 0.02.
-    Default ζ = 0.05 adds a small aerodynamic-drag contribution not
-    otherwise captured in the single-body model.
-    Damping is applied only while tether is extending (no negative damping).
-    At L=50 m, m=5 kg, ζ=0.05:  c_eff = 0.05 × 2 × √(5620×5) = 16.8 N·s/m
-    At L=200 m, m=5 kg, ζ=0.05: c_eff = 0.05 × 2 × √(1405×5) =  8.4 N·s/m
-
-    Scenario
-    ---------
-    rest_length = 200 m : tether paid out to 200 m by the ground winch.
-    Hub starts at Z = 50 m ≪ 200 m → slack zone; no tether force at launch.
-    Tether activates only if hub flies farther than 200 m from anchor.
-    This represents a realistic AWE flight test scenario where the winch has
-    pre-deployed 200 m of tether before the hub launches.
+    Positive payout_rate_ms means material leaves the drum. Wind and gravity
+    are spatially uniform in this first implementation.
     """
 
-    # Dyneema SK75 1.9 mm braided — material constants
-    DIAMETER_M       = 0.0019           # nominal diameter [m]
-    AREA_M2          = np.pi * (DIAMETER_M / 2) ** 2   # = 2.835e-6 m²
-    E_FIBRE_PA       = 109e9            # fibre axial modulus [Pa]
-    BRAID_EFFICIENCY = 0.91             # braid efficiency (axial stiffness fraction)
-    EA_N             = E_FIBRE_PA * AREA_M2 * BRAID_EFFICIENCY  # ≈ 281 kN [N]
-    LINEAR_MASS_KG_M = 0.0021          # linear mass density [kg/m]  (2.1 g/m)
-    BREAK_LOAD_N     = 620.0           # conservative breaking load [N]
+    anchor_pos_ned: np.ndarray
+    anchor_vel_ned: np.ndarray
+    attachment_pos_ned: np.ndarray
+    attachment_vel_ned: np.ndarray
+    rest_length_m: float
+    payout_rate_ms: float = 0.0
+    wind_ned: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    air_density_kg_m3: float = 1.225
+    gravity_ned: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 9.81]))
 
-    def __init__(
-        self,
-        anchor_ned:            np.ndarray = np.array([0.0, 0.0, 0.0]),
-        rest_length:           float      = None,    # unstretched tether length [m] — required; no default
-        EA:                    float      = None,    # override axial stiffness [N]
-        zeta:                  float      = 0.05,    # damping ratio (fraction of critical)
-        hub_mass:              float      = 5.0,     # hub mass [kg] — sets critical damping scale
-        axle_attachment_length: float     = 0.3,     # distance from CoM to tether attach point along +body_Z (FRD) [m]
-    ):
-        if rest_length is None:
-            raise ValueError("TetherModel requires rest_length — no default (mission-specific parameter)")
-        self.anchor      = np.asarray(anchor_ned, dtype=float)
-        self.rest_length = float(rest_length)
-        self.EA          = float(EA) if EA is not None else self.EA_N
-        self.zeta        = float(zeta)
-        self.hub_mass    = float(hub_mass)
-        self.axle_attach = float(axle_attachment_length)
-        self._last_info: dict = {}
+    def __post_init__(self) -> None:
+        for name in (
+            "anchor_pos_ned", "anchor_vel_ned", "attachment_pos_ned",
+            "attachment_vel_ned", "wind_ned", "gravity_ned",
+        ):
+            value = np.asarray(getattr(self, name), dtype=float)
+            if value.shape != (3,) or not np.all(np.isfinite(value)):
+                raise ValueError(f"{name} must be a finite NED three-vector")
+            object.__setattr__(self, name, value)
+        if not np.isfinite(self.rest_length_m) or self.rest_length_m <= 0.0:
+            raise ValueError("rest_length_m must be finite and positive")
+        if not np.isfinite(self.payout_rate_ms):
+            raise ValueError("payout_rate_ms must be finite")
+        if not np.isfinite(self.air_density_kg_m3) or self.air_density_kg_m3 < 0.0:
+            raise ValueError("air_density_kg_m3 must be finite and nonnegative")
+
+
+@dataclass(frozen=True)
+class TetherResult:
+    """Forces ON the two attached bodies, never forces on the cable itself."""
+
+    force_on_hub_ned: np.ndarray
+    force_on_anchor_ned: np.ndarray
+    positions_ned: np.ndarray
+    length_m: float
+    extension_m: float
+    slack: bool
+    distributed_force_ned: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    elastic_energy_j: float = 0.0
+    damping_power_w: float = 0.0
+    iterations: int = 0
+    residual_m: float = 0.0
 
     @property
-    def damping(self) -> float:
-        """Effective damping coefficient at rest_length (for logging)."""
-        k_ref = self.EA / max(self.rest_length, 1.0)
-        return self.zeta * 2.0 * np.sqrt(k_ref * self.hub_mass)
+    def hub_tension_n(self) -> float:
+        return float(np.linalg.norm(self.force_on_hub_ned))
 
-    def compute(
-        self,
-        hub_pos: np.ndarray,   # hub position in NED world frame [m]
-        hub_vel: np.ndarray,   # hub velocity in NED world frame [m/s]
-        R_hub:   np.ndarray = None,  # body→world rotation matrix (for restoring torque)
-    ) -> tuple:
-        """
-        Return (force, moment) on hub due to tether, both in NED world frame [N] / [N·m].
+    @property
+    def anchor_tension_n(self) -> float:
+        return float(np.linalg.norm(self.force_on_anchor_ned))
 
-        When R_hub is provided and tether is taut, also computes a restoring moment
-        M = r_attach × F_tether that aligns the hub axle (body Z) with the tether.
-        FRD: the attachment point is 'axle_attachment_length' from the CoM along
-        +body Z (toward the anchor when level).
-
-        Stores diagnostic info in self._last_info for telemetry logging.
-        """
-        r = hub_pos - self.anchor           # vector: anchor → hub
-        L = float(np.linalg.norm(r))
-
-        _zero3 = np.zeros(3)
-        if L < 1e-6:
-            self._last_info = dict(slack=True, tension=0.0, extension=0.0,
-                                   length=0.0, k_eff=0.0)
-            return _zero3, _zero3
-
-        unit = r / L                        # unit vector anchor → hub
-        extension = L - self.rest_length
-
-        if extension <= 0.0:               # tether is slack
-            self._last_info = dict(slack=True, tension=0.0, extension=extension,
-                                   length=L, k_eff=0.0)
-            return _zero3, _zero3
-
-        # Stiffness: k = EA / L  (nonlinear — stiffer when shorter)
-        k_eff = self.EA / L
-
-        # Elastic tension
-        T_elastic = k_eff * extension
-
-        # Proportional damping: c = zeta * 2 * sqrt(k_eff * m)
-        # This maintains a constant damping ratio regardless of tether length,
-        # correctly scaling with k_eff which changes 4× between L=200m and L=50m.
-        c_eff    = self.zeta * 2.0 * np.sqrt(k_eff * self.hub_mass)
-        v_radial = float(np.dot(hub_vel, unit))   # rate of length increase
-        T_damp   = c_eff * max(0.0, v_radial)
-
-        T_total  = T_elastic + T_damp
-
-        # Force on hub: directed from hub toward anchor (opposes extension)
-        force = -T_total * unit
-
-        # Restoring moment: tether pulls on the axle bottom, not the CoM.
-        # FRD: body_z = R_hub[:,2] points DOWN through the disk (toward the
-        # anchor in tethered hover), so the axle bottom — where the tether
-        # attaches — is at +axle_attach·body_z from the CoM.
-        if R_hub is not None:
-            body_z_world = R_hub[:, 2]
-            r_attach = self.axle_attach * body_z_world
-            moment = cross3(r_attach, force)
-        else:
-            moment = _zero3
-
-        self._last_info = dict(
-            slack        = False,
-            tension      = T_total,
-            t_elastic    = T_elastic,
-            t_damp       = T_damp,
-            extension    = extension,
-            length       = L,
-            k_eff        = k_eff,
+    @classmethod
+    def unloaded(cls, inputs: TetherInputs) -> "TetherResult":
+        length = float(np.linalg.norm(inputs.attachment_pos_ned - inputs.anchor_pos_ned))
+        return cls(
+            np.zeros(3), np.zeros(3),
+            np.array([inputs.anchor_pos_ned, inputs.attachment_pos_ned]),
+            length, length - inputs.rest_length_m, True,
         )
-        return force, moment
+
+
+class Tether(Protocol):
+    properties: TetherProperties
+
+    def evaluate(self, inputs: TetherInputs) -> TetherResult: ...
+
+
+class SpringDamperTether:
+    """The original straight, tension-only EA/chord-length spring.
+
+    Retains zeta=0.05 and extension-only damping. Unlike the old hub-centre
+    interface, damping uses endpoint-relative motion minus payout rate.
+    """
+
+    def __init__(
+        self, *, properties: TetherProperties = TetherProperties(),
+        zeta: float = 0.05, hub_mass: float = 5.0,
+    ) -> None:
+        if not np.isfinite(zeta) or zeta < 0.0:
+            raise ValueError("zeta must be finite and nonnegative")
+        if not np.isfinite(hub_mass) or hub_mass <= 0.0:
+            raise ValueError("hub_mass must be finite and positive")
+        self.properties = properties
+        self.zeta = float(zeta)
+        self.hub_mass = float(hub_mass)
+
+    def damping(self, length_m: float) -> float:
+        return self.zeta * 2.0 * float(np.sqrt(
+            self.properties.axial_stiffness_n / length_m * self.hub_mass
+        ))
+
+    def evaluate(self, inputs: TetherInputs) -> TetherResult:
+        chord = inputs.attachment_pos_ned - inputs.anchor_pos_ned
+        length = float(np.linalg.norm(chord))
+        extension = length - inputs.rest_length_m
+        if length < 1e-6 or extension <= 0.0:
+            return TetherResult.unloaded(inputs)
+        tangent = chord / length
+        stiffness = self.properties.axial_stiffness_n / length
+        extension_rate = float(np.dot(
+            inputs.attachment_vel_ned - inputs.anchor_vel_ned, tangent,
+        )) - inputs.payout_rate_ms
+        damping_force = self.damping(length) * max(0.0, extension_rate)
+        tension = stiffness * extension + damping_force
+        force = tension * tangent
+        return TetherResult(
+            -force, force,
+            np.array([inputs.anchor_pos_ned, inputs.attachment_pos_ned]),
+            length, extension, False,
+            elastic_energy_j=self.properties.axial_stiffness_n * inputs.rest_length_m * (
+                extension / inputs.rest_length_m - np.log1p(extension / inputs.rest_length_m)
+            ),
+            damping_power_w=damping_force * max(0.0, extension_rate),
+        )
+
+
+class TetherConvergenceError(RuntimeError):
+    """The requested suspended-line equilibrium could not be resolved."""
+
+
+class TallakQuasiStaticTether:
+    """Extensible segmented equilibrium inspired by Tallak Tveide's solver.
+
+    https://github.com/tallakt/TetherDragODESolver
+
+    This is an independent wind/gravity boundary-value implementation, not a
+    port of the rotating-line Julia ODE. No quarter multiplier is used.
+    It models elastic equilibrium, not inertia, material hysteresis, ground
+    contact, or payout momentum flux. Cached forces only warm-start the solve.
+    """
+
+    def __init__(
+        self, *, properties: TetherProperties = TetherProperties(),
+        segments: int = 16,
+    ) -> None:
+        if isinstance(segments, bool) or not isinstance(segments, int) or segments < 2:
+            raise ValueError("segments must be an integer >= 2")
+        self.properties = properties
+        self.segments = segments
+        self._anchor_force: np.ndarray | None = None
+        self._tangents: np.ndarray | None = None
+        self._segment_tensions: np.ndarray | None = None
+
+    def evaluate(self, inputs: TetherInputs) -> TetherResult:
+        chord = inputs.attachment_pos_ned - inputs.anchor_pos_ned
+        distance = float(np.linalg.norm(chord))
+        if distance < 1e-6:
+            raise ValueError("quasi-static tether requires distinct endpoints")
+        p = self.properties
+        ds = inputs.rest_length_m / self.segments
+        fractions = (np.arange(self.segments) + 0.5) / self.segments
+        velocities = (
+            (1.0 - fractions[:, None]) * inputs.anchor_vel_ned
+            + fractions[:, None] * inputs.attachment_vel_ned
+        )
+        tangents = np.tile(chord / distance, (self.segments, 1))
+        lengths = np.full(self.segments, distance / self.segments)
+        if self._tangents is not None and self._segment_tensions is not None:
+            tangents = self._tangents
+            lengths = ds * (1.0 + self._segment_tensions / p.axial_stiffness_n)
+
+        def segment_loads(directions: np.ndarray, spans: np.ndarray) -> np.ndarray:
+            # Interpolate endpoint motion; axial material slip vanishes when
+            # projected onto the local normal in this transverse-drag model.
+            relative = inputs.wind_ned - velocities
+            normal = relative - np.sum(relative * directions, axis=1)[:, None] * directions
+            drag = (
+                0.5 * inputs.air_density_kg_m3 * p.drag_coefficient * p.diameter_m
+                * np.linalg.norm(normal, axis=1)[:, None] * normal * spans[:, None]
+            )
+            return drag + p.linear_mass_kg_m * ds * inputs.gravity_ned
+
+        loads = segment_loads(tangents, lengths)
+        if not np.any(loads):
+            if distance <= inputs.rest_length_m:
+                return TetherResult.unloaded(inputs)
+            tension = p.axial_stiffness_n * (distance / inputs.rest_length_m - 1.0)
+            force = tension * chord / distance
+            return TetherResult(
+                -force, force,
+                np.linspace(inputs.anchor_pos_ned, inputs.attachment_pos_ned, self.segments + 1),
+                distance, distance - inputs.rest_length_m, False,
+                elastic_energy_j=0.5 * tension**2 / p.axial_stiffness_n * inputs.rest_length_m,
+            )
+
+        total_load = np.sum(loads, axis=0)
+        sag = np.sqrt(max(0.0, 3.0 * distance * (inputs.rest_length_m - distance) / 8.0))
+        initial_tension = max(
+            p.axial_stiffness_n * (distance / inputs.rest_length_m - 1.0),
+            float(np.linalg.norm(total_load)) * distance / max(8.0 * sag, 1.0),
+            0.01,
+        )
+        anchor_force = (
+            self._anchor_force.copy() if self._anchor_force is not None
+            else initial_tension * chord / distance + 0.5 * total_load
+        )
+        residual_norm = float("inf")
+        for iteration in range(1, 81):
+            offsets = np.cumsum(loads, axis=0) - 0.5 * loads
+
+            def geometry(force: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                tensions = force - offsets
+                magnitudes = np.linalg.norm(tensions, axis=1)
+                if np.any(magnitudes < 1e-12):
+                    magnitudes = np.maximum(magnitudes, 1e-12)
+                directions = tensions / magnitudes[:, None]
+                spans = ds * (1.0 + magnitudes / p.axial_stiffness_n)
+                return directions, spans, magnitudes
+
+            def residual(force: np.ndarray) -> np.ndarray:
+                directions, spans, _ = geometry(force)
+                return np.sum(directions * spans[:, None], axis=0) - chord
+
+            def jacobian(force: np.ndarray) -> np.ndarray:
+                directions, _, magnitudes = geometry(force)
+                outer = directions[:, :, None] * directions[:, None, :]
+                return ds * np.sum(
+                    (np.eye(3) - outer) / magnitudes[:, None, None]
+                    + np.eye(3) / p.axial_stiffness_n,
+                    axis=0,
+                )
+
+            solved = least_squares(
+                # SciPy's untyped source infers jac as str, but accepts callables.
+                residual, anchor_force, jac=jacobian, x_scale="jac",  # pyright: ignore[reportArgumentType]
+                ftol=1e-12, xtol=1e-12, gtol=1e-12, max_nfev=100,
+            )
+            anchor_force = solved.x
+            residual_norm = float(np.linalg.norm(residual(anchor_force)))
+            if not solved.success or residual_norm > 1e-6:
+                raise TetherConvergenceError(
+                    f"Tallak tether endpoint solve failed: {solved.message}; "
+                    f"residual={residual_norm:.6g} m"
+                )
+            tangents, lengths, tensions = geometry(anchor_force)
+            new_loads = segment_loads(tangents, lengths)
+            if float(np.max(np.linalg.norm(new_loads - loads, axis=1))) < 1e-7:
+                break
+            loads = 0.5 * (loads + new_loads)
+        else:
+            raise TetherConvergenceError("Tallak tether distributed-load iteration failed after 80 iterations")
+
+        self._anchor_force = anchor_force.copy()
+        self._tangents = tangents.copy()
+        self._segment_tensions = tensions.copy()
+        positions = np.vstack((
+            inputs.anchor_pos_ned,
+            inputs.anchor_pos_ned + np.cumsum(tangents * lengths[:, None], axis=0),
+        ))
+        total_load = np.sum(loads, axis=0)
+        length = float(np.sum(lengths))
+        return TetherResult(
+            total_load - anchor_force, anchor_force, positions,
+            length, length - inputs.rest_length_m, False,
+            distributed_force_ned=total_load,
+            elastic_energy_j=float(0.5 * ds * np.sum(tensions**2) / p.axial_stiffness_n),
+            iterations=iteration, residual_m=residual_norm,
+        )
 
 
 class ConstantTensionTether:
-    """
-    Tether that applies a constant tension magnitude directed from hub toward anchor.
+    """Diagnostic fixed-load cable; not a model of distributed line physics."""
 
-    No spring, no damping, no slack threshold.  Tension magnitude is fixed at
-    ``tension_n`` regardless of tether length or velocity.  Direction follows the
-    actual hub→anchor geometry so the force rotates as the hub moves.
+    def __init__(self, tension_n: float) -> None:
+        if not np.isfinite(tension_n) or tension_n < 0.0:
+            raise ValueError("tension_n must be finite and nonnegative")
+        self.tension_n = float(tension_n)
+        self.properties = TetherProperties()
 
-    Intended for tests where the elastic dynamics of the tether are irrelevant
-    and only the steady-state load matters (e.g. ground-liftoff tests, constant-
-    load steady-flight investigations).
-
-    Implements the same interface as TetherModel:
-        compute(pos, vel, R) → (F_ned, M_ned)
-        ._last_info["tension"]
-        .rest_length (settable; ignored — no slack model)
-        .EA, .BREAK_LOAD_N, .damping  (for mediator event log)
-    """
-
-    def __init__(
-        self,
-        tension_n:              float,
-        anchor_ned:             "np.ndarray | None" = None,
-        axle_attachment_length: float = 0.3,
-    ) -> None:
-        self._tension_n         = float(tension_n)
-        self.anchor             = (np.asarray(anchor_ned, dtype=float)
-                                   if anchor_ned is not None
-                                   else np.zeros(3))
-        self._axle              = float(axle_attachment_length)
-        self.rest_length: float = 0.0        # settable by winch; unused here
-        self._last_info: dict   = {}
-        # Dummy stiffness / break fields for mediator event-log compatibility.
-        self.EA          = float(tension_n) * 1000.0
-        self.BREAK_LOAD_N = float(tension_n) * 2.0
-
-    @property
-    def damping(self) -> float:
-        return 0.0
-
-    def compute(
-        self,
-        hub_pos: np.ndarray,
-        hub_vel: np.ndarray,
-        R_hub:   "np.ndarray | None" = None,
-    ) -> tuple:
-        r = hub_pos - self.anchor          # anchor → hub
-        L = float(np.linalg.norm(r))
-
-        if L < 1e-6:
-            self._last_info = dict(slack=True, tension=0.0, extension=0.0, length=0.0)
-            return np.zeros(3), np.zeros(3)
-
-        unit  = r / L                      # unit vector pointing away from anchor
-        force = -self._tension_n * unit    # tension pulls hub toward anchor
-
-        moment = np.zeros(3)
-        if R_hub is not None and abs(self._axle) > 1e-9:
-            body_z_world = R_hub[:, 2]
-            r_attach     = self._axle * body_z_world
-            moment       = cross3(r_attach, force)
-
-        self._last_info = dict(
-            slack     = False,
-            tension   = self._tension_n,
-            extension = L,
-            length    = L,
+    def evaluate(self, inputs: TetherInputs) -> TetherResult:
+        chord = inputs.attachment_pos_ned - inputs.anchor_pos_ned
+        length = float(np.linalg.norm(chord))
+        if length < 1e-6:
+            return TetherResult.unloaded(inputs)
+        force = self.tension_n * chord / length
+        return TetherResult(
+            -force, force,
+            np.array([inputs.anchor_pos_ned, inputs.attachment_pos_ned]),
+            length, length - inputs.rest_length_m, self.tension_n == 0.0,
         )
-        return force, moment
+
+
+def make_tether(model: str, *, hub_mass: float, constant_tension_n: float = 300.0) -> Tether:
+    match model:
+        case "spring_damper":
+            return SpringDamperTether(hub_mass=hub_mass)
+        case "tallak_quasi_static":
+            return TallakQuasiStaticTether()
+        case "constant_tension":
+            return ConstantTensionTether(constant_tension_n)
+        case _:
+            raise ValueError(f"Unknown tether model: {model!r}")
