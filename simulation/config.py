@@ -34,6 +34,7 @@ from pathlib import Path
 # The JSON is written only by test_generate_ic.py::test_create_ic.
 # ---------------------------------------------------------------------------
 import simulation.ic as _ic
+from simulation.tether import DEFAULT_TETHER_MODEL
 
 _ss: dict = _ic.load_ic_dict()
 
@@ -59,7 +60,7 @@ DEFAULTS: dict = {
     "rest_length": _ss["rest_length"],  # unstretched tether length [m]
     "anchor_ned": [0.0, 0.0, 0.0],  # tether anchor position NED [m]
                                      # mirrors RAWES_ANCHOR_LAT/LON/ALT converted to local NED
-    "tether_model": "spring_damper",  # or "tallak_quasi_static"; see design/simulation.md
+    "tether_model": DEFAULT_TETHER_MODEL,  # see design/simulation.md for alternatives
     "tension_safety_n":  496.0,     # WinchController T_max_n: reel-out threshold [N]
                                      # ≈ 80% of Dyneema SK75 1.9 mm break load (620 N)
 

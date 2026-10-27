@@ -91,7 +91,7 @@ convergence and sweeps 50/100/200 m spans, nominal 30/300 N preload, and
 32-segment reference within 1% plus 0.02 N. Warm-start wind steps must agree
 with independent cold solves; failed solves must raise explicitly.
 
-Boundary tests verify attachment position/rotational velocity, attachment
+Boundary tests verify the shared Tallak default, attachment position/rotational velocity, attachment
 moment, distinct kite/winch readings in telemetry, and local-load-cell drum
 energy accounting.
 
@@ -104,7 +104,10 @@ The Tallak flight smoke test runs the real Lua controller for 10 simulated
 seconds. It requires no bad events, 50--496 N tension, altitude within 2 m
 of its starting point, and horizontal radius below 5 m. This is not a
 gust-transient or long-duration qualification. The original 90-second Lua
-steady-flight and pumping-cycle tests remain the default-model regressions.
+steady-flight and pumping-cycle tests run the Tallak default as full-length
+regressions. The aero-telemetry column test also uses the shared airborne IC,
+and verifies that startup is taut and above ground before checking its original
+aero-column assertions. It does not test ground contact or slack-line deployment.
 
 ## Simtests (`tests/simtests/`)
 

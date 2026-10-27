@@ -7,6 +7,9 @@ import numpy as np
 from scipy.optimize import least_squares
 
 
+DEFAULT_TETHER_MODEL = "tallak_quasi_static"
+
+
 @dataclass(frozen=True)
 class TetherProperties:
     """Nominal Dyneema SK75 1.9 mm properties; EA includes braid efficiency."""

@@ -27,6 +27,7 @@ pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 from tests.simtests.simtest_ic import load_ic
 from simulation.simtest_log import BadEventLog
+from simulation.tether import DEFAULT_TETHER_MODEL
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from linkhub_client.messages import NamedValueFloat
@@ -46,7 +47,7 @@ WIND         = np.array([0.0, 10.0, 0.0])
 FLOOR_ALT_M  = 1.0
 
 
-def _run_steady(log, *, tether_model: str = "spring_damper", duration_s: float = T_SIM) -> dict:
+def _run_steady(log, *, tether_model: str = DEFAULT_TETHER_MODEL, duration_s: float = T_SIM) -> dict:
     """rawes.lua mode=1 altitude-hold flight from IC."""
     sim = RawesLua(mode=MODE_STEADY)
     sim.armed        = True

@@ -228,12 +228,14 @@ constructor keyword select:
 
 | Key | Implementation | Scope |
 |---|---|---|
-| `spring_damper` (default) | `SpringDamperTether` | Original straight, tension-only `k=EA/chord_length` law, zeta 0.05, extension-only damping. Relative radial endpoint velocity minus payout drives damping. No line drag, weight, or belly. |
-| `tallak_quasi_static` | `TallakQuasiStaticTether` | Extensible suspended-line equilibrium, transverse aerodynamic drag, line weight, shape, and distinct endpoint reactions. |
+| `tallak_quasi_static` (default) | `TallakQuasiStaticTether` | Extensible suspended-line equilibrium, transverse aerodynamic drag, line weight, shape, and distinct endpoint reactions. |
+| `spring_damper` | `SpringDamperTether` | Explicit simplified alternative: original straight, tension-only `k=EA/chord_length` law, zeta 0.05, extension-only damping. Relative radial endpoint velocity minus payout drives damping. No line drag, weight, or belly. |
 | `constant_tension` | `ConstantTensionTether` | Diagnostic fixed load, selected with `tether_constant_tension_n`; no distributed loads or elastic dynamics. |
 
 Unknown names and invalid inputs raise errors rather than selecting a default.
 Tests may inject a `Tether` implementation with `tether_override`.
+`DEFAULT_TETHER_MODEL` in `simulation/tether.py` is the shared default for
+mediator configuration, the physics core, and simtest runners/helpers.
 
 The better model is named after Tallak Tveide's
 [TetherDragODESolver](https://github.com/tallakt/TetherDragODESolver), which
@@ -256,10 +258,15 @@ This version has no line inertia, transverse waves, material hysteresis/damping,
 ground contact, axial skin friction, rupture, or payout momentum flux. A loaded
 line can support tension even when the endpoint chord is shorter than its rest
 length. The shape assumes a freely suspended line; it must not be interpreted
-as a ground-contact solution. Quasi-static shape changes are instantaneous,
-so gust and low-tension transient fidelity is not claimed. The model remains
-opt-in, and its solve time must be benchmarked for the intended lockstep rate;
-it has no hard real-time 1200 Hz deadline guarantee.
+as a ground-contact solution. Collinear, vertically slack zero-wind
+configurations can fail the endpoint solve; ground-level slack deployment is
+not a supported startup condition. Flight tests and unrelated physics/telemetry
+fixtures should start from the shared airborne IC, not a slack line that would
+need to lie on the ground. The IC is a straight-line force-balance seed, checked
+against the active cable model by `test_ic_force_balance`.
+Quasi-static shape changes are instantaneous, so gust and low-tension transient
+fidelity is not claimed. Solve time must be benchmarked for the intended
+lockstep rate; there is no hard real-time 1200 Hz deadline guarantee.
 
 Analytical, mesh-convergence, operating-envelope, and flight regression tests
 are described in [testing.md](testing.md#tether-model-validation).

@@ -5,9 +5,11 @@ import numpy as np
 import pytest
 from scipy.optimize import brentq
 
+from simulation.config import defaults
 from simulation.physics_core import PhysicsCore
 from simulation.telemetry_csv import TelRow
 from simulation.tether import (
+    DEFAULT_TETHER_MODEL,
     ConstantTensionTether,
     SpringDamperTether,
     TallakQuasiStaticTether,
@@ -20,6 +22,8 @@ from simulation.tether import (
 from simulation.winch import GovernedWinchController
 from simulation.winch_node import GovernedWinchNode
 from tests.simtests._rotor_helpers import load_default_rotor
+from tests.simtests.simtest_ic import load_ic
+from tests.simtests.simtest_runner import PhysicsRunner
 
 
 def _inputs(**changes) -> TetherInputs:
@@ -256,6 +260,20 @@ def test_unknown_model_is_not_silently_replaced_by_spring() -> None:
 ])
 def test_model_selection_is_explicit(name: str, model_type: type) -> None:
     assert isinstance(make_tether(name, hub_mass=5.0), model_type)
+
+
+def test_tallak_is_the_shared_default() -> None:
+    config = defaults()
+    assert DEFAULT_TETHER_MODEL == config["tether_model"] == "tallak_quasi_static"
+    rotor = load_default_rotor()
+    ic = load_ic()
+    wind = np.asarray(config["wind"], dtype=float)
+    core = PhysicsCore(rotor, ic, wind)
+    runner = PhysicsRunner(rotor, ic, wind)
+    assert isinstance(core.tether, TallakQuasiStaticTether)
+    assert isinstance(runner.tether, TallakQuasiStaticTether)
+    assert not core.tether_result.slack
+    assert not runner.tether_result.slack
 
 
 def test_winch_energy_uses_local_load_cell_force() -> None:

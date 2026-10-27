@@ -38,7 +38,7 @@ import numpy as np
 
 
 from simulation.physics_core import PhysicsCore, HubObservation
-from simulation.tether import Tether, TetherResult
+from simulation.tether import DEFAULT_TETHER_MODEL, Tether, TetherResult
 from simulation.controller import HeliCyclicController
 from simulation.param_defaults import load_collective_phys_range as _load_col_range
 
@@ -66,7 +66,7 @@ class PhysicsRunner:
 
     def __init__(self, rotor, ic, wind, *, z_floor: float = -1.0,
                  aero_model: str = "quasi_static", aero_override=None,
-                 tether_model: str = "spring_damper", tether_override: Tether | None = None):
+                 tether_model: str = DEFAULT_TETHER_MODEL, tether_override: Tether | None = None):
         """
         Parameters
         ----------

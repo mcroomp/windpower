@@ -40,7 +40,7 @@ import os
 
 from simulation.dynamics import RigidBodyDynamics
 from dynbem       import create_aero, RotorInputs, step_omega
-from simulation.tether import Tether, TetherInputs, TetherResult, make_tether
+from simulation.tether import DEFAULT_TETHER_MODEL, Tether, TetherInputs, TetherResult, make_tether
 from simulation.frames import cross3
 from simulation.rotor_physics import resolve_i_spin_kgm2
 from simulation.param_defaults import thrust_to_coll_rad as _t2c
@@ -136,7 +136,7 @@ class PhysicsCore:
         kinematic_nul_rate_gain_rads_per_rad: float = 0.0,
         aero_override             = None,
         tether_override: Tether | None = None,
-        tether_model: str = "spring_damper",
+        tether_model: str = DEFAULT_TETHER_MODEL,
         anchor_ned: np.ndarray | None = None,
         tether_constant_tension_n: float = 300.0,
     ):
