@@ -48,9 +48,8 @@ Non-package top-level directories: `design/` (owner docs), `documents/`, `hardwa
 TypeScript/Three.js browser control and telemetry UI served by LinkHub), `tmp/`
 (scratch/working files only).
 
-`simulation/logs/` is the single log root for every test tier (unit fixtures, simtests, and
-SITL stack runs all write there) — it did not move when the other packages were promoted to
-top-level.
+`simulation/logs/` is the single log root for every test tier: unit fixtures,
+simtests, and SITL stack runs all write there.
 
 Use `uv` as the standard Python environment and dependency manager for local work:
 `uv sync --dev` provisions the lightweight hardware environment and `uv run ...` executes
@@ -62,30 +61,16 @@ Run `uv sync` explicitly after changing dependencies or pulling a lockfile updat
 
 ## Task-scoped reading (for agents)
 
-Do not preload the design library or read every document in sequence. Start with
-the relevant entry below and read only sections needed for the task; follow
-cross-links when the work actually crosses an ownership boundary.
+Do not preload the design library or read every document in sequence. Use the
+[central documentation map](README.md#documentation-map) to select the master
+for the task, then follow cross-links only when crossing an ownership boundary.
+Do not maintain a second routing/ownership table here.
 
-| Work area | Read directly |
-|---|---|
-| Flight modes, Lua behavior, ground/AP command contracts | [flight_stack.md](design/flight_stack.md) |
-| Arm/disarm, passive startup, any hardware operation | [arming.md](design/arming.md); also [HARDWARE_STARTUP.md](HARDWARE_STARTUP.md) before touching hardware |
-| Calibration commands, recording, Lua deployment | [calibration.md](design/calibration.md), plus the safety documents above for hardware work |
-| LinkHub service, HTTP API, journal queries | [LinkHub README](linkhub/README.md); [architecture](design/linkhub.md) for ownership, cursor, protocol, or rate-policy changes |
-| Browser UI | [UI README](linkhub-ui/README.md); read LinkHub architecture only when changing its API boundary |
-| Python HTTP client | [client README](linkhub_client/README.md) |
-| Simulation physics, sensors, actuator plants, mediator | [simulation.md](design/simulation.md) |
-| Unit/simtest conventions, Lua/Python parity | [testing.md](design/testing.md) |
-| Docker/SITL execution, diagnosis, or IC-start timeline (`kinematic_exit`, `t_rel`) | [sitl_testing.md](design/sitl_testing.md) |
-| ArduPilot attitude/rate internals or Python port | [GUIDED_CONTROL_LOOPS.md](design/GUIDED_CONTROL_LOOPS.md) or [ArduLoop README](arduloop/README.md), according to the implementation being changed |
-| Aero axes, signs, units, `dynbem` interface | [aero_conventions.md](design/aero_conventions.md) |
-| GPS/yaw aiding failure, `const_pos_mode` | [EKF_GATING.md](design/EKF_GATING.md) |
-| Airframe geometry, components, swash mapping, yaw motor / DShot / RPM | [hardware.md](design/hardware.md) |
-
-The hardware-session log contains observations and next diagnostic steps, not
-authority to override current safety procedures. Update it after each hardware
-session. Update the arming owner in the same change whenever a source or test
-finding changes a critical ArduPilot arm/disarm fact.
+[HARDWARE_STARTUP.md](HARDWARE_STARTUP.md) is the historical-only exception to
+current-only documentation. Preserve its dated investigations and mistakes,
+consult them when a problem recurs, and update it after hardware sessions.
+Keep raw measurements in run artifacts. Current procedures remain with their
+owners; update the arming owner when source or tests change a critical fact.
 
 ## Code Search: Prefer ast-grep over grep/ripgrep
 
@@ -163,10 +148,13 @@ Use the primary doc for each topic. Other docs should link, not restate.
 
 The canonical ownership map and complete document list live in
 [README.md -- Documentation Map](README.md#documentation-map); the
-Task-scoped reading table above routes directly to the owner for a task.
-Keep both current rather than maintaining another table here.
+task-scoped reading guidance above routes there.
 Module READMEs own orientation and local usage; design owners hold detailed
-behavior. Historical evidence must not override a current owner procedure.
+behavior. Describe current code only: remove obsolete-symbol references and
+migration narratives rather than documenting superseded implementations.
+The exception is [HARDWARE_STARTUP.md](HARDWARE_STARTUP.md): retain historical
+symbols and evidence there to avoid repeating mistakes. `scripts/rawes.lua`
+is authoritative for active flight-script commands and named-value inputs.
 
 Parameter-reference ownership note:
 - Canonical place for ArduPilot parameter defaults and inline explanations is `tests/sitl/copter-heli.parm`.
@@ -179,15 +167,17 @@ For ANY problematic hardware or SITL run, query LinkHub's canonical journal
 with `linkhub query` before writing one-off parsing code. Use the native
 `types`, `show`, `count`, `stats`, `armed`, `statustext`, `nvf`, `param`, and
 `diagnostics` subcommands; pipe `show --json` into `jq` for composed analysis.
-See `design/linkhub.md` for the full interface. New runs must not export a
-duplicate `mavlink.jsonl`.
+See `design/linkhub.md` for the full interface. Do not export duplicate
+transport logs.
 
 ## Core Invariants (summary)
 
 - Frames: simulation physics runs NED world + FRD body.
 - body_z: rotor axis points down through disk in NED conventions.
 - AP interface: ground sends commanded tension + target altitude (+ phase/substate), not measured tension.
-- AP control split: orientation feedforward from commanded tension; altitude PID sets collective.
+- AP control split: orientation from commanded tension and filtered tether
+  geometry, altitude PID for collective.
+  Exact current laws and Python/Lua differences belong to `design/flight_stack.md`.
 - Controller layer (Lua + Python mock) works in thrust [0..1]. Physics layer works in collective_rad.
   Single conversion point: `thrust_to_coll_rad()` in `simulation/param_defaults.py`.
   Never convert thrust→rad→thrust in a roundtrip; compute in thrust and map once at the physics boundary.
@@ -211,23 +201,22 @@ duplicate `mavlink.jsonl`.
 
 The full RAWES_* script-generated parameter table, the NAMED_VALUE_FLOAT/INT
 wire interface, and the RAWES_MODE → vehicle-API mapping are owned by
-`design/flight_stack.md` (see its "RAWES_\* script-generated parameters" table
+`design/flight_stack.md` (see its "RAWES_\* script-generated parameters" section
 and §4.2b–4.5) — do not duplicate those tables here. Live defaults for
 non-RAWES_* AP params are in `tests/sitl/rawes_common_defaults.parm`; set
 `RAWES_MODE` per-test.
 
-For signs, frame details, EKF gating, and mixer conventions, use the direct links
-in Task-scoped reading; do not preload unrelated references.
+For signs, frame details, EKF gating, and mixer conventions, select the owner
+from the central map; do not preload unrelated references.
 
 ## DShot Setup (Agent Critical)
 
 Canonical owner doc: [design/hardware.md](design/hardware.md) (wiring, RPM
 conversion, SITL exclusion); parameter values live in
-`tests/sitl/rawes_common_defaults.parm`. BLHeli/DShot params
-(`SERVO9_*`, `SERVO_BLH_*`, `SERVO_DSHOT_*`, `RPM1_*`) are intentionally
-excluded from SITL boot verification (`tests/sitl/stack_utils.py` ->
-`SITL_UNSUPPORTED_PARAMS`) because ArduCopter-heli SITL does not compile the
-BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`.
+`tests/sitl/rawes_common_defaults.parm`. SITL boot verification skips only the
+BLHeli/DShot-backend names in `tests/sitl/stack_utils.py::SITL_UNSUPPORTED_PARAMS`
+(SITL lacks that backend); everything else, including `SERVO9_FUNCTION`, is
+still verified. See `design/sitl_testing.md` for the list.
 
 ## Workflow Rules
 
@@ -279,9 +268,11 @@ BLHeli backend and drives output 9 as plain PWM — see `design/sitl_testing.md`
   `TelRow.to_dict()` at runtime.
 - Keep `controller.py` aligned with `scripts/rawes.lua` behavior.
 - Keep `scripts/rawes_test_surface.lua` exports in sync with needed Lua test symbols.
-- `_PumpingPythonMode` in `tests/common/mock_ardupilot.py` is a mechanical translation
-  of `rawes.lua do_steady_loop_inner()`. Variable names mirror Lua. When changing Lua altitude PID
-  logic, update the Python in the same commit. Key state that must stay in sync:
+- `_PumpingPythonMode` in `tests/common/mock_ardupilot.py` shares altitude/tension
+  math with `rawes.lua run_flight()`, but its current rate-target cyclic law is
+  not exact parity with Lua's absolute-angle path. Do not use Python-only tests
+  as proof of deployed cyclic behavior. When changing Lua altitude PID logic,
+  update the Python in the same commit. Key state that must stay in sync:
   `_tension_for_bz` is a RAMPED value (τ=RAWES_TRP≈2 s) toward `_tension_cmd_n` — not a step.
   Missing this ramp caused tether slack on phase transitions (reel-out→reel-in tension change).
 - Prefer module-level imports in Python. Avoid `import` statements inside functions or methods
@@ -319,7 +310,7 @@ There are three tiers, each with a different scope and runtime:
 ## Hardware Calibration Connection
 
 - On the first hardware operation in a conversation, run `python -m calibrate`
-  without `--port` or `--baud` so it auto-detects the active Pixhawk connection.
+  without `--connection` or `--baud` so it auto-detects the active Pixhawk connection.
 - After a successful scan, reuse the detected port and baud for subsequent
   one-shot commands in that conversation/session only.
 - Never assume a port or baud from an earlier session. If the remembered
@@ -331,10 +322,9 @@ There are three tiers, each with a different scope and runtime:
   TCP must not merely tunnel the prohibited 57600-baud radio link.
   For USB, verify the selected port with `serial.tools.list_ports` and require
   board-specific USB identity (VID/PID plus device serial/location), not merely
-  a `COM` name or the fact that the adapter itself uses USB. The current Pixhawk
-  6C native interface enumerates as `VID:PID=3162:0053` with device serial
-  `160031001751343131363538` (COM7/COM8 interfaces). Reconfirm this metadata
-  each hardware session; do not assume the port assignment persists.
+  a `COM` name or the fact that the adapter itself uses USB. Verify the live
+  board-specific identity each hardware session; COM numbers are not persistent
+  device identity.
 - Never upload Lua through the 57600-baud SiK/telemetry radio, including when
   tunneled over TCP. Do not treat a generic USB-serial adapter or an ambiguous
   connection as proof of an allowed upload path. If neither an allowed TCP
@@ -360,7 +350,9 @@ SITL IC-start timeline rule (agent-critical):
 - Canonical definition and per-phase markers live in [Flight timeline anchors](design/sitl_testing.md#flight-timeline-anchors).
 
 Stack-test execution rule (CRITICAL, non-negotiable):
-- For any test under `tests/sitl/**`, ALWAYS use `bash test.sh stack -n 4 ...`.
+- For tests under `tests/sitl/**`, use `bash test.sh stack -n 4 ...` for a suite
+  and `-n 1` for one selected test. The runner caps effective concurrency to 2;
+  `-n` is the requested upper bound, not a promise of four running stacks.
 - NEVER run SITL tests with host-side pytest commands like
     `uv run python -m pytest tests/sitl/...`.
     Those bypass the Docker stack harness and can fail with host-path issues
@@ -431,7 +423,7 @@ When updating documentation:
 - In other docs, keep only short context + link to the owner doc.
 - Avoid duplicating long parameter tables or algorithm walkthroughs across multiple files.
 - If ownership changes, update the [README ownership map](README.md#documentation-map)
-  first and keep the task-scoped links above in sync.
+  first and update inbound owner links.
 
 **If a mistake was caused by stale documentation, fix that documentation in the same commit
 as the code fix.** The test for "stale" is: would a future agent reading only the docs make

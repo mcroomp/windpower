@@ -84,5 +84,5 @@ When changing the envelope dynamics or CLI:
 
 1. keep `CLAUDE.md` aligned with the actual file set and entry points;
 2. update the matching `tests/envelope/` assertions in the same change;
-3. prefer describing current behavior over copying historical pass counts or
-   deleted test names.
+3. document current behavior and current test names only; keep run results in
+   artifacts.

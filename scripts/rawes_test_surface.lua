@@ -17,10 +17,6 @@ _rawes_fns = {
     KP_ALT                  = KP_ALT,
     KI_ALT                  = KI_ALT,
     KD_VZ                   = KD_VZ,
-    KP_EL                   = KP_EL,
-    KP_AZ                   = KP_AZ,
-    KD_EL                   = KD_EL,
-    CWMAX                   = CWMAX,
     AZ_REF_TAU_S            = AZ_REF_TAU_S,
 
     -- ── Pure geometry ───────────────────────────────────────────────────────
@@ -41,11 +37,6 @@ _rawes_fns = {
     anchor_e        = function() return _anchor_e end,
     anchor_d        = function() return _anchor_d end,
     bz_slew         = function() return _bz_slew end,
-
-    -- Crosswind rate damping gains (from RAWES_KP_EL, RAWES_KD_EL, RAWES_CWMAX params).
-    cw_rate_kp      = function() return _cw_rate_kp end,
-    cw_rate_kd      = function() return _cw_rate_kd end,
-    cw_rate_max     = function() return _cw_rate_max end,
 
     -- ── GUIDED angle conversion ──────────────────────────────────────────────
 

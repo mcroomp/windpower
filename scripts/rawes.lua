@@ -3,8 +3,8 @@ rawes.lua -- Unified RAWES flight controller
 Works in both ArduPilot SITL (mcroomp fork) and on the Pixhawk 6C.
 
 Mode is selected at runtime via RAWES_MODE (script-generated parameter):
-    0  none        -- script passive: no control-channel overrides; CH8 interlock hold still applies while armed
-    1  steady      -- primary guided flight path (set_target_rate_and_throttle)
+    0  none        -- no GUIDED guidance; neutral swash inputs while disarmed, shared interlock safety
+    1  steady      -- GUIDED absolute attitude plus rate inputs and direct thrust
     2  acro_manual -- normalized NVP controls through ACRO flybar passthrough
     5  takeoff     -- fixed level attitude (body_z=[0,0,1]) + altitude-PID collective climb;
                       no anchor/elevation tracking or lateral position hold.  Ground station
@@ -14,23 +14,24 @@ Mode is selected at runtime via RAWES_MODE (script-generated parameter):
     4  landing     -- reserved, not yet implemented
     6  collective  -- disarmed collective/cyclic calibration, motor off
 
-Cyclic + collective control (steady + pumping): single GUIDED rate-only call.
+Cyclic + collective control (steady + pumping): GUIDED angle/rate/thrust call.
   Compute bz_goal = bz_altitude_hold(pos, el_rad, tension_n):
     points the disk at (el_rad, current_azimuth) with a gravity-compensation tilt
     so thrust counteracts the elevation-lowering component of gravity.
-    Convert body_z error to body-frame roll/pitch rates with sqrt-shaped P.
+    Convert body_z to absolute roll/pitch at current yaw (zero rate inputs).
     Compute col_thrust in [0,1] from local altitude PID.
-    Call vehicle:set_target_rate_and_throttle(roll_rate, pitch_rate, 0, col_thrust) at 50 Hz.
-  RC ch3 is NO LONGER overridden by run_flight; collective flows through the AP
+    Call vehicle:set_target_angle_and_rate_and_throttle(...) at 50 Hz.
+  run_flight does not override RC ch3; collective flows through the AP
   attitude controller's set_throttle_out path.
-  Before GPS fuses: command current body attitude (zero corrective torque).
+  Before steady capture: command the current body attitude with zero rate inputs.
 
 Ground planner signals via NAMED_VALUE_FLOAT (dynamic in-flight values only):
-  RAWES_SUB: substate 0=hold 1=reel_out 2=transition 3=reel_in 4=transition_back
-             (set by the ground pumping schedule; the vehicle stays in MODE_STEADY)
-  RAWES_ALT: target altitude [m] above anchor; Lua rate-limits elevation toward it
+  RAWES_SUB: substate 0=hold 1=reel_out 3=reel_in (2 and 4 reserved; logged only,
+             does not change the control law; the vehicle stays in MODE_STEADY)
+  RAWES_ALT: target altitude [m] above anchor for the steady altitude PID;
+             takeoff uses altitude above the EKF origin, not anchor subtraction
   RAWES_TEN: target/feed-forward tether tension [N]; used for gravity compensation
-  RAWES_ARM: optional disarm timer (value = ms until forced disarm)
+  RAWES_ARM: disarm timer (ms until forced disarm); only applies while armed, never arms
   RAWES_RLL: normalized roll [-1,1] (latched in mode 2, fresh in mode 6)
   RAWES_PIT: normalized pitch [-1,1] (latched in mode 2, fresh in mode 6)
   RAWES_COL: normalized collective [0,1] (ACRO-manual or disarmed setup)
@@ -54,7 +55,7 @@ Ground planner signals via NAMED_VALUE_INT (static anchor location, sent once):
              succeeded at least once.  Until then run_flight only holds the
              current attitude.
     -- IC seed (MODE_PASSIVE):
-    --   thrust-only seed (RAWES_THR) is valid and drives zero-rate hold.
+    --   thrust-only seed (RAWES_THR) is valid, but does not activate passive hold.
     --   Lua captures the attitude anchor on MAV_CMD_RAWES_ENTER_PASSIVE.
   RAWES_THR: IC thrust [0..1]   (calibrate: --trim thr=<value>)
   RAWES_ROFF: passive roll offset  [rad] (relative to Lua's captured anchor)
@@ -72,7 +73,8 @@ Ground one-shot commands via COMMAND_LONG (blocked from ArduPilot; Lua acks):
   31010 ENTER_GUIDED  (MAV_CMD_USER_1): requires armed, RAWES_MODE=2, RAWES_THR
         and healthy AHRS. Captures the current attitude, switches to
         GUIDED_NOGPS and installs that attitude in the same tick, then holds it
-        at 20 Hz until passive hold takes over or the vehicle leaves GUIDED.
+        on change (at most 20 Hz), otherwise at 1 Hz, until passive takes over
+        or a target call reports that the vehicle left GUIDED.
   31011 ENTER_PASSIVE (MAV_CMD_USER_2): requires RAWES_MODE=3 and healthy AHRS.
         Captures the passive anchor and enables absolute hold.
         param1 = yaw-trim seed [0, RAWES_YFF_MAX]; negative = adaptive observer
@@ -86,10 +88,6 @@ Parameters (script-generated; visible in GCS as RAWES_* params):
   RAWES_KP_ALT  Altitude-P gain                                         default 0.0263
   RAWES_KI_ALT  Altitude-I gain                                         default 0.0026
   RAWES_KD_VZ   Vertical-speed damping gain                             default 0.105
-  RAWES_KP_EL   In-plane (elevation) position rate-P gain [rad/s per m]  default 2.5
-  RAWES_KP_AZ   Crosswind (azimuth) position rate-P gain  [rad/s per m]  default 0.5
-  RAWES_KD_EL   In-plane position rate-D gain              [rad/s/(m/s)]  default 0.0
-  RAWES_CWMAX   Position rate saturation                   [rad/s]        default 0.6
   RAWES_SLW     Elevation/body_z slew rate limit           [rad/s]        default 0.40
   RAWES_TEL_HZ  Diagnostic telemetry (DEBUG_FLOAT_ARRAY) rate   [Hz]           default 2.0 (read live; 0 = off)
   RAWES_YFF_MAX Yaw trim clamp upper bound                 [throttle]     default 0.7
@@ -201,10 +199,6 @@ KD_VZ  = 0.105
 -- KP/KI altitude terms still hold altitude, only the derivative kick is gated.
 VZ_GATE_RATE_RADS = 1.0          -- |gyro| at which the vz-damping fully fades
 VZ_GATE_MIN       = 0.0          -- floor on the gate factor
-KP_EL              = 2.5          -- in-plane (elevation) position rate-P [rad/s per m]
-KP_AZ              = 0.5          -- crosswind (azimuth) position rate-P [rad/s per m]
-KD_EL              = 0.0          -- in-plane position rate-D [rad/s per (m/s)]
-CWMAX              = 0.6          -- position rate saturation [rad/s]
 
 -- Plane-keeping azimuth low-pass time constant [s].  The body-z azimuth
 -- reference is slowly slewed toward the instantaneous position azimuth so fast
@@ -281,12 +275,6 @@ _anchor_lat_e7   = nil     -- RAWES_LAT: anchor latitude  [deg * 1e7]
 _anchor_lon_e7   = nil     -- RAWES_LON: anchor longitude [deg * 1e7]
 _anchor_alt_cm   = nil     -- RAWES_AAL: anchor altitude  [cm, AMSL]
 _anchor_received = false   -- true once the onboard lat/lon/alt -> NED conversion has succeeded
-
--- Crosswind rate damping (all initialized from RAWES_* params at load time)
-_cw_rate_kp      = 0.0     -- RAWES_KP_EL: in-plane (elevation) position rate-P [rad/s per m]
-_cw_rate_kp_az   = 0.0     -- RAWES_KP_AZ: crosswind (azimuth) position rate-P  [rad/s per m]
-_cw_rate_kd      = 0.0     -- RAWES_KD_EL: in-plane position rate-D [rad/s per (m/s)]
-_cw_rate_max     = 0.6     -- RAWES_CWMAX: position rate saturation [rad/s]
 
 -- IC thrust [0..1] — ground sends via RAWES_THR.  Used by MODE_PASSIVE
 -- to hold the IC operating point while the body is kinematically locked.
@@ -651,10 +639,8 @@ assert(param:add_param(_PARAM_KEY, 2, "YAW_SLP", 0),      "RAWES_YAW_SLP")
 assert(param:add_param(_PARAM_KEY, 3, "KP_ALT",  0.0263), "RAWES_KP_ALT")
 assert(param:add_param(_PARAM_KEY, 4, "KI_ALT",  0.0026), "RAWES_KI_ALT")
 assert(param:add_param(_PARAM_KEY, 5, "KD_VZ",   0.105),  "RAWES_KD_VZ")
-assert(param:add_param(_PARAM_KEY, 6, "KP_EL",   2.5),    "RAWES_KP_EL")
-assert(param:add_param(_PARAM_KEY, 7, "KP_AZ",   0.5),    "RAWES_KP_AZ")
-assert(param:add_param(_PARAM_KEY, 8, "KD_EL",   0.0),    "RAWES_KD_EL")
-assert(param:add_param(_PARAM_KEY, 9, "CWMAX",   0.6),    "RAWES_CWMAX")
+-- Indices 6-9 are unused (retired gains); keep the remaining indices fixed so
+-- stored values stay with the same parameters.
 assert(param:add_param(_PARAM_KEY, 10, "SLW",    0.40),   "RAWES_SLW")
 assert(param:add_param(_PARAM_KEY, 11, "TEL_HZ", 2.0),    "RAWES_TEL_HZ")
 assert(param:add_param(_PARAM_KEY, 12, "YFF_MAX", 0.7),   "RAWES_YFF_MAX")
@@ -674,13 +660,6 @@ do
     KP_ALT        = p("RAWES_KP_ALT", KP_ALT)
     KI_ALT        = p("RAWES_KI_ALT", KI_ALT)
     KD_VZ         = p("RAWES_KD_VZ",  KD_VZ)
-    KP_EL         = p("RAWES_KP_EL",  KP_EL)
-
-    -- Initialize all position rate control from params
-    _cw_rate_kp    = KP_EL
-    _cw_rate_kp_az = p("RAWES_KP_AZ",  KP_AZ)
-    _cw_rate_kd    = p("RAWES_KD_EL",  KD_EL)
-    _cw_rate_max   = p("RAWES_CWMAX",  CWMAX)
     _bz_slew       = p("RAWES_SLW",    _bz_slew)
     TEL_HZ         = p("RAWES_TEL_HZ", TEL_HZ)
     YFF_MAX        = p("RAWES_YFF_MAX", YFF_MAX)
@@ -1034,50 +1013,10 @@ local function run_flight()
     if thrust_delta < -THRUST_SLEW_MAX then thrust_delta = -THRUST_SLEW_MAX end
     _last_thrust = _last_thrust + thrust_delta
 
-    -- Crosswind rate damping: compute a world-frame East rotation rate command
-    -- from North position/velocity error, then map to body-frame roll/pitch rates.
-    local rate_roll_cw = 0.0
-    local rate_pitch_cw = 0.0
-    if (_cw_rate_kp > 0.0 or _cw_rate_kd > 0.0) and pos_ned and vel_ned then
-        local pos_north = rel:x()
-        local vel_north = vel_ned:x()
-
-        -- Compute desired world-frame rotation rate about East (NED +Y).
-        -- Positive omega_east is right-hand rule: counterclockwise when viewed from East.
-        -- pos_north_error is a scalar: signed position error along North axis.
-        local pos_north_error = -pos_north    -- pointing toward design position (negative north)
-        local pos_north_rate_request = _cw_rate_kp * pos_north_error
-        local vel_north_damping = _cw_rate_kd * vel_north
-        local omega_east = pos_north_rate_request + vel_north_damping
-
-        -- Apply saturation
-        if omega_east >  _cw_rate_max then omega_east =  _cw_rate_max end
-        if omega_east < -_cw_rate_max then omega_east = -_cw_rate_max end
-
-        -- Map world-East rotation to body-frame roll/pitch rates.
-        -- For a body aligned with NED (body_x=North, body_y=East, body_z=Down),
-        -- a rotation about world-East (+Y) produces:
-        --   body_roll_rate = 0 (rotation is about +Y, which is body +Y)
-        --   body_pitch_rate = omega_east (right-hand rule; positive pitch-rate = nose-up)
-        -- However, the actual body frame may be tilted, so we use AHRS-based rotation.
-        local yaw_b = ahrs:get_yaw_rad()
-        if yaw_b then
-            -- In the yaw-rotated frame, East remains East.
-            -- Rotation about world-East induces roll and pitch rates proportional to
-            -- the tilt angles (through the rotation matrix).  For small tilts from NED:
-            -- body-frame roll_rate ≈ omega_east * sin(yaw)
-            -- body-frame pitch_rate ≈ omega_east * cos(yaw)
-            local sin_yaw = math.sin(yaw_b)
-            local cos_yaw = math.cos(yaw_b)
-            rate_roll_cw = omega_east * sin_yaw
-            rate_pitch_cw = omega_east * cos_yaw
-        end
-    end
-
-    -- GUIDED angle path: absolute roll/pitch + held yaw, zero feedforward rate,
+    -- GUIDED angle path: absolute roll/pitch + current yaw, zero rate inputs,
     -- thrust passed directly to set_throttle_out.
     send_guided_angle_rate_throttle(
-        roll_deg, pitch_deg, math.deg(yaw_now), rate_roll_cw, rate_pitch_cw, 0.0, _last_thrust,
+        roll_deg, pitch_deg, math.deg(yaw_now), 0.0, 0.0, 0.0, _last_thrust,
         "steady_attitude")
 
     -- Record outer-loop diagnostics for centralized DEBUG_FLOAT_ARRAY emission.
@@ -1088,11 +1027,11 @@ local function run_flight()
         gy = gyro_now:y()
         gz = gyro_now:z()
     end
-    _diag_set("OL_RSP", rate_roll_cw)
-    _diag_set("OL_PSP", rate_pitch_cw)
+    _diag_set("OL_RSP", 0.0)
+    _diag_set("OL_PSP", 0.0)
     _diag_set("OL_YSP", 0.0)
-    _diag_set("OL_RER", rate_roll_cw - gx)
-    _diag_set("OL_PER", rate_pitch_cw - gy)
+    _diag_set("OL_RER", -gx)
+    _diag_set("OL_PER", -gy)
     _diag_set("OL_YER", -gz)
     _diag_set("OL_AP", alt_p)
     _diag_set("OL_AI", alt_i)

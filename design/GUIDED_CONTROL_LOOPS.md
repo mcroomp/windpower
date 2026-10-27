@@ -8,6 +8,12 @@ This is a low-level Guided/attitude-control deep dive.
 - This document should focus on ArduPilot control-chain internals and parameter effects.
 - Avoid repeating full system architecture text already covered in [flight_stack.md](flight_stack.md).
 
+The Python model of this chain is `arduloop/guided.py`,
+`arduloop/attitude_heli.py`, and `arduloop/pid.py`. It models the control
+math only — not firmware mode entry, spool state, landed state, timeouts, or
+failsafes (those are in [arming.md](arming.md)). Where the Python model
+differs from firmware, this document says so.
+
 ## 1. Overview
 
 This document describes the control loop architecture for ArduPilot's **Guided mode** as used by the RAWES (Rotary Airborne Wind Energy System). It is intended for control system engineers who need to understand the signal flow from an attitude command down to swashplate and tail actuator outputs.
@@ -57,18 +63,19 @@ graph TD
     ERR --> FLTE["LPF<br/>(ATC_RAT_xxx_FLTE)"]
     FLTE --> P["P × ATC_RAT_xxx_P"]
     FLTE --> I["Leaky ∫<br/>× ATC_RAT_xxx_I<br/>(ILMI floor)"]
-    ERR --> FLTD["LPF<br/>(ATC_RAT_xxx_FLTD)"]
-    FLTD --> D["d/dt × ATC_RAT_xxx_D"]
+    FLTE --> DERIV["d/dt"]
+    DERIV --> FLTD["LPF<br/>(ATC_RAT_xxx_FLTD)"]
+    FLTD --> D["× ATC_RAT_xxx_D"]
 
-    RT --> FF["FF × ATC_RAT_xxx_FF"]
+    FLTT --> FF["FF × ATC_RAT_xxx_FF"]
 
-    P --> SUM(("⊕"))
+    P --> PD["P+D gain derating<br/>SMAX; optional PDMX clamp"]
+    D --> PD
+    PD --> SUM(("⊕"))
     I --> SUM
-    D --> SUM
     FF --> SUM
 
-    SUM --> SMAX["Slew Limit<br/>(ATC_RAT_xxx_SMAX)"]
-    SMAX --> OUT["motor_output<br/>(to swashplate/tail)"]
+    SUM --> OUT["motor_output<br/>(to swashplate/tail)"]
 
     subgraph Heli-Specific
         I -.-|"Leaky I: decays toward ±ILMI<br/>not toward zero"| ILMI["ATC_RAT_xxx_ILMI"]
@@ -93,7 +100,7 @@ Guided mode supports multiple submodes. **RAWES uses exclusively the Angle submo
 
 ### Angle Submode Entry
 
-The Lua API enters the Angle submode by calling `ModeGuided::set_angle()`. No position, velocity, or altitude controller is involved. Inside `run_angle_control()`, ArduPilot chooses one of two attitude-controller inputs based on whether the stored quaternion is nonzero or zero.
+The Lua API enters the Angle submode by calling `ModeGuided::set_angle()`. No position, velocity, or altitude controller is involved. Inside `angle_control_run()`, ArduPilot chooses one of two attitude-controller inputs based on whether the stored quaternion is nonzero or zero.
 
 #### Angle + Rate + Thrust Entry
 
@@ -127,7 +134,7 @@ q.zero();
 mode_guided.set_angle(q, ang_vel_body, throttle, true);
 ```
 
-At 400 Hz, `ModeGuided::run_angle_control()` detects that zero quaternion and switches from `input_quaternion(...)` to:
+At 400 Hz, `ModeGuided::angle_control_run()` detects that zero quaternion and switches from `input_quaternion(...)` to:
 
 ```cpp
 attitude_control->input_rate_bf_roll_pitch_yaw(...);
@@ -146,7 +153,7 @@ Important behavior:
 - With requested rates `(0, 0, 0)`, the vehicle tries to settle body rates to zero while holding the internally conditioned attitude target.
 - Throttle remains the same direct-thrust path as angle+rate+throttle; the Z PID chain is still bypassed.
 
-Why this matters for RAWES: if the controller knows “stop rotating” but does not know the correct absolute roll/pitch/yaw for the current tether/wind state, rate-only Guided can avoid injecting a wrong absolute attitude command while still using ArduPilot's shaped rate and heli PID machinery.
+When this path could help: if a controller knows "stop rotating" but not the correct absolute attitude for the current tether/wind state, rate-only Guided avoids commanding a wrong absolute attitude while still using ArduPilot's shaped rate and heli PID machinery. `rawes.lua` does not currently use it.
 
 Control-chain summary:
 
@@ -164,72 +171,38 @@ thrust     → set_throttle_out(...)
 
 ```
 thrust → attitude_control->set_throttle_out(thrust, apply_angle_boost=true)
-       → directly to collective output (with angle boost)
+       → helicopter collective path (angle boost only when enabled)
 ```
 
-The vertical PID chain (Section 4) is **completely bypassed**. The thrust value goes directly to the collective servo (after angle boost scaling). No ArduPilot altitude hold, no velocity PID, no acceleration PID. The Lua script owns collective and runs its **own** altitude PID (at 50 Hz) to set thrust.
+ArduPilot's position/velocity/acceleration Z-controller chain is bypassed.
+The thrust value enters the helicopter collective path, subject to that path's
+limits and any enabled angle boost. Lua steady/takeoff owns its own altitude
+controller; passive holds the supplied thrust without running altitude feedback.
 
 > **Note**: The equivalent MAVLink path is `SET_ATTITUDE_TARGET` with `GUID_OPTIONS` bit 3 set — both call the same `set_angle()` function with `use_thrust=true`.
 
 #### Why Direct Collective for RAWES?
 
-RAWES decouples attitude and collective so the two flight tasks never fight (see [flight_stack.md](flight_stack.md)):
-
-- **Orientation (attitude)** is a feedforward force balance: the **commanded** tension `RAWES_TEN` + actual position + gravity sets the disk-axis direction. A higher commanded tension aims the disk more tether-aligned (power phase, reel-out); a lower one tilts it back (recovery, reel-in). The actual tension is produced by the kite/winch interaction — the winch closes the only tension loop, on its own load cell.
-- **Collective (thrust)** is a closed-loop altitude PID running inside the Lua. It rejects gusts and holds the commanded altitude, while the force balance only slowly re-trims direction.
-
-The AP therefore receives only two slow setpoints — commanded tension and target altitude — and never the measured tension. ArduPilot's built-in Z controller is bypassed precisely so the Lua can own this decoupling.
+Lua runs its own guidance (tether geometry) and its
+own altitude/thrust law instead of ArduPilot's position controllers. Those laws
+are defined in [flight_stack.md](flight_stack.md#43-mode-1--steady-rawes_mode1).
 
 ---
 
-## 3. Horizontal Control Chain (XY) — Why AC_PosControl Doesn't Work for RAWES
+## 3. Horizontal Control Chain (XY) — Bypassed by RAWES
 
-**Not active for RAWES.** The Angle submode bypasses `AC_PosControl` for horizontal axes. This section explains why.
+**Not used by RAWES.** Lua sends attitude and thrust, not horizontal
+position/velocity targets, so ArduPilot's horizontal position controller
+(below) never runs. Lua's own guidance is documented in
+[flight_stack.md](flight_stack.md#43-mode-1--steady-rawes_mode1).
 
-### 3.1 What AC_PosControl Does
-
-The standard horizontal position controller chains:
+For reference, the standard horizontal position controller chains:
 
 ```
 Position error → P → Velocity target → PID → Accel target → accel_to_lean_angles() → Roll/Pitch
 ```
 
-The final conversion `accel_to_lean_angles()` uses `atan(a/g)` — this is mathematically exact at any angle, **not** a small-angle approximation. The function itself works correctly even at 70° tilt. The problems are in the loops around it.
-
-### 3.2 Three Reasons It Fails at Steep Tilt
-
-**1. Velocity PID gain scaling**
-
-The velocity PID is tuned assuming a linear plant: small changes in lean angle produce proportional changes in horizontal acceleration. The true relationship is `a = g·tan(θ)`, whose derivative (plant gain) is `g/cos²(θ)`:
-
-| Tilt angle | Plant gain | Effective gain multiplier |
-|------------|-----------|--------------------------|
-| 0° (hover) | g | 1× (tuned for this) |
-| 30° | 1.33g | 1.3× |
-| 45° | 2g | **2×** |
-| 60° | 4g | **4×** |
-
-At 60° tilt the velocity PID is effectively 4× more aggressive than tuned, causing oscillation. ArduPilot does not gain-schedule by `cos²(θ)`.
-
-**2. Lean angle clamping**
-
-`ANGLE_MAX` (default 30°, hard max typically 45°) and the collective-margin lean limit (`get_althold_lean_angle_max_cd()`) clamp the output of `accel_to_lean_angles()`. RAWES needs 45–70° tilt — well beyond these limits. Even if `ANGLE_MAX` is raised, problem 1 and 3 remain.
-
-**3. Decoupled Z controller**
-
-The altitude controller treats collective as approximately vertical force. At steep tilt, only `cos(θ)` of total thrust is vertical — at 60° that's 50%. The `angle_boost` feed-forward (`1/cos(θ)` collective scaling) partially compensates, but the XY and Z loops don't coordinate: the XY loop commands tilt without telling the Z loop that more collective is needed, and the Z loop increases collective without knowing it's also increasing horizontal force. This cross-coupling worsens with tilt angle.
-
-### 3.3 Why Submarines Get Away With It
-
-ArduSub uses the same `AC_PosControl` and `atan(a/g)` math, but avoids these problems because **the output is consumed differently**. In `ArduSub/motors.cpp`, `translate_pos_control_rp()` converts the roll/pitch outputs into **forward/lateral thruster commands** rather than actually tilting the vehicle body. On vectored 6DOF frames (`AP_Motors6DOF`), horizontal movement comes from dedicated thrusters — the vehicle stays level regardless of horizontal acceleration.
-
-The `atan(a/g)` calculation is technically wrong for a neutrally buoyant vehicle (there's no gravitational restoring force linking tilt to horizontal acceleration), but it doesn't matter because the output is just a proportional signal routed to lateral thrusters, and PID tuning absorbs the nonlinearity.
-
-RAWES cannot use this approach — horizontal force comes from tilting the rotor disc, so the vehicle **must** actually tilt to the commanded angle.
-
-### 3.4 RAWES Solution
-
-RAWES uses Guided Angle submode to bypass `AC_PosControl` entirely. The Lua script closes its own flight-regime logic with full knowledge of steep tilt, tether forces, and orbital dynamics, then commands attitude+thrust via `set_target_angle_and_rate_and_throttle()`. The body-rates+thrust path remains available in ArduPilot/arduloop for tests and experiments, but it is not the current deployed steady/passive/takeoff path.
+Its lean-angle limits therefore do not clamp Lua's attitude target.
 
 ---
 
@@ -247,17 +220,24 @@ thrust (from Lua) → set_throttle_out(thrust, apply_angle_boost)
 The PSC altitude / velocity / acceleration controllers are therefore inactive on
 this path; Lua owns the vertical controller.
 
-`set_throttle_out(..., apply_angle_boost=true)` still requests ArduPilot's
-angle-boost handling. This document does **not** assume a particular live value
-for `ATC_ANG_BOOST`: the project parameter files do not currently set it, so
-verify the active firmware default / vehicle dump before claiming additional
-`1/cos(tilt)` scaling in a specific run.
+`set_throttle_out(..., apply_angle_boost=true)` asks for angle boost. When
+boost is enabled it is not a plain `thrust/cos(tilt)`; the Python port
+(`_apply_throttle_out()`) scales around the collective midpoint and reduces
+the boost when inverted:
 
-For RAWES this direct-thrust path matters because attitude and collective are
-intentionally decoupled (see [flight_stack.md](flight_stack.md)):
+```text
+inverted_factor = clamp(2*cos(actual_tilt), -1, 1)
+boost_factor = 1/max(0.1, abs(cos(thrust_angle)))
+boosted = (thrust - collective_mid)*inverted_factor*boost_factor + collective_mid
+```
 
-- **Orientation (attitude)** is a feedforward force balance from commanded tension, actual position, and gravity.
-- **Collective (thrust)** is a Lua-owned altitude PID. The AP rate loops then track the resulting attitude/throttle setpoints.
+The result is clamped to `[0,1]`. In the Python port boost is **off by
+default** (`GuidedAttitudeParams.ATC_ANG_BOOST=False`) and is not read from
+the parm files, so Python results say nothing about whether boost is active on
+the vehicle; check the vehicle's parameters for that.
+
+How Lua chooses attitude and thrust is defined in
+[flight_stack.md](flight_stack.md#43-mode-1--steady-rawes_mode1).
 
 ---
 
@@ -268,17 +248,34 @@ intentionally decoupled (see [flight_stack.md](flight_stack.md)):
 The attitude controller computes a quaternion error between the target and current attitude, then extracts an angular rate command proportional to the error:
 
 ```
-attitude_error = target_quat * current_quat.inverse()
+attitude_error = thrust/heading decomposition of inverse(body_quat) * slewed_target_quat
 ang_vel_target_roll  = att_error_roll  * ATC_ANG_RLL_P
 ang_vel_target_pitch = att_error_pitch * ATC_ANG_PIT_P
 ang_vel_target_yaw   = att_error_yaw   * ATC_ANG_YAW_P
 ```
 
-- **Controller**: Proportional (quaternion-based)
+- **Controller**: Quaternion thrust-vector/heading decomposition, with
+  proportional/square-root attitude correction and acceleration/rate limits.
+  The linear expressions above describe the small-error region.
 - **Parameters**: `ATC_ANG_RLL_P`, `ATC_ANG_PIT_P`, `ATC_ANG_YAW_P` (units: rad/s per rad)
 - **Output**: Body-frame angular rate targets in rad/s
 - **Rate feedforward**: If the target attitude is changing (e.g., during a maneuver), the rate of change is added as feedforward
 - **Code**: `AC_AttitudeControl::attitude_controller_run_quat()` → `update_ang_vel_target_from_att_error()`
+
+In the angle path, `arduloop` first advances its internal target, then uses
+`_attitude_command_model()` to shape target angular velocity **and angular
+acceleration** with a third-order jerk-limited model. Roll/pitch use
+`ATC_INPUT_TC`; yaw has `ATC_INPUT_TC_YAW` (the factories initialize it from
+the same input time constant). The rate-only path separately uses
+`_input_shaping_ang_vel()`.
+
+The heading-error clamp depends on yaw rate P, yaw angle P, and yaw acceleration
+limits, with a 45-degree ceiling. Thrust-error blending uses the angle between
+**slewed target** and actual body thrust vectors: full feedforward through
+30 degrees, fading roll/pitch feedforward and yaw authority from 30 to
+60 degrees, and gyro yaw as the rate target above 60 degrees. This suppresses
+yaw error demand; it does not guarantee zero yaw output in the presence of
+stored I, feedforward, filtering, or trim.
 
 ---
 
@@ -296,26 +293,29 @@ rate_error = rate_target - gyro_rate
 P_term   = rate_error * ATC_RAT_xxx_P
 I_term   = integral(rate_error) * ATC_RAT_xxx_I    [with leaky integrator]
 D_term   = d/dt(rate_error) * ATC_RAT_xxx_D
-FF_term  = rate_target * ATC_RAT_xxx_FF
+FF_term  = filtered_rate_target * ATC_RAT_xxx_FF
+DFF_term = d/dt(filtered_rate_target) * ATC_RAT_xxx_D_FF
 
-output = P_term + I_term + D_term + FF_term
+output = P_term' + I_term + D_term' + FF_term + DFF_term
+         (P' and D' are P and D after SMAX/PDMX limiting, §6.4)
 ```
 
 ### 6.2 Leaky Integrator (ILMI)
 
-Unique to helicopters, the integrator uses a **leak-to-minimum** strategy:
+Unique to helicopters, the integrator uses a **leak-to-minimum** strategy,
+applied once per rate-loop tick with leak coefficient `0.02` (per tick, not
+per second):
 
-- The integrator decays at rate `0.02/s` toward `±ILMI` (not toward zero)
-- If `|integrator| > ILMI`: integrator leaks toward ILMI
-- If `|integrator| <= ILMI`: no leak applied
-- **Purpose**: Maintains a minimum I-term to compensate for known steady-state offsets (e.g., tail rotor torque compensation) while still preventing windup
+- If `|integrator| > ILMI`: the integrator leaks toward ±ILMI.
+- If `|integrator| <= ILMI`: no leak. ILMI is a floor for leakage, not a
+  forced minimum; with ILMI=0 the integrator leaks toward zero.
 
 ```
 if |I_term| > ILMI:
-    I_term -= sign(I_term) * leak_rate * dt
+    I_term -= (I_term - sign(I_term)*ILMI) * leak_rate
 ```
 
-- **Parameter**: `ATC_RAT_xxx_ILMI` (default 0.1)
+- **Parameter**: `ATC_RAT_xxx_ILMI` (axis-specific defaults live in the parm files)
 - **Leak rate**: 0.02 (hardcoded constant `AC_ATTITUDE_HELI_RATE_INTEGRATOR_LEAK_RATE`)
 - **Code**: `AC_HELI_PID::update_leaky_i()`
 
@@ -324,9 +324,10 @@ if |I_term| > ILMI:
 During yaw rotation, the roll and pitch I-terms are rotated to maintain their earth-frame orientation:
 
 ```
-// Rotate roll/pitch integrators by yaw rate * dt
-new_roll_I  = roll_I * cos(yaw_rate*dt) - pitch_I * sin(yaw_rate*dt)
-new_pitch_I = roll_I * sin(yaw_rate*dt) + pitch_I * cos(yaw_rate*dt)
+// When enabled, rotate the stored integrators after this tick's PID outputs
+angle = -gyro_yaw_rate * dt
+new_roll_I  = roll_I * cos(angle) - pitch_I * sin(angle)
+new_pitch_I = roll_I * sin(angle) + pitch_I * cos(angle)
 ```
 
 - **Code**: `AC_AttitudeControl_Heli::rate_bf_to_motor_roll_pitch()` (piro comp section)
@@ -338,17 +339,20 @@ Each rate PID has configurable filters:
 | Filter | Parameter | Description |
 |--------|-----------|-------------|
 | Target filter | `ATC_RAT_xxx_FLTT` | Low-pass on rate target input |
-| Error filter | `ATC_RAT_xxx_FLTE` | Low-pass on rate error (affects P & I) |
+| Error filter | `ATC_RAT_xxx_FLTE` | Low-pass on rate error before P, I, and the D derivative |
 | D-term filter | `ATC_RAT_xxx_FLTD` | Low-pass on derivative term |
-| Slew rate limit | `ATC_RAT_xxx_SMAX` | Maximum rate of change of output |
-| Notch (target) | `ATC_RAT_xxx_NTF` | Notch filter bitmask on target |
-| Notch (error) | `ATC_RAT_xxx_NEF` | Notch filter bitmask on error |
+| Slew suppression | `ATC_RAT_xxx_SMAX` | Derates P and D gains from their measured slew; not a hard post-sum slew clamp |
+| PD magnitude limit | `ATC_RAT_xxx_PDMX` | Rescales P and D together when their sum exceeds the limit |
+| Notch (target) | `ATC_RAT_xxx_NTF` | Selects the configured target notch; precedes FLTT |
+| Notch (error) | `ATC_RAT_xxx_NEF` | Selects the configured error notch; precedes FLTE |
 
 ### 6.5 Flybar / Tail Passthrough Modes
 
 For mechanical flybar helicopters or direct-drive tails:
-- **Flybar passthrough**: Roll/pitch rate controller is bypassed; pilot/attitude output goes directly to swashplate
-- **Tail passthrough**: Yaw rate controller is bypassed; output goes directly to tail servo/motor
+- **Flybar passthrough** (`H_FLYBAR_MODE=1`): in ACRO only, pilot roll/pitch
+  go straight to the swash. GUIDED still uses the full attitude/rate path.
+- **Tail type**: `H_TAIL_TYPE=3` (DDFP) only selects the motor-driven tail; the
+  yaw rate PID still runs.
 
 ---
 
@@ -365,11 +369,14 @@ For RAWES, the yaw axis is controlled by an anti-rotation motor whose sole purpo
 
 ### Collective → Yaw Coupling Paths (Unwanted for RAWES)
 
-ArduPilot's helicopter motor code contains several paths where collective or cyclic changes leak into the yaw output. These are designed for conventional single-rotor helicopters where main rotor torque varies with collective pitch. **For RAWES, where the rotor is wind-driven and torque is not a function of collective, these couplings are undesirable.**
+ArduPilot's helicopter mixer can add collective-dependent yaw compensation,
+designed for engine-driven rotors. RAWES turns the static term off
+(`H_COL2YAW=0`) and instead lets the Lua trim observer learn the yaw trim from
+measured motor output and yaw rate.
 
 #### 1. `H_COL2YAW` — Collective-to-Yaw Feedforward
 
-**File**: `AP_MotorsHeli_Single.cpp:442-466` (`get_yaw_offset()`)
+**Firmware source**: `AP_MotorsHeli_Single.cpp`, `get_yaw_offset()`
 
 Adds a yaw offset proportional to collective pitch raised to the 1.5 power:
 
@@ -377,14 +384,12 @@ Adds a yaw offset proportional to collective pitch raised to the 1.5 power:
 yaw_offset = H_COL2YAW × |collective − zero_thrust_pct|^1.5
 ```
 
-This compensates for the conventional helicopter's main rotor torque increasing with collective. For RAWES, the anti-rotation motor counters aerodynamic reaction torque from wind-driven autorotation, which is **not correlated with collective**. Any nonzero `H_COL2YAW` will inject spurious yaw commands when collective changes during altitude control.
-
-Current RAWES defaults set `H_COL2YAW = 0`, which disables this collective →
-yaw feed-forward path.
+RAWES sets `H_COL2YAW = 0`, so collective changes from the altitude loop add
+no yaw command through this path.
 
 #### 2. `H_YAW_TRIM` — Fixed Yaw Bias (DDFP Tails)
 
-**File**: `AP_MotorsHeli_Single.cpp:181-184, 462-463`
+**Firmware source**: `AP_MotorsHeli_Single.cpp`, DDFP yaw trim path
 
 Adds a constant offset to the yaw output for DDFP (Direct Drive Fixed Pitch) tail types. This is a static trim to reduce I-term load in hover.
 
@@ -394,25 +399,19 @@ steady-state anti-rotation operating point.
 
 #### 3. Angle Boost → Collective → COL2YAW Chain
 
-**File**: `AC_AttitudeControl_Heli.cpp:537-574` (`set_throttle_out()`, `get_throttle_boosted()`)
+**Firmware source**: `AC_AttitudeControl_Heli.cpp`,
+`set_throttle_out()` / `get_throttle_boosted()`
 
-When `apply_angle_boost` is true, the throttle/collective is scaled by `1/cos(tilt)` to maintain vertical thrust during lean. This increased collective then feeds through `H_COL2YAW` (if nonzero) into yaw.
+Angle boost (Section 4) changes collective, which would feed `H_COL2YAW` if it
+were nonzero. With `H_COL2YAW=0` this path adds no yaw command.
 
-At steep tilt angles this boost factor becomes large (`1/cos(60°) = 2×`), amplifying any COL2YAW coupling. Even if COL2YAW is small, the boost can make the leakage significant.
+#### 4. Collective Margin Lean Limit
 
-If `H_COL2YAW` is kept at zero (as in the current RAWES defaults), this
-particular yaw-coupling path is inactive. Any remaining effect is then limited
-to whatever the active firmware does for angle boost itself.
+**Firmware source**: `AC_AttitudeControl_Heli.cpp`,
+`update_althold_lean_angle_max()`
 
-#### 4. Collective Margin Lean Limit → Indirect Yaw Effect
-
-**File**: `AC_AttitudeControl_Heli.cpp:445-448` (`update_althold_lean_angle_max()`)
-
-While this doesn't directly inject yaw, it clips the maximum allowed attitude based on available collective margin. At steep tilt, this can clip the roll/pitch targets, which changes the attitude error, which changes the body rates, which the yaw PID may respond to via cross-axis gyroscopic effects.
-
-For RAWES the important question is whether this lean-limit path clips at the
-operating angles actually used in a run; check logs/telemetry before treating it
-as active.
+This lean limit applies to callers that use it (e.g. altitude-hold lean
+conversion), not to the direct GUIDED quaternion target RAWES sends.
 
 ### Summary of Yaw Coupling Parameters
 
@@ -430,7 +429,10 @@ live numeric defaults. Use:
 
 ## 8. Input Shaping
 
-> **Position/velocity S-curve shaping is not active for RAWES** (bypassed with Angle submode). The relevant input shaping is the **attitude input shaper** within `AC_AttitudeControl`, which uses `sqrt_controller` with acceleration limits to slew the internal attitude target toward the commanded quaternion. Controlled by `ATC_INPUT_TC`.
+Position/velocity S-curve shaping is bypassed in the Angle submode. The Python
+angle-path model uses the jerk-limited `attitude_command_model` (Section 5);
+rate-only commands use the rate shaper. Both are separate from Lua's own
+elevation slew, tension ramp, and post-capture blending.
 
 ---
 
@@ -438,13 +440,14 @@ live numeric defaults. Use:
 
 | Loop Layer | Feed-Forward Source | Parameter | Purpose |
 |------------|-------------------|-----------|---------|
-| Roll Rate PID | Rate target | `ATC_RAT_RLL_FF` | **Primary roll response** (heli main gain) |
-| Pitch Rate PID | Rate target | `ATC_RAT_PIT_FF` | **Primary pitch response** (heli main gain) |
-| Yaw Rate PID | Rate target | `ATC_RAT_YAW_FF` | Primary yaw response |
-| Attitude Loop | Target attitude rate of change | (internal) | Smooth attitude tracking during maneuvers |
-| Attitude Loop | Lua rate FF arguments | (from API) | Known orbital angular velocity reduces tracking lag |
+| Roll Rate PID | Rate target | `ATC_RAT_RLL_FF` | Rate-target feedforward |
+| Pitch Rate PID | Rate target | `ATC_RAT_PIT_FF` | Rate-target feedforward |
+| Yaw Rate PID | Rate target | `ATC_RAT_YAW_FF` | Rate-target feedforward |
+| Attitude Loop | Target attitude rate of change | (internal) | Smooth attitude tracking |
+| Attitude Loop | Lua rate arguments | (from API) | Unused: `rawes.lua` sends zero rates |
 
-> **Note for Helicopters**: The `FF` term in the rate loops is often the **dominant control term** (larger than P), because helicopter rotor dynamics respond proportionally to cyclic/collective input rather than to rate error integration. For RAWES, P + FF together provide the angular rate damping that is the sole source of attitude stability.
+Which term dominates depends on the gains and the plant; check `PID_TUNING`
+telemetry for a given run.
 
 ---
 
@@ -464,15 +467,13 @@ Those are owned by:
 
 Current RAWES usage is asymmetric:
 
-1. **Lua script** (~50 Hz):
-   - Current `scripts/rawes.lua` steady, passive, and takeoff modes compute an
-     absolute attitude target and call
-     `set_target_angle_and_rate_and_throttle(...)`.
-   - The rate-only API (`set_target_rate_and_throttle(...)`) remains an
-     alternative ArduPilot path and is still ported/tested in `arduloop`, but
-     it is not the current deployed steady/passive/takeoff path.
-   - Lua also computes direct thrust and sends it through the GUIDED throttle
-     path.
+1. **Lua script** (steady/takeoff send every 50 Hz flight tick; passive and
+   the GUIDED-entry hold send only on change, ≤20 Hz, plus a 1 Hz keepalive):
+   - Steady, passive, and takeoff all call
+     `set_target_angle_and_rate_and_throttle(...)` with an absolute attitude
+     and a direct thrust value.
+   - The rate-only API (`set_target_rate_and_throttle(...)`) is not used by
+     `rawes.lua`; it is modeled in `arduloop` for tests.
 
 2. **Angle + rate + thrust path** (~400 Hz):
    - input shaping slews `_attitude_target` toward the commanded quaternion;
@@ -496,11 +497,19 @@ Current RAWES usage is asymmetric:
 
 ## 12. Source Code References
 
-For the current repo, the best verified pointers are the parity ports and
-docstrings in `arduloop/guided.py`, `arduloop/attitude_heli.py`, and
-`arduloop/params.py`. If you need to compare against upstream ArduPilot, check
-those files against the current ArduPilot checkout rather than relying on a
-stale path/function inventory in this document.
+The Python model is in `arduloop/guided.py`, `arduloop/attitude_heli.py`,
+`arduloop/pid.py`, and `arduloop/params.py`. To compare with firmware, use the
+ArduPilot release pinned in `simulation/Dockerfile`.
+
+Two Python behaviors are simplifications, not firmware models:
+
+- **Timeout:** after `timeout_s` with no new target, the controller resets its
+  target and rate state to the current attitude and drops direct thrust. Do not
+  read this as firmware `GUID_TIMEOUT` behavior.
+- **Climb-rate path:** a simplified vertical controller, not a full port of
+  `AC_PosControl`.
+
+See [arduloop/README.md](../arduloop/README.md).
 
 ---
 

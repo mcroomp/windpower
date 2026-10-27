@@ -76,12 +76,10 @@ end)()
 # The harness exposes shorthand aliases for convenience.
 
 _PARAM_ALIAS = {
-    "mode":     "RAWES_MODE",    # flight mode (0=none,1=steady,2=acro-manual,3=passive,4=landing)
+    "mode":     "RAWES_MODE",    # flight mode (0=none,1=steady,2=acro-manual,3=passive,4=landing,5=takeoff,6=collective)
     "kp_alt":   "RAWES_KP_ALT",
     "ki_alt":   "RAWES_KI_ALT",
     "kd_vz":    "RAWES_KD_VZ",
-    "kp_el":    "RAWES_KP_EL",
-    "kp_az":    "RAWES_KP_AZ",
     "yaw_slp":  "RAWES_YAW_SLP",
 }
 
@@ -131,8 +129,7 @@ class RawesLua:
     **params : float
         Initial parameter values.  Use shorthand aliases or full RAWES_* names:
             mode      -> RAWES_MODE   (flight mode, default 0)
-            kp_el     -> RAWES_KP_EL  (elevation crosswind gain)
-            kp_az     -> RAWES_KP_AZ  (azimuth crosswind gain)
+            kp_alt    -> RAWES_KP_ALT (altitude P gain)
             ...etc.   Full names (e.g. "RAWES_KP_ALT") are also accepted.
         Anchor is sent as NAMED_VALUE_INT ("RAWES_LAT"/"RAWES_LON"/"RAWES_AAL") and
         slew as NAMED_VALUE_FLOAT ("RAWES_SLW"), both through send_message().

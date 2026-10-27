@@ -255,9 +255,6 @@ def _run_with_constant_tether_force(
     force_pulse:      tuple | None      = None,   # (t_start_s, t_end_s, F_world_N)
     kp_pos:           float = 0.0,                # position feedback gain [N/m]
     kd_pos:           float = 0.0,                # velocity feedback gain [N·s/m]
-    crosswind_rate_kp:    float = 0.0,            # crosswind pos -> world-east ang-rate [rad/s per m]
-    crosswind_rate_kd:    float = 0.0,            # crosswind vel -> world-east ang-rate [rad/s per (m/s)]
-    crosswind_rate_max:   float = 0.6,            # saturation on world-east ang-rate [rad/s]
     pos_max_tilt_rad: float = math.radians(30.0), # cap on position-feedback correction
     fail_fast_max_dist: float | None = None,
     return_history:   bool  = False,
@@ -285,7 +282,6 @@ def _run_with_constant_tether_force(
         HeliCyclicController, AltitudeHoldController,
         compute_rate_cmd, compute_bz_tether,
         damp_bz_eq_lateral, position_feedback_bz_eq,
-        compute_crosswind_rate_cmd, apply_crosswind_rate_to_body_rates,
     )
     from simulation.dynamics import RigidBodyDynamics
     from tests.unit._aero_probe import make_probe
@@ -371,21 +367,6 @@ def _run_with_constant_tether_force(
         omega_b = s["R"].T @ s["omega"]
         rate    = compute_rate_cmd(s["R"][:, 2], bz_eq, s["R"], kp=2.5, kd=0.0)
 
-        # Optional simple damping loop for crosswind excursion: command a small
-        # world-frame rotation about East (NED +Y), then map into body rate
-        # components used by the inner roll/pitch controller.
-        if crosswind_rate_kp > 0.0 or crosswind_rate_kd > 0.0:
-            omega_east_cmd = compute_crosswind_rate_cmd(
-                s["pos"], s["vel"], pos_design,
-                kp=crosswind_rate_kp, kd=crosswind_rate_kd,
-                rate_max=crosswind_rate_max,
-            )
-            omega_body_corr = apply_crosswind_rate_to_body_rates(
-                omega_east_cmd, s["R"],
-            )
-            rate = rate.copy()
-            rate[0] += float(omega_body_corr[0])
-            rate[1] += float(omega_body_corr[1])
 
         tlon, tlat, _ = acro.step_from_thrust(
             thrust_cmd=thrust_cmd,
@@ -695,8 +676,6 @@ def test_elastic_tether_free_flight_holds_generated_ic():
 # force-to-tilt relationship.
 _KP_POS    = 20.0
 _KD_POS    = 40.0
-_CROSSWIND_RATE_KP = 0.015
-_CROSSWIND_RATE_KD = 0.15
 _T_SETTLE  = 30.0   # s — settling budget for disturbance tests
 
 
@@ -710,7 +689,6 @@ def test_constant_tether_recovers_from_lateral_position_offset():
         elevation_deg=30.0, tether_tension_n=300.0, t_total=_T_SETTLE,
         pos_perturb=np.array([5.0, 0.0, 0.0]),
         kp_pos=_KP_POS, kd_pos=_KD_POS,
-        crosswind_rate_kp=_CROSSWIND_RATE_KP, crosswind_rate_kd=_CROSSWIND_RATE_KD,
     )
     assert r["max_abs_north"] < 5.5, (
         f"Hub diverged off-plane: max_abs_north={r['max_abs_north']:.1f} m"
@@ -728,7 +706,6 @@ def test_constant_tether_recovers_from_lateral_velocity_kick():
         elevation_deg=30.0, tether_tension_n=300.0, t_total=_T_SETTLE,
         vel_perturb=np.array([1.0, 0.0, 0.0]),
         kp_pos=_KP_POS, kd_pos=_KD_POS,
-        crosswind_rate_kp=_CROSSWIND_RATE_KP, crosswind_rate_kd=_CROSSWIND_RATE_KD,
     )
     assert r["max_abs_north"] < 0.75, (
         f"Excessive off-plane excursion: max_abs_north={r['max_abs_north']:.2f} m"
@@ -751,7 +728,6 @@ def test_constant_tether_rejects_brief_force_impulse():
         elevation_deg=30.0, tether_tension_n=300.0, t_total=_T_SETTLE,
         force_pulse=(2.0, 4.0, np.array([20.0, 0.0, 0.0])),
         kp_pos=_KP_POS, kd_pos=_KD_POS,
-        crosswind_rate_kp=_CROSSWIND_RATE_KP, crosswind_rate_kd=_CROSSWIND_RATE_KD,
     )
     assert r["max_abs_north"] < 1.0, (
         f"Pulse caused off-plane runaway: max_abs_north={r['max_abs_north']:.1f} m"

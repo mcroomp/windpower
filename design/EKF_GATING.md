@@ -1,143 +1,100 @@
-# EKF GPS and moving-baseline yaw gating (RAWES SITL)
+# EKF GPS and Moving-Baseline Yaw Gating
 
-This document owns the **current RAWES stack configuration**, the project-specific
-gate interpretation for EKF bring-up during the kinematic hold, and the
-DataFlash fields worth checking when `diagnose_sitl.py` is not enough.
+This document owns RAWES SITL GPS/yaw configuration, capture-readiness checks,
+and interpretation of EKF evidence. Use the
+[central documentation map](../README.md#documentation-map) for area ownership.
 
-## Scope
+## Configuration
 
-Use this document when you need the current repo-truth for:
-
-- which EKF/GPS parameters the RAWES SITL stack sets;
-- which gates `analysis/diagnose_sitl.py` CHECK 1 evaluates before
-  `kinematic_exit`;
-- how to interpret an IC-start run that fails to leave `const_pos_mode`
-  during the startup hold.
-
-Do **not** use this file as a historical failure log; run
-`uv run python analysis/diagnose_sitl.py <test_name>` against the current run.
-
-## Current RAWES SITL EKF configuration
-
-Verified from `tests/sitl/rawes_sitl_defaults.parm` and
-`tests/sitl/rawes_common_defaults.parm`:
+The current settings are owned by
+[rawes_sitl_defaults.parm](../tests/sitl/rawes_sitl_defaults.parm) and
+[rawes_common_defaults.parm](../tests/sitl/rawes_common_defaults.parm):
 
 - `EK3_SRC1_YAW` selects moving-baseline GPS yaw.
-- `GPS1_TYPE` / `GPS2_TYPE` configure the base / rover pair used for that yaw path.
-- `GPS*_DELAY_MS` and `SIM_GPS*_LAG_MS` are pinned to matching values so the
-  injected lag and EKF-assumed lag stay aligned.
-- `COMPASS_USE=0`, so compass yaw is intentionally out of the path.
-- `EK3_GPS_CHECK=0`, so the usual HDOP / speed-accuracy / min-sat startup
-  gates are intentionally relaxed in SITL.
+- `GPS1_TYPE` / `GPS2_TYPE` configure the base/rover pair.
+- `GPS*_DELAY_MS` and `SIM_GPS*_LAG_MS` match the injected and assumed GPS lag.
+- Compass yaw is disabled in this SITL configuration.
+- `EK3_GPS_CHECK=0` relaxes startup quality checks; fresh GPS data at the
+  fusion horizon and successful yaw alignment are still required.
 
-For exact current numbers, read the parm files directly rather than copying them
-from prose.
+Read numeric defaults and explanations from the parm files.
 
-## Current CHECK 1 contract in `diagnose_sitl.py`
+## Capture readiness
 
-`analysis/diagnose_sitl.py` is the authoritative first-pass diagnostic for
-stack EKF bring-up. Its CHECK 1 treats the EKF as capture-ready only when all
-required status bits are set and warning bits are clear.
+For GPS-aided flight, check `EKF_STATUS_REPORT` for attitude, horizontal and
+vertical velocity, relative and absolute horizontal position, and vertical
+position validity. Warning flags such as `const_pos_mode`, `uninitialized`,
+and `gps_glitching` require investigation before post-release conclusions.
 
-### Capture-ready mask
+Lua steady capture separately requires usable EKF position, a resolved anchor,
+and enough anchor-relative distance; exact gates are in
+[flight_stack.md](flight_stack.md#42-steady-capture-before-usable-position-and-anchor).
+A nominal startup duration does not prove readiness.
 
-Current required flags (`_CAPTURE_READY_MASK`):
+### Leaving `const_pos_mode`: the gate chain
 
-- attitude
-- horiz_vel
-- vert_vel
-- horiz_pos_rel
-- horiz_pos_abs
-- vert_pos
+EKF3 starts GPS aiding only when all of these hold. If it is stuck in
+`const_pos_mode`, find the first one that is false:
 
-Current warning flags that still fail CHECK 1:
+1. Horizontal position source is GPS (`EK3_SRC1_POSXY`).
+2. EKF origin is set (`validOrigin`).
+3. Tilt alignment complete.
+4. Yaw alignment complete — here via moving-baseline GPS yaw (`EK3_SRC1_YAW=2`).
+5. Delta-angle bias learned (not logged in DataFlash).
+6. GPS good to align — relaxed by `EK3_GPS_CHECK=0`, but must still become true.
+7. GPS data available at the fusion horizon (needs fresh, correctly delayed data).
 
-- `const_pos_mode`
-- `uninitialized`
-- `gps_glitching`
+`analysis\diagnose_sitl.py <test_name>` walks this chain from the recovered
+`dataflash.BIN` and compares the release state with the initial condition. It
+does not read the LinkHub journal; when `dataflash.BIN` is missing its EKF
+verdict is incomplete.
 
-### Current gate breakdown
+## Evidence and timeline
 
-When the EKF is stuck in `const_pos_mode`, `diagnose_sitl.py` enumerates the
-same gate chain it expects the stack to clear:
-
-1. PosXY source is GPS
-2. `validOrigin`
-3. `tiltAlignComplete`
-4. `yawAlignComplete`
-5. `delAngBiasLearned`
-6. `gpsGoodToAlign`
-7. `gpsDataToFuse`
-
-For the current RAWES stack:
-
-- gate 4 is the moving-baseline yaw path, because `EK3_SRC1_YAW=2`;
-- gate 6 is intentionally relaxed by `EK3_GPS_CHECK=0`, but it still must go
-  true in the nav status path the script reads;
-- gate 7 still matters even when the quality checks are relaxed, because the
-  EKF still needs fresh GPS data at the fusion horizon.
-
-## Current evidence sources
-
-CHECK 1 and follow-up manual inspection rely on these current artifacts:
-
-| Artifact | What it contributes |
+| Artifact | Purpose |
 |---|---|
-| `simulation\logs\<test_name>\telemetry.csv` | timeline anchor (`t_sim`, `note == "kinematic_exit"`), EKF-enriched async columns |
-| `simulation\logs\<test_name>\linkhub\` | LinkHub journal for `GPS_RAW_INT`, `EKF_STATUS_REPORT`, `STATUSTEXT`, NVF/param traces |
-| `simulation\logs\<test_name>\arducopter.log` | DataFlash-backed EKF/GPS state used by `diagnose_sitl.py` |
+| `simulation\logs\<test_name>\telemetry.csv` | Physics/estimator comparison and the `kinematic_exit` boundary |
+| `simulation\logs\<test_name>\linkhub\` | Canonical MAVLink and diagnostic journal |
+| `simulation\logs\<test_name>\dataflash.BIN` | Recovered binary DataFlash EKF/GPS state, when available |
+| `simulation\logs\<test_name>\arducopter.log` | Text process/crash output |
 
-There is no stack-exported `mavlink.jsonl` in the current architecture.
-
-## Current workflow
-
-Start here:
+Start with the canonical journal:
 
 ```powershell
-uv run python analysis/diagnose_sitl.py <test_name>
-```
-
-If you need manual confirmation after CHECK 1:
-
-```powershell
+linkhub query simulation\logs\<test_name>\linkhub types
 linkhub query simulation\logs\<test_name>\linkhub statustext
-linkhub query simulation\logs\<test_name>\linkhub show --json
+linkhub query simulation\logs\<test_name>\linkhub show --type EKF_STATUS_REPORT --dir rx --limit 50 --json
 ```
 
-Questions to answer before post-release flight analysis:
+Use the records' simulation-clock metadata and enriched telemetry to align
+evidence with `kinematic_exit`. The shared timeline is owned by
+[sitl_testing.md](sitl_testing.md#flight-timeline-anchors).
 
-1. Did the EKF leave `const_pos_mode` before `kinematic_exit`?
-2. Did it establish origin and full GPS aiding with the current dual-GPS setup?
-3. If not, which of the seven gates above is still false?
+Before analyzing flight control:
 
-Only after that should you move on to controller or hand-off diagnosis.
+1. Check the artifacts belong to this run and are complete.
+2. Confirm origin, tilt/yaw alignment, and GPS position/velocity aiding before
+   release.
+3. If aiding is missing, walk the gate chain above.
+4. Compare the release state with the configured initial condition.
 
 ## `const_pos_mode`
 
-`const_pos_mode` is the nav-status signal that the EKF is healthy but has no
-active position/velocity aiding source and is holding a fixed position. If it
-is still set at `kinematic_exit`, post-release flight conclusions are not
-trustworthy; diagnose that first.
+This nav-status flag means the EKF is holding a fixed position without active
+position/velocity aiding. If it is set at release, diagnose aiding before
+interpreting post-release controller behavior.
 
-## DataFlash fields for manual inspection
+## DataFlash fields
 
-If you must go below `diagnose_sitl.py`:
-
-| Field | Why it matters |
+| Field | Purpose |
 |---|---|
-| `XKF4.SS` | solution-status bitmask: `const_pos_mode`, `using_gps`, `gps_quality_good` |
-| `XKF4.GPS` | GPS-check failure bitmask when startup gating is the blocker |
-| `XKF4.TS` | timeout bitmask; separates a mid-flight fallback from a startup failure |
-| `XKFS` | sensor-selection helpers such as `GGA` / `WFG` |
-| `XKF3` | innovations, for yaw or sensor-consistency problems |
-| `XKF1` | internal-state convergence, e.g. bias settling and origin height |
-| `MSG` / `STATUSTEXT` | human-readable transitions such as "is using GPS" |
+| `XKF4.SS` | Solution status, including aiding and `const_pos_mode` |
+| `XKF4.GPS` | GPS quality-check failures |
+| `XKF4.TS` | Sensor/fusion timeouts |
+| `XKFS` | Sensor selection |
+| `XKF3` | Innovations and consistency |
+| `XKF1` | EKF state convergence |
+| `MSG` / `STATUSTEXT` | Alignment and aiding transitions |
 
-Flow: find `kinematic_exit`; check whether `XKF4.SS` still has `const_pos_mode`
-there; if so inspect `XKF4.GPS`, `XKFS`/`MSG`, and `XKF4.TS`.
-
-## Relationship to other docs
-
-- [sitl_testing.md](sitl_testing.md) owns the run/diagnose workflow and the
-  shared time anchors (`t_sim`, `kinematic_exit`, `t_rel`; see
-  [Flight timeline anchors](sitl_testing.md#flight-timeline-anchors)).
+Inspect these around the release boundary (`kinematic_exit`). A missing field
+or sample is missing evidence, not a pass.

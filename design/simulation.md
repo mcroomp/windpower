@@ -77,9 +77,11 @@ Two extra boundaries exist around that loop:
 - `tests\common\mock_ardupilot.py::MockArdupilot` provides:
   - a Lua backend (`RawesLua` + `GuidedAttitudeController`) for script
     parity tests;
-  - Python-backed pumping and landing equivalents
+  - Python-backed pumping approximation and landing prototype
     (`_PumpingPythonMode`, `_LandingPythonMode`) for fast closed-loop
     simtests.
+  The Python pumping cyclic law is not currently identical to Lua's absolute
+  angle path; see [flight_stack.md](flight_stack.md#49-simulation-mapping).
 - `simulation\comms.py::VirtualComms` and
   `simulation\unified_ground.py::DirectComms` are simtest-only
   helpers. The production MAVLink adapter is
@@ -134,10 +136,9 @@ wrappers. It is not a separate production controller stack.
 | `AltitudeHoldController` / `ElevationHoldController` | Simtest-side wrappers built on the portable helpers. |
 | `HeliCyclicController` | ArduPilot-style inner rate loop plus the swashplate servo lag model used by `PhysicsRunner`. |
 | `YawTrimObserver` | Python port of the Lua yaw-trim observer. Cross-checked by `tests\unit\test_yaw_trim_parity.py`. |
-| `TensionPI` | Standalone utility exercised by unit tests; it is not the live pumping or landing AP loop. |
 
 The repo’s AP-equivalent closed loops live in `arduloop\` and
-`tests\common\mock_ardupilot.py`, not in a removed `ap_controller.py`.
+`tests\common\mock_ardupilot.py`.
 
 ## PhysicsCore responsibilities
 
@@ -187,8 +188,34 @@ The ground/winch split is now explicit:
   - `GovernedWinchController`: tension-governed, jerk-limited velocity
     controller used by the node stand-in.
 
+For the node controller, the requested velocity is
+`cruise + kp_tension*(filtered_measured_tension - target_tension)`, then
+limited by speed, acceleration, and jerk. The separate length-target helper
+(`WinchController`) sets a cruise speed from the tension error in the
+direction of the remaining length and follows a trapezoidal profile. Both
+command reel speed, not airborne collective.
+
 No hub position, altitude, or attitude is part of the cable-side winch
 protocol.
+
+## Yaw motor plant
+
+`simulation/torque_model.py` owns the simulated finite-torque speed governor:
+
+```text
+omega_target = throttle * rpm_scale
+Q = clamp(esc_kp * (omega_target - omega_motor), +/-esc_q_max)
+J_total = hub_inertia / gear_ratio^2 + motor_inertia
+d(omega_motor)/dt = Q / J_total
+psi_dot = -omega_rotor + omega_motor / gear_ratio
+```
+
+Its equilibrium is `throttle_eq = omega_rotor*gear_ratio/rpm_scale`.
+`mediator_torque.py` maps PWM linearly from `MOTOR_PWM_MIN..MOTOR_PWM_MAX`
+to throttle `[0,1]`. Constants live in `HubParams` / `torque_model.py`. This
+is a simulation model, not a measured model of the hardware ESC. Hardware
+identity and wiring are in [hardware.md](hardware.md); the Lua trim observer
+is in [flight_stack.md](flight_stack.md#5-yaw--torque-compensation).
 
 ## Initial conditions
 

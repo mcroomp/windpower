@@ -1,77 +1,86 @@
-# Hardware Startup Investigation
+# Hardware Startup History
 
-Last updated: 2026-10-27
+This is the historical-only record of hardware investigations, measurements,
+failures, fixes, and mistakes to avoid repeating. Preserve dated entries and
+the commands/symbols they describe, even when the implementation changes.
+Consult this file when a problem recurs; it is not a current operating recipe.
 
-This file is a chronological hardware-session evidence log for startup-related
-swash, attitude, and anti-rotation-motor observations. It is not the owner for
-current procedure.
+Current authority remains with:
 
-Current owner documents:
+- [arming.md](design/arming.md) for safety and startup procedures;
+- [calibration.md](design/calibration.md) for operator commands;
+- [rawes.lua](scripts/rawes.lua) for active flight-script commands and inputs;
+- [linkhub.md](design/linkhub.md) for transport and journal behavior.
 
-- [design/arming.md](design/arming.md) — arm/disarm, safe-off, passive startup
-- [design/calibration.md](design/calibration.md) — calibration commands and workflows
-- [design/linkhub.md](design/linkhub.md) — LinkHub ownership, journal, and HTTP API
-- [README.md#documentation-map](README.md#documentation-map) — documentation ownership map
+Connection details, vehicle state, parameter values, and outcomes below apply
+to their recorded sessions only. Re-establish live identity/state before a
+hardware operation. Raw run artifacts remain under `simulation/logs/`.
 
-## Current code-verified state
+## Lessons learned (do not repeat)
 
-The statements in this section were rechecked against current code/config:
-`calibrate\hw.py`, `calibrate\run.py`, `scripts\rawes.lua`,
-`linkhub_client\src\linkhub_client\client.py`,
-`tests\sitl\rawes_common_defaults.parm`, and
-`hardware\rawes_hardware_defaults.parm`.
-
-- LinkHub is the sole MAVLink owner. `calibrate` is an HTTP-only client.
-- Canonical safe-off remains: disarmed, ACRO, `RAWES_MODE=0`,
-  `H_FLYBAR_MODE=1`, `H_SV_MAN=0`, `SERVO9_FUNCTION=36`, `H_YAW_TRIM=0`,
-  output 9 off, and neutral swash from Lua's disarmed mode-0 RC overrides.
-- Passive startup uses the Lua-handled COMMAND_LONG route:
-  - `ENTER_GUIDED` = `31010`
-  - `ENTER_PASSIVE` = `31011`
-  - passive offsets are `RAWES_ROFF`, `RAWES_POFF`, `RAWES_YOFF`
-  - `ENTER_PASSIVE.param1` is the yaw-trim seed
-- Current code keeps `SERVO9_FUNCTION=36` configured at boot; runtime remapping
-  is not part of the supported handoff.
-- Current calibration logging is CSV plus LinkHub journal cursor ranges; the
-  LinkHub journal is the authoritative transport record.
-
-## Current next diagnostic steps
-
-These steps remain current because they match the owner docs and code:
-
-1. Start the session with auto-detection: `python -m calibrate` or another
-   command without `--connection` / `--baud`.
-2. Confirm live state read-only before any armed action:
-   `python -m calibrate status`, and if needed,
-   `python -m calibrate watch attitude --duration 5`.
-3. Diagnose startup behavior from the LinkHub journal, comparing at least
-   `HEARTBEAT`, `ATTITUDE`, `ATTITUDE_TARGET`, `EXTENDED_SYS_STATE`,
-   `STATUSTEXT`, `NAMED_VALUE_FLOAT`, and `SERVO_OUTPUT_RAW`.
-4. Diagnose attitude with quaternion/target evidence rather than wrapped Euler
-   yaw subtraction alone.
-5. Before any armed retest, follow [design/arming.md](design/arming.md): use
-   the current passive route, physically secure or disconnect actuators as
-   required, and verify safe-off before and after the run.
-
-## Current do-not-repeat rules
-
-These remain current and safety-relevant:
+Summarised from the investigations below:
 
 - Do not run an armed passive startup on unsecured stationary hardware.
 - Do not assume disarmed means centered swash or motor-off; verify the full
   safe-off invariant.
+- Do not treat only PWM 0 as motor-off: `SERVO9_MIN` (e.g. 1000) is also off.
 - Do not reconnect the yaw motor while armed or with accumulated trim.
 - Do not change compass/EKF yaw-source parameters during a live armed test.
 - Do not use MCP access and shell calibration commands on the same serial link
   concurrently.
 - Do not assume `SCR_ENABLE` toggling alone proves a new Lua upload is running;
   reboot and verify live script status before arming.
+- Do not assume `--duration` bounds an armed run: local HTTP timeouts have
+  delayed cleanup well beyond it.
+- Flush a running LinkHub journal before querying it offline; short
+  auto-started sessions can leave an empty journal on disk.
 
-## Dated historical evidence retained
+## Historical investigations
 
-Everything below is retained as historical evidence, not as current procedure.
-These observations were not re-proven from code in this audit, but they remain
-relevant to understanding why the current procedure exists.
+### 2026-10-27 disconnected-actuator stress session
+
+- The operator confirmed the Pixhawk remained reachable, the airframe was
+  secured, and motor/servo power was physically disconnected. No-argument
+  discovery identified COM5 at 115200 baud as native Pixhawk USB
+  (`3162:0053`, serial `160031001751343131363538`).
+- Ordinary arming was rejected by the hardware safety switch. After separate
+  operator authorization, the safety switch was temporarily released through
+  an acknowledged command and bounded runs used force-arm. No firmware/script
+  upload, reboot, or pre-arm-check parameter change was performed.
+- All ten two-second arm/disarm cycles completed with confirmed heartbeats and
+  production safe-off verification. The local harness initially mistook
+  verified output 9=1000 for failure; 1000 was the configured minimum and a valid
+  off value. Journal evidence confirmed that first cycle; only the remaining
+  nine were then executed. Do not equate motor-off exclusively with PWM zero.
+- Four of five five-second passive runs completed runup, landed-state
+  clearance, `ENTER_GUIDED`, quiet qualification, `ENTER_PASSIVE`, observation,
+  and safe-off. The fifth entered passive successfully but failed before
+  writing any observation rows. Its traceback showed a local HTTP socket
+  connection timeout while posting the PID telemetry request to
+  `/v1/mavlink/messages`, not a MAVLink parameter transaction timeout.
+- Initial cleanup also timed out setting `RAWES_MODE=0` and reading arm state.
+  The production force-disarm fallback then succeeded and verified safe-off.
+  Journal timing showed passive active at 218.078 s and force-disarm sent at
+  243.639 s: the requested five-second hold did not bound this failure path.
+  No further armed cycles were attempted.
+- The journal continued receiving passive status throughout the timeout.
+  LinkHub reported one connection attempt, unchanged generation/clock epoch,
+  zero reconnect failures, and zero dropped frames. The cause of the local
+  HTTP connection timeouts was not established; these facts do not prove
+  USB loss or the parameter-lock mechanism described below.
+- Evidence: LinkHub run `2d411a64-8aaf-4c4b-bc0d-5499b5b60248` under
+  `simulation/logs/linkhub/`; CLI transcript
+  `simulation/logs/calibrate/hardware_stress_20261027_2025.log`; failed run
+  `simulation/logs/calibrate/run_passive_20261027_212833.csv`, journal cursor
+  range `v1:133214..v1:142464`. The journal was explicitly flushed and queried
+  before stopping the test-owned service. Short auto-started sessions left
+  empty offline journals and were not the evidence for these cycles.
+- Hardware safety was restored with an accepted acknowledgement. A final
+  independent `verify_safe_off()` returned no errors: disarmed ACRO, mode 0,
+  flybar 1, manual swash 0, motor function 36, yaw trim 0, output 9=0.
+- Follow-up identified at session end: investigate local HTTP connect stalls
+  and cleanup latency before repeating armed stress tests. Disconnected tests
+  establish command sequencing, not physical stability or yaw-observer tuning.
 
 ### 2026-10-27 native-USB passive timeout investigation
 

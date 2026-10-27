@@ -15,7 +15,7 @@ Inputs (write before tick):
   _mock.vel_ned        {x, y, z} m/s
   _mock.R              flat row-major 3x3, indices 1..9  (body_to_NED)
   _mock.accel          {x, y, z} m/s^2  body-frame specific force (gravity excluded)
-  _mock.params         {RAWES_MODE, RAWES_KP_EL, ...}  (script-generated params)
+  _mock.params         {RAWES_MODE, RAWES_KP_ALT, ...}  (script-generated params)
 
 Outputs (read after tick):
   _mock.ch_out[n]      RC channel n PWM override (nil if not set)
@@ -48,10 +48,6 @@ _mock = {
         RAWES_KP_ALT  = 0.0263, -- altitude P gain (thrust/m)
         RAWES_KI_ALT  = 0.0026, -- altitude I gain (thrust/m)
         RAWES_KD_VZ   = 0.105,  -- vertical-speed damping (thrust/(m/s))
-        RAWES_KP_EL   = 2.5,   -- in-plane (elevation) position rate-P gain
-        RAWES_KP_AZ   = 0.5,   -- crosswind (azimuth) position rate-P gain
-        RAWES_KD_EL   = 0.0,   -- in-plane position rate-D gain
-        RAWES_CWMAX   = 0.6,   -- position rate saturation
         RAWES_SLW     = 0.40,  -- elevation/body_z slew rate
         RAWES_TEL_HZ  = 2.0,   -- diagnostic NVF emission rate [Hz]
         RAWES_YFF_MAX = 0.7,   -- yaw trim clamp upper bound

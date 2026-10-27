@@ -16,9 +16,9 @@ telemetry store, passive controller, and diagnostic panels. The demo Vite build
 replaces only the `runtime-api` factory. `LinkHubApi` uses an injected in-memory
 `DemoBackend` fetch transport instead of network HTTP. The normal build retains
 the real HTTP transport; neither build monkey-patches global `fetch`.
-The data source is a checked-in, compact recording of one **49.4-second SITL
-pumping cycle**, replayed continuously. The local journal preserves recorded
-events and uses LinkHub's message-specific snapshot keys when collapsing state.
+The data source is the checked-in
+[pumping-cycle.json](src/demo/pumping-cycle.json) replay fixture. The local
+journal uses LinkHub's message-specific snapshot keys when collapsing state.
 
 ```powershell
 npm --prefix linkhub-ui run dev:demo
@@ -32,32 +32,12 @@ the GitHub project-site subdirectory and other static hosts. Once loaded, the
 demo needs no network connection; it does not install a service worker for
 offline reloads.
 
-The recording is cycle 2 of `test_pumping_cycle_lua_sitl`, journal run
-`56f3e44b-a7ca-46eb-873f-479b050d9da0`: simulation time 123.863564–173.263564 s,
-after the canonical `kinematic_exit` at 60.001 s. It contains 24.6 seconds of
-reel-out followed by 24.8 seconds of reel-in. The header shows the phase and
-playback time. The camera follows the measured vehicle; the live build keeps
-its existing camera behavior. The ground is aligned using the initial offset
-between physics and ArduPilot estimator altitude.
-
-Data provenance:
-
-- Attitude, body rates, position, diagnostics, heartbeat, RC, EKF, and status
-  text come from the canonical LinkHub journal. Recorded Euler attitude is
-  converted to quaternion, not regenerated.
-- Applied swash/motor PWM comes from physics CSV because this historical journal
-  lacks `SERVO_OUTPUT_RAW`. Rotor speed comes from recorded `omega_rotor`, exposed
-  as the explicitly simulation-only `SIM_RPM` named value. The overlay labels it
-  **physics rotor RPM**; it is not yaw-motor RPM.
-- `ATTITUDE_TARGET`, `PID_TUNING`, and motor `RPM` were not recorded and remain
-  unavailable. Charts use whatever channels actually exist rather than invented
-  target/PID/motor traces. Historic diagnostic-array padding is discarded.
-- The parameter snapshot starts with the run's `params.json` and incorporates
-  journal `PARAM_VALUE` records before the selected cycle, including Lua
-  parameters and their recorded MAVLink types. Types are inferred only for
-  snapshot entries lacking a wire response. `RAWES_MODE=1` identifies the
-  selected pumping phase. `RAWES_TEL_HZ` is a browser-local display setting,
-  not a claim that a vehicle parameter was changed.
+The fixture owns source metadata, timing, phases, channel availability, and
+parameter values. The UI shows available channels without synthesizing absent
+measurements. The header displays phase/playback time, the camera follows the
+vehicle, and ground alignment uses the physics/estimator altitude offset.
+`SIM_RPM` is explicitly simulation-only rotor RPM, not measured yaw-motor RPM.
+`RAWES_TEL_HZ` is a browser-local display setting in the demo.
 
 This is **read-only replay**. The full terminal and panels remain present:
 status, parameter reads/listing, config inspection, journal browsing, profile
@@ -80,13 +60,13 @@ or the Rust service. Integration tests exercise the production `LinkHubApi`,
 `TelemetryStore`, `CommandRunner`, `PassiveController` reconciliation,
 `YawRecorder`, and `WobbleRecorder`.
 
-To regenerate the recording from the retained local run artifacts:
+To generate a replay fixture from selected run artifacts:
 
 ```powershell
-uv run python -m analysis.export_demo_cycle simulation\logs\test_pumping_cycle_lua_sitl --journal simulation\logs\test_pumping_cycle_lua_sitl\linkhub\56f3e44b-a7ca-46eb-873f-479b050d9da0 --linkhub linkhub\target\debug\linkhub.exe --cycle 2
+uv run python -m analysis.export_demo_cycle simulation\logs\<test_name> --journal simulation\logs\<test_name>\linkhub\<run_id> --linkhub linkhub\target\debug\linkhub.exe --cycle <cycle>
 ```
 
-The exporter uses `linkhub query ... show --json`, not legacy `mavlink.jsonl`.
+The exporter uses `linkhub query ... show --json`.
 Only the compact `src/demo/pumping-cycle.json` is shipped; raw logs and physics
 CSV files are not published. Its metadata records the source run, channel
 provenance, selected timestamps, and source telemetry SHA-256. Deployment builds
@@ -145,7 +125,7 @@ missing. With both artifacts present, a normal launch needs no Python or uv.
 | `npm run build:demo` | TypeScript check + standalone Vite build | Writes the offline demo to `dist-demo\`. |
 | `npm run dev:demo` | Demo Vite dev server | Runs the full UI against the recorded SITL replay. |
 | `npm run cli -- <command>` | esbuild runner + Node | Bundles the CLI quickly under `tmp\linkhub-cli\`, then runs it against LinkHub; defaults to `http://127.0.0.1:8999`. |
-| `npm run cli:debug -- <command>` | Node inspector + `vite-node` | Runs the same CLI paused on startup for a VS Code/Chrome debugger. |
+| `npm run cli:debug -- <command>` | Node inspector + esbuild runner | Runs the same CLI paused on startup for a VS Code/Chrome debugger. |
 | `npm run dev` | `vite --host 127.0.0.1` | Frontend-only Vite dev server bound to loopback. The command does not set a port, so Vite chooses its default port. |
 | `npm run test` | `vitest run` | One-shot test run. |
 
@@ -200,6 +180,10 @@ Use a non-default LinkHub endpoint with either form:
 
 `run passive` and `run collective` keep the Node process alive until the duration expires or it
 receives Ctrl+C. Both paths call the shared canonical safe-off implementation.
+Passive entry/capture uses acknowledged Lua commands; ongoing thrust/offset
+and setup inputs remain named values. The
+[flight-stack wire contract](../design/flight_stack.md#command-setpoint-and-telemetry-roles)
+owns the exact split.
 The standalone `stop` command and its `disarm` alias apply that same safe-off
 sequence, so either can recover a run started by another CLI or browser
 process. `arm [--force]` sends and confirms a direct arm request; `--force`
@@ -250,7 +234,8 @@ npm --prefix linkhub-ui run cli:debug -- --server http://127.0.0.1:8999 status
 
 ## Browser interface
 
-Supported terminal commands come from `src\terminal.ts`:
+Supported terminal commands are dispatched by the shared `src\commands.ts`;
+`src\terminal.ts` owns browser input/output:
 
 ```text
 status
@@ -433,9 +418,8 @@ generation changes.
 | `ESC_TELEMETRY_1_TO_4` (see note) | 10 Hz | 5 Hz | 1 Hz |
 | `RAWES_TEL_HZ` (parameter, `DEBUG_FLOAT_ARRAY` rate) | 20 Hz | 10 Hz | 2 Hz |
 
-The BLE profile exists because DroneBridge BLE delivered only about
-340 kbit/s: the Wi-Fi profile lost about 36% of downlink frames over BLE,
-including command and parameter replies, so LinkHub operations timed out.
+The BLE profile requests lower rates than Wi-Fi to leave transport capacity
+for command acknowledgements and parameter replies.
 
 Each profile in `src\telemetry-profiles.json` has `label`, `minbaud`, `rates`
 (message rates in Hz, `0` = off) and `params` (vehicle parameters written as
@@ -466,10 +450,9 @@ Changing the selector applies the new profile immediately. A manual choice is
 kept until the connection generation changes, then the connection/baud-based selection
 runs again.
 
-The Wi-Fi profile is sized for the DroneBridge link measured at 1500000 baud
-(about 73 KB/s, see [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md)), so its
-`minbaud` is 1500000; slower serial links get the Radio profile. It is only
-smooth while no MAVFTP/DataFlash download is running. `PID_TUNING` is sent by
+The Wi-Fi profile has `minbaud=1500000`; slower serial links get the Radio
+profile. High-rate display streams share capacity with file/log transfers.
+`PID_TUNING` is sent by
 the autopilot only for axes in `GCS_PID_MASK` (hardware defaults set it to 4,
 yaw). Rates persist on the vehicle, so every profile sets `PID_TUNING`
 explicitly.
@@ -497,7 +480,7 @@ perpendicular to the axle on the FRD -X side, and follow the device's measured a
 The airframe model uses +X forward, +Y up toward the rotor, and +Z right.
 Its model-to-FRD mapping is `(x, z, -y)`: model +Y is body -Z, while the
 short tether stub extends along body +Z. A level attitude therefore puts the
-rotor above the instrument bay and the tether below it. Apply the recorded
+rotor above the instrument bay and the tether below it. Apply the measured
 body-to-NED attitude before mapping NED into the scene as `(east, -down, -north)`.
 The stub is an airframe detail, not a reconstruction of the full tether to
 the ground anchor.
@@ -549,12 +532,12 @@ Details that matter when reading it:
   mark armed samples at a limit.
 - **The observer line** is `YFF_U - YFF_GZ / YFF_A`, the throttle the Lua trim
   observer is converging to, using `RAWES_YAW_SLP` (read when the panel opens;
-  `0` means the bench default 0.504 RPM/us).
+  `0` selects the script fallback slope 0.504 RPM/us).
 - **Time alignment.** `ATTITUDE_*`, `SERVO_OUTPUT_RAW` and the Lua array carry
   the vehicle clock and are mapped to the PC clock by the smallest observed
   transit delay. `PID_TUNING`, `RPM` and ESC frames have no timestamp, so their
-  arrival times are de-batched (the Wi-Fi link stalls for 0.1-0.2 s and then
-  delivers a burst) by fitting the tightest line under the arrivals in blocks
+  arrival times are de-batched to handle bursty delivery by fitting the tightest
+  line under the arrivals in blocks
   of about two seconds; a pause over one second starts a new segment. Their
   alignment with attitude is therefore approximate, to about 50 ms.
 - **Gaps are real.** Lines break where frames were not received, and a link

@@ -19,8 +19,11 @@ the ground. As the rotor climbs and pulls the cable out, the tension in the cabl
 generator on the ground -- **generating electricity**. Reel the cable back in at low power
 cost, let the rotor climb again, and repeat. This is a Rotary Airborne Wind Energy System.
 
-Our system has four blades, each two metres long, spinning at roughly 270 RPM at an altitude
-of 50 metres. Three servo motors tilt a mechanical plate inside the hub (a swashplate)
+Our system has four blades on a 2.5 m rotor radius (1.5 m foam blades on
+1.0 m booms; see [hardware.md](design/hardware.md#rotor-geometry)). At the
+reference operating point the rotor spins at roughly 270 RPM at an altitude
+of 50 metres.
+Three servo motors tilt a mechanical plate inside the hub (a swashplate)
 to control the blade pitch through trailing-edge flaps. The airborne flight
 controller handles the fast control loops; the ground station supplies slow
 flight setpoints.
@@ -59,7 +62,8 @@ flowchart LR
 
 The winch closes its own load-cell tension loop. The vehicle receives **commanded
 tension**, target altitude, and phase -- not measured tension. Lua uses commanded
-tension for orientation feedforward and altitude feedback for collective.
+tension and filtered tether geometry for orientation and altitude feedback for
+collective.
 See [flight_stack.md](design/flight_stack.md) for the control contract.
 
 SITL replaces the hardware world with the mediator, not the flight controller.
@@ -101,10 +105,11 @@ The detailed boundary and proposal live in [linkhub.md](design/linkhub.md).
 
 ## Documentation Map
 
-Each topic has one owner. Other documents link to the owner instead of
+**Start here for documentation routing.** Each topic has one master/owner.
+Other documents link to the owner instead of
 restating it, and numeric defaults live in code or parm files rather than
-prose. [AGENTS.md](AGENTS.md) points agents directly at the owner for a task
-so they do not load unrelated documents.
+prose. [AGENTS.md](AGENTS.md) routes agents through this map so they do not
+load unrelated documents.
 
 - Parameter defaults and their explanations: [copter-heli.parm](tests/sitl/copter-heli.parm)
   (ArduPilot), [rawes_common_defaults.parm](tests/sitl/rawes_common_defaults.parm)
@@ -112,29 +117,31 @@ so they do not load unrelated documents.
   (hardware-only).
 - The RAWES wire/API contract is owned by [flight_stack.md](design/flight_stack.md).
 - Module READMEs give orientation and local usage only.
-- Historical observations are evidence, never current procedure.
+- Document current behavior and procedures only, except for
+  [HARDWARE_STARTUP.md](HARDWARE_STARTUP.md), which preserves historical
+  investigations and mistakes. Keep raw run data in artifacts.
 
 ### Design documents
 
 | Document | Owns |
 |----------|------|
-| [flight_stack.md](design/flight_stack.md) | System ownership, ground/AP command contract, Lua modes and wire interface, yaw behavior |
-| [GUIDED_CONTROL_LOOPS.md](design/GUIDED_CONTROL_LOOPS.md) | ArduPilot Guided/heli attitude and rate-control internals |
+| [flight_stack.md](design/flight_stack.md) | Ground/AP command contract, actual Lua control laws/modes, yaw observer, and Python/Lua differences |
+| [GUIDED_CONTROL_LOOPS.md](design/GUIDED_CONTROL_LOOPS.md) | Guided/heli attitude shaping, rate PID, collective path, and Python-port limitations |
 | [arming.md](design/arming.md) | Arm/disarm, safe-off invariant, passive and ACRO startup (hardware safety) |
 | [calibration.md](design/calibration.md) | `calibrate` commands, recording, Lua deployment, operator workflows |
 | [linkhub.md](design/linkhub.md) | LinkHub ownership, journal, cursor API, generated protocol, throughput, rate policy |
-| [simulation.md](design/simulation.md) | Physical-world runtime: `PhysicsCore`, sensors, plants, test adapters, lockstep interface |
+| [simulation.md](design/simulation.md) | Physical-world runtime: `PhysicsCore`, sensors, winch/yaw plants, test adapters, lockstep interface |
 | [aero_conventions.md](design/aero_conventions.md) | `dynbem` interface, frames, signs, reference rotors and papers |
 | [sitl_testing.md](design/sitl_testing.md) | Docker stack execution, artifacts, diagnosis, lockstep behavior, flight timeline anchors |
 | [testing.md](design/testing.md) | Unit/simtest layout and Lua/Python test conventions |
-| [EKF_GATING.md](design/EKF_GATING.md) | GPS/moving-baseline yaw bring-up gates and `const_pos_mode` triage |
+| [EKF_GATING.md](design/EKF_GATING.md) | GPS/moving-baseline yaw gates, journal evidence, and DataFlash interpretation |
 | [hardware.md](design/hardware.md) | Airframe geometry, components, swash mapping, yaw motor and DShot path |
 
 ### Other documents
 
 | Document | Purpose |
 |----------|---------|
-| [HARDWARE_STARTUP.md](HARDWARE_STARTUP.md) | Current verified hardware state plus dated session evidence; read before touching hardware |
+| [HARDWARE_STARTUP.md](HARDWARE_STARTUP.md) | Historical hardware investigations and mistakes to avoid repeating; not current procedure |
 | [simulation/README.md](simulation/README.md) | Simulation package orientation and entry points |
 | [arduloop/README.md](arduloop/README.md) | Python port of the ArduPilot heli attitude/rate stack |
 | [linkhub/README.md](linkhub/README.md) | Build, run, CLI, HTTP usage and journal queries |
@@ -147,6 +154,26 @@ so they do not load unrelated documents.
 Swashplate geometry and sign mapping are owned by the implementation,
 [swashplate.py](simulation/swashplate.py). The reference papers are in
 [documents/](documents/).
+
+### Where overlapping topics live
+
+| Topic | Master | Notes |
+|---|---|---|
+| Winch laws and yaw-motor physics | [simulation.md](design/simulation.md) | Flight stack covers only the command boundary and the Lua yaw observer. |
+| Safe-off and startup | [arming.md](design/arming.md) | Calibration covers CLI syntax; hardware history keeps dated evidence only. |
+| ArduPilot/Python attitude and PID equations | [GUIDED_CONTROL_LOOPS.md](design/GUIDED_CONTROL_LOOPS.md) | The `arduloop` README covers package APIs and examples. |
+| LinkHub HTTP route list | [linkhub/README.md](linkhub/README.md#route-inventory) | The architecture doc covers what the routes mean. |
+| Agent task routing | [this map](#documentation-map) | `AGENTS.md` links here instead of keeping its own table. |
+| Demo replay metadata | [pumping-cycle.json](linkhub-ui/src/demo/pumping-cycle.json) | The UI README covers replay behavior and usage. |
+| Slides | [area owners above](#design-documents) | Summaries only. |
+
+Possible future clean-ups:
+
+- Generate the UI README's telemetry-rate table from
+  [telemetry-profiles.json](linkhub-ui/src/telemetry-profiles.json) instead of
+  maintaining both.
+- Rename [envelope/CLAUDE.md](envelope/CLAUDE.md) to an ordinary module
+  README; it is a usage guide, not agent-specific.
 
 ---
 ## Running Tests

@@ -90,7 +90,6 @@ def test_constants_have_expected_values(sim):
     assert float(f.KP_ALT)               == pytest.approx(0.0263, abs=1e-4)
     assert float(f.KI_ALT)               == pytest.approx(0.0026, abs=1e-4)
     assert float(f.KD_VZ)                == pytest.approx(0.105, abs=1e-3)
-    assert float(f.KP_EL)                == pytest.approx(2.5)
 
 
 # ── bz_altitude_hold ─────────────────────────────────────────────────────────

@@ -23,6 +23,8 @@ A tethered rotary airborne wind-energy prototype: the SITL test framework, the a
 - The main goal of the simulation and SITL framework is to exercise the real control stack under repeatable conditions: the groundstation planner, the winch, LinkHub transport/journaling, the Lua scripts, the ArduPilot inner loops, and the physics/aero models.
 - The system is not a generic flight simulator. It is structured to preserve the same control boundaries, timing, and sign conventions that the hardware and stack tests expect.
 - The external `dynbem` package provides the blade-element/momentum model used by the physics path.
+- This deck is an overview, not an implementation reference. Current area owners
+  are listed in the [central documentation map](../README.md#documentation-map).
 
 ---
 
@@ -88,7 +90,7 @@ flowchart TB
 | Physics / SITL lockstep | 1200 Hz | Rigid-body dynamics, tether, aero, sensors |
 | ArduPilot rate PID (Pixhawk) | 400 Hz | Inner attitude / rate loop driving the actuators |
 | Winch controller | 400 Hz | Tension tracking and reel motion |
-| `rawes.lua` | 50 Hz | Orientation and collective targets |
+| `rawes.lua` | 100 Hz base / 50 Hz flight guidance | Overrides, safety, trim; steady/takeoff angle and thrust targets |
 | Ground planner | 10 Hz | Phase sequencing and commanded setpoints |
 | Telemetry / diagnosis | 10–50 Hz+ | Logs, event traces, offline checks |
 
@@ -118,7 +120,8 @@ flowchart TB
 
 - `rawes.lua` is the airborne policy layer.
 - It turns slow setpoints into body-axis orientation and collective commands.
-- The script has distinct modes for steady flight, manual bench work, passive release, and landing.
+- The script implements steady, manual, passive, takeoff, and disarmed setup
+  modes; landing mode 4 is reserved, not implemented.
 - In steady flight, it computes the desired rotor-axis direction from position, gravity, and commanded tension, then uses altitude control to trim collective.
 - The Lua layer feeds ArduPilot, rather than replacing it.
 
@@ -167,22 +170,16 @@ flowchart LR
 ## What the aero module does
 
 - The external aero package (`dynbem`) provides the blade-element/momentum model that the physics stack calls into.
-- The default path uses a quasi-static BEM model by default; dynamic-inflow variants (Pitt-Peters, Oye) and vortex particle exist with the **same interface**.
-- The quasi-static BEM picks the right momentum relation per operating point:
-
-| Regime | How it is handled |
-|---|---|
-| Hover / climb | Classical helicopter momentum theory |
-| Windmill / autorotation | Wind-turbine solver (Brent root-find on inflow angle) for `a < 0.4` |
-| Turbulent windmill (heavily loaded) | Buhl empirical quadratic for `0.4 < a < 1` where momentum theory breaks down |
-| Vortex ring state (steep descent) | Leishman/Castles-Gray empirical inflow override |
+- The default is a quasi-static BEM model; dynamic-inflow variants (Pitt-Peters, Oye) and a vortex particle model share the **same interface**.
+- How each model handles flow regimes is internal to `dynbem`; this repo's
+  [aero contract](../design/aero_conventions.md) covers inputs, outputs,
+  frames, and signs.
 
 ---
 
 ## Aero module: state in, state out, and stored state
 
-- Every call takes a rotor operating point in, returns hub loads out, and (for the dynamic models) carries stored inflow/wake state between calls.
-- The stored state is what separates the models: quasi-static keeps nothing, the dynamic-inflow models keep a few inflow harmonics, and the VPM keeps an explicit wake.
+- Every call takes a rotor operating point in and returns hub loads out; dynamic models also carry inflow/wake state between calls, which the caller passes back unchanged.
 - The rotor definition (geometry + airfoil polars) is fixed configuration; the physics/ODE integration that closes the loop is the caller's responsibility, not the aero model's.
 
 ```mermaid
@@ -201,19 +198,15 @@ flowchart LR
     class MOD model
 ```
 
-| Model | Stored state between calls |
-|---|---|
-| Quasi-static BEM (default) | None; state array is empty |
-| Pitt-Peters | 3 inflow harmonics: `lambda_0`, `lambda_c`, `lambda_s` |
-| Oye | Per-annulus 2-stage inflow filter: `W_int`, `W` (length `2*n_elements`) |
-| VPM (experimental) | Explicit wake: vortex particles (position, vector strength, core size) plus per-blade flap/feather DOFs and azimuth |
+The interface is `result, state = aero.step(inputs, state, dt)`; callers
+treat `state` as opaque.
 
 ---
 
 ## The VPM: an experimental higher-fidelity check
 
 - The vortex particle method (VPM) is the one model in the package that represents the wake explicitly, as a cloud of regularized vortex particles rather than a momentum-theory inflow.
-- Effects the BEM models handle with separate empirical patches (wake skew, descent/autorotation, vortex ring state) fall out of the same wake convection in the VPM formulation.
+- It is an experimental cross-check; its accuracy for RAWES has not been validated here.
 - It is still inviscid and leans on the same airfoil polar tables for sectional lift and drag, so stall and compressibility remain polar-table concerns.
 
 ---

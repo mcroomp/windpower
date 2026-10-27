@@ -10,8 +10,9 @@ This document owns calibration commands and operator workflows. Current
 arm/disarm, passive-startup, and safe-off policy is owned by
 [arming.md](arming.md). LinkHub transport, journal, and HTTP contract are owned
 by [linkhub.md](linkhub.md). The repository ownership map lives at
-[README.md#documentation-map](../README.md#documentation-map). Chronological
-hardware evidence belongs in [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md).
+[README.md#documentation-map](../README.md#documentation-map). Historical hardware
+investigations are preserved in [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md);
+they are diagnostic context, not current operating instructions.
 
 ## Connection
 
@@ -81,6 +82,11 @@ automatically; run `uv sync` explicitly when dependencies change.
 `--force` / `-f` skips interactive confirmation prompts. It does **not** weaken
 cleanup: every exit path still goes through the canonical safe-off flow owned by
 [arming.md](arming.md).
+
+The [flight-stack wire contract](flight_stack.md#command-setpoint-and-telemetry-roles)
+distinguishes acknowledged entry/capture commands from named-value setpoints.
+Using `ENTER_GUIDED` / `ENTER_PASSIVE` does not replace the live thrust,
+offset, or manual-input messages.
 
 ---
 
@@ -153,12 +159,20 @@ is unbounded.
 
 `rawes.lua` also defines `RAWES_MODE=5` (`takeoff`), but calibrate does not
 expose a `run takeoff` CLI mode.
+It also does not expose mode-6 `run collective`: that disarmed setup command
+belongs to the shared Node CLI/browser controller (`rawes run collective`),
+documented in the [UI README](../linkhub-ui/README.md#node-cli).
 
 ### Common options
 
 - `--duration N` — bounded run duration in seconds.
 - `--force` — bypass ArduPilot pre-arm checks for a secured bench. Startup,
   disarm, and safe-off behavior are unchanged.
+
+`--duration` bounds the observation phase, not total startup/cleanup wall time.
+Blocking HTTP operations can delay both observation and safe-off; it is not an
+independent vehicle-side armed watchdog. Cleanup requirements are owned by
+[arming.md](arming.md#ground-side-arm-and-disarm).
 
 ### Passive-only options
 
@@ -392,17 +406,18 @@ See [linkhub.md](linkhub.md) for journal semantics and query examples.
 
 `run` additionally records the passive-handoff and controller evidence it needs:
 
-- RAWES diagnostic `NAMED_VALUE_FLOAT`s (`YFF_*`, `OL_*`, etc.),
+- RAWES diagnostic values decoded from `DEBUG_FLOAT_ARRAY` (`YFF_*`,
+  `OL_*`, etc.),
 - `ATTITUDE_TARGET` and `PID_TUNING` when ArduPilot emits them (`PID_TUNING`
   needs the axis enabled in `GCS_PID_MASK`, which the hardware defaults set to
   yaw only (4), plus a message-interval request that the shared observation loop
-  makes at 4 Hz; see [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md)),
+  makes at 4 Hz),
 - actual and target attitude quaternions,
 - quaternion error metrics.
 
 For passive runs, `ATTITUDE_QUATERNION` and `ATTITUDE_TARGET` are requested
 explicitly with `MAV_CMD_SET_MESSAGE_INTERVAL`; they are not assumed to arrive
-via legacy stream groups.
+via stream groups.
 
 ## Passive interactive controls
 
@@ -412,7 +427,8 @@ For `run passive`, the operator-facing controls are:
 - Up/Down — relative pitch ±5°
 - `,` / `.` — relative yaw ∓/±5°
 - `-` / `=` — held thrust ∓/±0.05 within `[0,1]`
-- Space — reset relative roll/pitch/yaw offsets to zero
+- Space — recapture the current onboard AHRS attitude and clear relative
+  roll/pitch/yaw offsets (not a return to the original anchor)
 - ESC — exit and restore safe-off
 
 `--protocol-debug` suppresses the 3D view and prints the live protocol trace.
@@ -420,45 +436,17 @@ For `run passive`, the operator-facing controls are:
 
 ## Agent and automation access
 
-Agents and automation talk to LinkHub's HTTP API directly. There is no
-calibration-specific MCP server or secondary transport owner. Generic transport
+Agents and automation talk to LinkHub's HTTP API directly. Generic transport
 state lives under `/v1/mavlink`; RAWES-specific startup sequencing and safe-off
 policy remain in the calibration client.
 
-## Typical calibration sequence
+## Choosing what to run
 
-```bash
-# 0. Start or attach to LinkHub and inspect live state
-python -m calibrate status
+1. Start with auto-detection and the read-only `status` and `config check`.
+2. Run only the operation you need (config write, travel change, motor test,
+   script deployment, or passive startup) — these are not a fixed checklist.
+3. Meet the [arming and setup prerequisites](arming.md) first.
 
-# 1. Diff against canonical params; apply if needed
-python -m calibrate config check
-python -m calibrate config fix
-python -m calibrate reboot
-
-# 2. Verify live state after reconnect
-python -m calibrate status
-
-# 3. Swashplate neutral + mixing check (disarmed)
-python -m calibrate swash neutral
-python -m calibrate swash 50 0 0
-python -m calibrate swash 0 0 50
-
-# 4. Limit swash travel if servos cannot take full range
-python -m calibrate swash range 1300 1700
-python -m calibrate set H_CYC_MAX 1000
-
-# 5. Swash motion check
-python -m calibrate servo sweep --duration 12
-
-# 6. Motor spin check
-python -m calibrate motor 1050 --duration 5
-python -m calibrate watch esc --duration 10
-
-# 7. On confirmed TCP (not the 57600-baud radio) or native USB, upload Lua
-python -m calibrate script upload scripts\rawes.lua
-python -m calibrate script list
-
-# 8. Quiet armed passive bench check
-python -m calibrate run passive --duration 30 --trim thr=0.342
-```
+After uploading a script: check the remote file size, reboot, reconnect, and
+restore safe-off before any armed run. A file listing or `SCR_ENABLE` toggle
+does not prove the new script is running.
