@@ -31,7 +31,7 @@ and [sitl_testing.md](sitl_testing.md) for stack-harness ownership.
 |---|---|---|
 | Shared physics step | `simulation\physics_core.py` | Owns the shared step used by the mediator and by in-process simtests: aero call, tether, rigid-body dynamics, rotor-speed ODE, optional hub-motor ODE, kinematic handoff, and simulation time. |
 | Rigid-body integrator | `simulation\dynamics.py` | RK4 integration of `pos`, `vel`, `R`, and world-frame `omega` in NED, with gravity applied internally. |
-| Tether | `simulation\tether.py` | Tension-only elastic tether plus optional constant-tension override model. |
+| Tether | `simulation\tether.py` | Two-ended cable contract, straight spring-damper, Tallak quasi-static equilibrium, and diagnostic constant load. |
 | Sensor plants | `simulation\sensor.py` | `PhysicalSensor` and `SpinSensor`; converts physics state into the IMU/GPS-style packet sent to SITL or simtests. |
 | Frame helpers | `simulation\frames.py` | `build_orb_frame`, `build_gps_yaw_frame`, `build_vel_aligned_frame`, and `T_ENU_NED`. |
 | Swashplate / collective mapping | `simulation\swashplate.py`, `simulation\param_defaults.py` | H3-120 servo mixing and the single thrust↔collective mapping boundary derived from the rotor YAML plus `.parm` files. |
@@ -146,7 +146,8 @@ The repo’s AP-equivalent closed loops live in `arduloop\` and
 
 - `RigidBodyDynamics` for translation, attitude, and world-frame body
   rate.
-- `TetherModel.compute()` for tether force and attachment-offset moment.
+- `Tether.evaluate()` for both endpoint reactions; `PhysicsCore` applies the
+  kite-end force at the actual attachment offset and computes its moment.
 - The live external aero model via `dynbem.create_aero(...)`; the
   default model key is `quasi_static`, with opt-in alternatives selected
   only by callers/tests.
@@ -171,6 +172,110 @@ The live aero result fields that windpower code consumes are `F_world`,
 `PhysicsCore` passes `F_world` and `m_hub_world` into the rigid-body
 step and threads `omega_spin` separately into the dynamics for
 gyroscopic coupling.
+
+## Two-ended tether physics
+
+`simulation/tether.py` owns `TetherInputs`, `TetherResult`, `TetherProperties`,
+and the structural `Tether` protocol. One cable evaluation supplies both the
+aircraft load and the winch load; there are not separate winch and kite tether
+simulations.
+
+Inputs describe the anchor and aircraft attachment positions and velocities
+in NED, deployed **unstretched** length, payout rate (positive reel-out),
+uniform wind, air density, and gravity. Material properties belong to the
+cable model; deployed length belongs to the winch plant and is supplied through
+`PhysicsCore.step(rest_length=..., payout_rate_ms=...)`. If payout rate is not
+supplied, the core derives it from that step's length change and `dt`.
+
+The physics core constructs the actual aircraft endpoint:
+
+```text
+offset = axle_attachment_length * R[:, 2]
+attachment_position = hub_position + offset
+attachment_velocity = hub_velocity + omega_world x offset
+moment_on_hub = offset x force_on_hub
+```
+
+Both models use this geometry. The old centre-based stretch calculation has
+been removed; the IC generator now chooses rest length using the actual
+attachment and resolves force balance against its direction. Regenerate the
+IC through the owner workflow in [testing.md](testing.md#steady-state-ic-ownership),
+not by hand-editing its JSON.
+
+`TetherResult` contains forces **on the attached bodies**, the sampled line
+positions, arc length, extension, endpoint tension magnitudes, slack state,
+elastic energy, dissipated power where modelled, and solve diagnostics.
+`PhysicsCore.tether_result` is the authoritative snapshot.
+`tension_now` means kite-end tension; `anchor_tension` means the ideal
+winch load-cell magnitude. The scalar tensions need not have a fixed ordering.
+For quasi-static equilibrium:
+
+```text
+force_on_hub + force_on_anchor = integrated_drag_and_weight
+```
+
+The mediator feeds only `anchor_tension` to the winch sensor/governor.
+Mechanical drum power uses that measured local tension times reel speed.
+The ground command/winch wire protocol is unchanged, and line shape is not
+an additional ground-controller sensor. Physics CSVs retain `tether_tension`
+for the kite end and add `tether_anchor_tension` for the winch end. This is a
+physics-only column, not a Lua named-value input/output; NVF maps are unchanged.
+
+### Model selection
+
+The mediator config key `tether_model` and the `PhysicsCore`/`PhysicsRunner`
+constructor keyword select:
+
+| Key | Implementation | Scope |
+|---|---|---|
+| `tallak_quasi_static` (default) | `TallakQuasiStaticTether` | Extensible suspended-line equilibrium, transverse aerodynamic drag, line weight, shape, and distinct endpoint reactions. |
+| `spring_damper` | `SpringDamperTether` | Explicit simplified alternative: original straight, tension-only `k=EA/chord_length` law, zeta 0.05, extension-only damping. Relative radial endpoint velocity minus payout drives damping. No line drag, weight, or belly. |
+| `constant_tension` | `ConstantTensionTether` | Diagnostic fixed load, selected with `tether_constant_tension_n`; no distributed loads or elastic dynamics. |
+
+Unknown names and invalid inputs raise errors rather than selecting a default.
+Tests may inject a `Tether` implementation with `tether_override`.
+`DEFAULT_TETHER_MODEL` in `simulation/tether.py` is the shared default for
+mediator configuration, the physics core, and simtest runners/helpers.
+
+The better model is named after Tallak Tveide's
+[TetherDragODESolver](https://github.com/tallakt/TetherDragODESolver), which
+motivated the quasi-static equilibrium approach. Our implementation is
+independently written: it solves a wind/gravity-loaded extensible cable
+between prescribed endpoints, not the Julia solver's rotating-line ODE.
+It does **not** apply a universal quarter-drag multiplier.
+
+At 16 segments by default, segment-midpoint tension and elastic strain determine
+segment length/direction. A three-component anchor-force Newton solve with an
+analytical Jacobian and residual-decreasing backtracking closes the endpoint
+position to 1e-10 m. Singular/nonfinite steps, failed line search, or exhaustion
+of 100 Newton steps raise `TetherConvergenceError`. Each accepted trial's geometry
+supplies the next Jacobian and the converged line shape; rejected trials never
+replace it. Geometry is recomputed when outer-loop loads change. Segment
+fractions and the identity matrix are precomputed per model.
+An outer iteration updates drag from local transverse
+relative wind and strained segment length. Weight uses mass per unstretched
+length. Endpoint velocities are linearly interpolated along material stations.
+Axial material slip does not directly contribute to this normal-drag law.
+Warm starts reuse the previous converged forces/shape, not physical dynamic
+state. Failed endpoint or load convergence raises `TetherConvergenceError`;
+there is no silent straight-line fallback.
+
+This version has no line inertia, transverse waves, material hysteresis/damping,
+ground contact, axial skin friction, rupture, or payout momentum flux. A loaded
+line can support tension even when the endpoint chord is shorter than its rest
+length. The shape assumes a freely suspended line; it must not be interpreted
+as a ground-contact solution. Collinear, vertically slack zero-wind
+configurations can fail the endpoint solve; ground-level slack deployment is
+not a supported startup condition. Flight tests and unrelated physics/telemetry
+fixtures should start from the shared airborne IC, not a slack line that would
+need to lie on the ground. The IC is a straight-line force-balance seed, checked
+against the active cable model by `test_ic_force_balance`.
+Quasi-static shape changes are instantaneous, so gust and low-tension transient
+fidelity is not claimed. Solve time must be benchmarked for the intended
+lockstep rate; there is no hard real-time 1200 Hz deadline guarantee.
+
+Analytical, mesh-convergence, operating-envelope, and flight regression tests
+are described in [testing.md](testing.md#tether-model-validation).
 
 ## Winch and ground-side boundaries
 

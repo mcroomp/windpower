@@ -168,7 +168,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
 
     # Seed the cable: an initial hold exchange gives the planner its first
     # telemetry frame (the only winch data it is ever allowed to see).
-    node.update_sensors(runner.tension_now, WIND)
+    node.update_sensors(runner.anchor_tension, WIND)
     tel = node.exchange(WinchCommand(cruise_v=0.0, tension_target=TENSION_IC))
 
     # Initial command so Lua's _target_alt / _tension_n are set before flight.
@@ -184,7 +184,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         altitude    = runner.altitude
 
         # Winch node feels its load cell + anemometer (physics side).
-        node.update_sensors(tension_now, WIND)
+        node.update_sensors(runner.anchor_tension, WIND)
 
         # ── Detect Lua steady capture and gate the planner ───────────────
         if not captured:
@@ -229,7 +229,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         prev_accel_ned = sr.get("accel_specific_world")
 
         # ── Safety events ─────────────────────────────────────────────────
-        if runner.tether._last_info.get("slack", False):
+        if runner.tether_result.slack:
             events.record("slack", t_sim, phase_label, altitude,
                           tension=runner.tension_now)
         if captured and planner.phase != "hold" and runner.tension_now > BREAK_LOAD_N:

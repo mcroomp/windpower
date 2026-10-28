@@ -32,9 +32,9 @@ import pytest
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import simulation
-import simulation.mediator as _mediator_module
 from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic, step_omega
 from simulation.frames import build_orb_frame
+from simulation.tether import SpringDamperTether, TetherInputs, TetherProperties
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from groundstation.pumping_planner import TensionCommand
@@ -43,7 +43,6 @@ from tests.simtests._rotor_helpers import (
     load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,
 )
 
-TetherModel = _mediator_module.TetherModel
 
 # ── Rotor / physics constants ──────────────────────────────────────────────────
 _ROTOR  = load_default_rotor()
@@ -162,7 +161,9 @@ def _compute_ic() -> dict:
     r_hat     = pos0 / np.linalg.norm(pos0)    # outward (anchor -> hub)
     t_dir_s   = -r_hat                          # hub -> anchor (nominal body_z)
     gravity   = np.array([0.0, 0.0, MASS * G])
-    k_eff     = TetherModel.EA_N / np.linalg.norm(pos0)
+    if _ROTOR.control is None or _ROTOR.control.axle_attachment_length_m is None:
+        raise ValueError("rotor.control.axle_attachment_length_m must be set")
+    attachment_offset = float(_ROTOR.control.axle_attachment_length_m)
 
     def _spin_equilibrium(R_hub, col_c, omega_seed):
         """Autorotation spin ODE equilibrium at a fixed orientation/collective."""
@@ -206,15 +207,19 @@ def _compute_ic() -> dict:
         om     = _spin_equilibrium(build_orb_frame(body_z), col_c, 36.0)
         for _ in range(18):
             R_hub     = build_orb_frame(body_z)
+            attachment = pos0 + attachment_offset * R_hub[:, 2]
+            attachment_hat = attachment / np.linalg.norm(attachment)
             resultant = _aero_force(R_hub, col_c, om) + gravity
-            T_along   = float(np.dot(resultant, r_hat))
-            perp      = resultant - T_along * r_hat
+            T_along   = float(np.dot(resultant, attachment_hat))
+            perp      = resultant - T_along * attachment_hat
             body_z    = body_z + 0.5 * perp / max(abs(T_along), 1.0)
             body_z    = body_z / np.linalg.norm(body_z)
         om        = _spin_equilibrium(build_orb_frame(body_z), col_c, om)
         R_hub     = build_orb_frame(body_z)
+        attachment = pos0 + attachment_offset * R_hub[:, 2]
+        attachment_hat = attachment / np.linalg.norm(attachment)
         resultant = _aero_force(R_hub, col_c, om) + gravity
-        T_along   = float(np.dot(resultant, r_hat))
+        T_along   = float(np.dot(resultant, attachment_hat))
         return T_along, om, body_z, R_hub
 
     # Outer secant on collective to drive the balanced tension to the target.
@@ -258,7 +263,10 @@ def _compute_ic() -> dict:
 
     # Paid-out length so the tether tension balances the solved along-tether
     # force at the design geometry (T = k_eff * stretch).
-    rest_length = float(np.linalg.norm(pos0) - T_b / k_eff)
+    attachment = pos0 + attachment_offset * R0[:, 2]
+    attachment_length = float(np.linalg.norm(attachment))
+    k_eff = TetherProperties().axial_stiffness_n / attachment_length
+    rest_length = attachment_length - T_b / k_eff
 
     # Static IC state
     pos_s = pos0.copy()
@@ -273,9 +281,15 @@ def _compute_ic() -> dict:
     )
     f_stack, state = _aero_est.step(diag_inputs, state, dt_eq)
     F_aero     = f_stack.F_world
-    tether = TetherModel(rest_length=rest_length, hub_mass=MASS)
-    f_teth, m_teth = tether.compute(pos_s, vel_s, R0)
-    T_tether   = float(tether._last_info.get("tension", 0.0))
+    tether = SpringDamperTether(hub_mass=MASS)
+    tether_result = tether.evaluate(TetherInputs(
+        anchor_pos_ned=np.zeros(3), anchor_vel_ned=np.zeros(3),
+        attachment_pos_ned=attachment, attachment_vel_ned=vel_s,
+        rest_length_m=rest_length,
+    ))
+    f_teth = tether_result.force_on_hub_ned
+    m_teth = np.cross(attachment_offset * R0[:, 2], f_teth)
+    T_tether = tether_result.hub_tension_n
     F_net      = F_aero + f_teth
     F_residual  = F_net + gravity
     F_res_along = float(np.dot(F_residual, t_dir_s))

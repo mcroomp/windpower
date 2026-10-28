@@ -8,7 +8,7 @@ PhysicsCore owns
 ----------------
 - RigidBodyDynamics (6-DOF RK4)
 - Aero model (SkewedWakeBEMJit)
-- TetherModel (elastic, tension-only)
+- Two-ended tether model (straight spring-damper or quasi-static cable)
 - Spin ODE (autorotation equilibrium)
 - Yaw damping: k_yaw (GB4008 yaw axis), with optional hub-motor ODE
   (torque_model.HubState) driven by caller-supplied yaw_throttle
@@ -40,7 +40,8 @@ import os
 
 from simulation.dynamics import RigidBodyDynamics
 from dynbem       import create_aero, RotorInputs, step_omega
-from simulation.tether import TetherModel
+from simulation.tether import DEFAULT_TETHER_MODEL, Tether, TetherInputs, TetherResult, make_tether
+from simulation.frames import cross3
 from simulation.rotor_physics import resolve_i_spin_kgm2
 from simulation.param_defaults import thrust_to_coll_rad as _t2c
 from simulation.torque_model import (
@@ -134,7 +135,10 @@ class PhysicsCore:
         kinematic_aero_mode: str  = "locked",
         kinematic_nul_rate_gain_rads_per_rad: float = 0.0,
         aero_override             = None,
-        tether_override           = None,
+        tether_override: Tether | None = None,
+        tether_model: str = DEFAULT_TETHER_MODEL,
+        anchor_ned: np.ndarray | None = None,
+        tether_constant_tension_n: float = 300.0,
     ):
         self._rotor              = rotor
         self._wind               = np.asarray(wind, dtype=float).copy()
@@ -182,21 +186,21 @@ class PhysicsCore:
 
         if rotor.control is None or rotor.control.axle_attachment_length_m is None:
             raise ValueError("rotor.control.axle_attachment_length_m must be set")
+        self._attachment_offset_m = float(rotor.control.axle_attachment_length_m)
+        self._anchor_ned = np.zeros(3) if anchor_ned is None else np.asarray(anchor_ned, dtype=float)
+        self.rest_length = float(ic.rest_length)
         if tether_override is not None:
             self._tether = tether_override
         else:
-            self._tether = TetherModel(
-                anchor_ned             = np.zeros(3),
-                rest_length            = float(ic.rest_length),
-                axle_attachment_length = float(rotor.control.axle_attachment_length_m),
+            self._tether = make_tether(
+                tether_model, hub_mass=float(rotor.inertia.mass_kg),
+                constant_tension_n=tether_constant_tension_n,
             )
         self._t_sim      = 0.0
         self._damp_alpha = 0.0
 
         # Bootstrap tether tension from IC position
-        s = self._dyn.state
-        self._tether.compute(s["pos"], s["vel"], s["R"])
-        self._tension_now = float(self._tether._last_info.get("tension", 0.0))
+        self._tether_result = self._tether.evaluate(self._tether_inputs(0.0))
 
     # ── Convenience constructor ───────────────────────────────────────────────
 
@@ -221,7 +225,16 @@ class PhysicsCore:
 
     @property
     def tension_now(self) -> float:
-        return self._tension_now
+        """Kite-end tension, not the winch load-cell reading."""
+        return self._tether_result.hub_tension_n
+
+    @property
+    def anchor_tension(self) -> float:
+        return self._tether_result.anchor_tension_n
+
+    @property
+    def tether_result(self) -> TetherResult:
+        return self._tether_result
 
     @property
     def omega_spin(self) -> float:
@@ -236,8 +249,25 @@ class PhysicsCore:
         return self._aero
 
     @property
-    def tether(self):
+    def tether(self) -> Tether:
         return self._tether
+
+    def _tether_inputs(self, payout_rate_ms: float) -> TetherInputs:
+        hub = self._dyn.state
+        offset = self._attachment_offset_m * hub["R"][:, 2]
+        return TetherInputs(
+            anchor_pos_ned=self._anchor_ned,
+            anchor_vel_ned=np.zeros(3),
+            attachment_pos_ned=hub["pos"] + offset,
+            attachment_vel_ned=hub["vel"] + cross3(hub["omega"], offset),
+            rest_length_m=self.rest_length,
+            payout_rate_ms=payout_rate_ms,
+            wind_ned=self._wind,
+        )
+
+    def _tether_moment(self, force_ned: np.ndarray) -> np.ndarray:
+        offset = self._attachment_offset_m * self._dyn.state["R"][:, 2]
+        return cross3(offset, force_ned)
 
     def hub_observe(self) -> HubObservation:
         """Return current observable hub state as a HubObservation."""
@@ -294,7 +324,8 @@ class PhysicsCore:
     def step(self, dt: float, collective_rad: float,
              tilt_lon: float, tilt_lat: float,
              rest_length: "float | None" = None,
-             yaw_throttle: "float | None" = None) -> dict:
+             yaw_throttle: "float | None" = None,
+             payout_rate_ms: float | None = None) -> dict:
         """
         400 Hz step with caller-supplied tilts.
 
@@ -311,7 +342,7 @@ class PhysicsCore:
 
         """
         return self._integrate(dt, collective_rad, tilt_lon, tilt_lat,
-                                rest_length, yaw_throttle)
+                                rest_length, yaw_throttle, payout_rate_ms)
 
     def warm_inflow(self, collective_rad: float, n_steps: int = 500,
                     dt: float = 1e-3) -> None:
@@ -355,10 +386,16 @@ class PhysicsCore:
     def _integrate(self, dt: float, collective_rad: float,
                    tilt_lon: float, tilt_lat: float,
                    rest_length: "float | None",
-                   yaw_throttle: "float | None" = None) -> dict:
+                   yaw_throttle: "float | None" = None,
+                   payout_rate_ms: float | None = None) -> dict:
 
+        if not np.isfinite(dt) or dt <= 0.0:
+            raise ValueError("physics dt must be finite and positive")
+        previous_length = self.rest_length
         if rest_length is not None:
-            self._tether.rest_length = float(rest_length)
+            self.rest_length = float(rest_length)
+        if payout_rate_ms is None:
+            payout_rate_ms = (self.rest_length - previous_length) / dt
 
         hub = self._dyn.state
         r   = self._rotor
@@ -370,7 +407,7 @@ class PhysicsCore:
         if kin_active:
             tf = np.zeros(3)
             tm = np.zeros(3)
-            self._tension_now = 0.0
+            self._tether_result = TetherResult.unloaded(self._tether_inputs(payout_rate_ms))
             if self._kinematic_aero_mode == "nul":
                 # Kinematic "nul" aero (rotation-only): lock translation to the
                 # kinematic trajectory and apply cyclic-proportional body rates.
@@ -437,8 +474,9 @@ class PhysicsCore:
                 F_net = np.zeros(3)
                 new_hub = hub
         else:
-            tf, tm            = self._tether.compute(hub["pos"], hub["vel"], hub["R"])
-            self._tension_now = float(self._tether._last_info.get("tension", 0.0))
+            self._tether_result = self._tether.evaluate(self._tether_inputs(payout_rate_ms))
+            tf = self._tether_result.force_on_hub_ned
+            tm = self._tether_moment(tf)
 
             # Aerodynamic forces — new state-based API.  Aero model integrates
             # omega, spin angle, and inflow states through the returned derivative.
@@ -525,7 +563,8 @@ class PhysicsCore:
 
         return {
             "hub_state":    new_hub,
-            "tension_now":  self._tension_now,
+            "tension_now":  self.tension_now,
+            "tether_result": self._tether_result,
             "omega_spin":   self._omega_rad_s,
             "tether_force": tf,
             "tether_moment": tm,

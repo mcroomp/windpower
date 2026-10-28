@@ -53,6 +53,7 @@ COLUMN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tether_length",
             "tether_extension",
             "tether_tension",
+            "tether_anchor_tension",
             "tether_rest_length",
             "tether_slack",
             "tether_fx",     # NED world force

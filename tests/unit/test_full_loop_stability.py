@@ -272,7 +272,7 @@ def _run_with_constant_tether_force(
     Force from gravity:        F_grav  = [0, 0, m·g]
     Force from rotor:           F_aero from dynbem.compute_forces(...)
 
-    No restoring moment from the tether (the elastic TetherModel applies
+    No restoring moment from the tether (the elastic SpringDamperTether applies
     a tether-axis restoring moment via the axle attachment; in
     ``attitude_sim`` and here that's omitted — the rotor's own moments
     are the only torques on the body).
@@ -612,7 +612,7 @@ def _run_elastic_free_flight_with_python_ap(
             ), command_dt)
         if step % ap_every == 0:
             ap.tick(step * DT, runner)
-        d_tension = runner.tension_now - tension_target_n
+        d_tension = runner.anchor_tension - tension_target_n
         v_winch = max(-winch_vmax, min(winch_vmax, winch_kp * d_tension))
         rest_now += v_winch * DT
         ap.step_physics(runner, DT, rest_length=rest_now)

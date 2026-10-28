@@ -136,7 +136,7 @@ def _run_landing(log) -> dict:
             winch.set_target(ground.winch_target_length, ground.winch_target_tension)
 
         # ── Winch 400 Hz ──────────────────────────────────────────────────
-        winch.step(runner.tension_now, DT)
+        winch.step(runner.anchor_tension, DT)
 
         # ── Lua 100 Hz ────────────────────────────────────────────────────
         if i % LUA_EVERY == 0:
@@ -169,7 +169,7 @@ def _run_landing(log) -> dict:
             altitudes.append(altitude)
 
         # ── Bad-event tracking ────────────────────────────────────────────
-        if runner.tether._last_info.get("slack", False):
+        if runner.tether_result.slack:
             events.record("slack", t_sim, phase, altitude)
         if runner.tension_now > BREAK_LOAD_N:
             events.record("tension_spike", t_sim, phase, altitude,

@@ -22,6 +22,7 @@ from tests.simtests import test_generate_ic as icgen
 from tests.simtests.simtest_runner import PhysicsRunner
 from simulation.controller import HeliCyclicController
 from simulation.telemetry_csv import TelRow, write_csv
+from simulation.tether import TetherProperties
 
 
 def _basis():
@@ -97,7 +98,7 @@ def _setup_runner(setup_model: str, runner_model: str):
         state,
     )
     T_est = max(-float(np.dot(f_est.F_world, t_dir)), 10.0)
-    rest_length = icgen.L_TETHER - max(T_est / (icgen.TetherModel.EA_N / icgen.L_TETHER), 0.001)
+    rest_length = icgen.L_TETHER - max(T_est / (TetherProperties().axial_stiffness_n / icgen.L_TETHER), 0.001)
 
     ic = SimpleNamespace(
         pos=np.asarray(pos0, dtype=float),
@@ -302,7 +303,7 @@ def main() -> None:
             tilt_lon=0.0,
             tilt_lat=0.0,
             omega_spin=runner.omega_spin,
-            tension_n=float(runner.tether._last_info.get("tension", 0.0)),  # noqa: SLF001
+            tension_n=runner.tension_now,
         )
 
         result_trim, _ = runner.aero.compute_forces(
@@ -330,7 +331,7 @@ def main() -> None:
             tilt_lon=trim.tilt_lon,
             tilt_lat=trim.tilt_lat,
             omega_spin=runner.omega_spin,
-            tension_n=float(runner.tether._last_info.get("tension", 0.0)),  # noqa: SLF001
+            tension_n=runner.tension_now,
         )
 
         saved_path = SIM / "steady_state_starting.json"

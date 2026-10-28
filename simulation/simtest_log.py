@@ -19,7 +19,7 @@ Append bad simulation events (slack, floor_hit, tension_spike) during a run,
 then query counts by kind and phase for assertions and summaries.
 
     events = BadEventLog()
-    if tether._last_info.get("slack"):
+    if runner.tether_result.slack:
         events.record("slack", t, phase, alt, tension=tension_now)
     if altitude <= FLOOR_ALT_M:
         events.record("floor_hit", t, phase, alt)

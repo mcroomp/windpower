@@ -1,33 +1,31 @@
-from types import SimpleNamespace
-
 import numpy as np
 
 from simulation.telemetry_csv import TelRow
 from tests.simtests._rotor_helpers import load_default_rotor
+from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
+
+
+WIND_NED = np.array([0.0, 10.0, 0.0])
 
 
 def _build_runner(*, aero_model: str) -> PhysicsRunner:
 	rotor = load_default_rotor()
-	ic = SimpleNamespace(
-		pos=np.array([0.0, 0.0, -1.0]),
-		vel=np.zeros(3),
-		R0=np.eye(3),
-		rest_length=1.0,
-		eq_thrust=0.5,
-		omega_spin=40.0,
-	)
-	return PhysicsRunner(rotor, ic, np.zeros(3), aero_model=aero_model, z_floor=0.0)
+	ic = load_ic()
+	return PhysicsRunner(rotor, ic, WIND_NED, aero_model=aero_model, z_floor=0.0)
 
 
 def test_aero_columns_populated_from_physics_step() -> None:
 	runner = _build_runner(aero_model="quasi_static")
+	assert runner.altitude > 1.0
+	assert not runner.tether_result.slack
+	assert np.all(runner.tether_result.positions_ned[:, 2] <= 0.0)
 	step_result = runner._core.step(0.02, collective_rad=0.08, tilt_lon=0.01, tilt_lat=-0.02)
 	row = TelRow.from_physics(
 		runner,
 		step_result,
 		collective_rad=0.08,
-		wind_ned=np.zeros(3),
+		wind_ned=WIND_NED,
 		phase="unit_audit",
 	)
 
@@ -49,4 +47,3 @@ def test_aero_columns_populated_from_physics_step() -> None:
 	assert np.isclose(row.aero_v_axial, 0.0)
 	assert np.isclose(row.aero_v_inplane, 0.0)
 	assert np.isclose(row.aero_v_i, 0.0)
-

@@ -23,7 +23,7 @@ The mediator (physics side) additionally calls:
 
   winch_node.update_sensors(tension, wind)     (feed physics outputs in)
   winch_node.step(dt)                          (advance the governing loop)
-  winch_node.rest_length                       (sync tether.rest_length)
+  winch_node.rest_length                       (input to the tether physics)
   winch_node.telemetry()                       (host-side telemetry snapshot)
 
 No hub altitude / position / attitude ever crosses the cable boundary.
@@ -102,7 +102,7 @@ class GovernedWinchNode:
     -------------------------------------------------------------
     update_sensors(T, w) feed load-cell tension and ambient wind into the node
     step(dt)             advance the fast governing loop one physics tick
-    rest_length          drum encoder, used to sync tether.rest_length
+    rest_length          drum encoder, supplies deployed length to physics
     """
 
     def __init__(self, winch: GovernedWinchController,
@@ -131,7 +131,7 @@ class GovernedWinchNode:
 
     @property
     def rest_length(self) -> float:
-        """Drum encoder reading [m] (mediator syncs tether.rest_length)."""
+        """Drum encoder reading [m], supplied to tether physics by the mediator."""
         return self._winch.rest_length
 
     def telemetry(self) -> WinchTelemetry:

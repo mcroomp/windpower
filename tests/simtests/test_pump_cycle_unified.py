@@ -221,7 +221,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
                            if ap_cmd is not None else None)
 
         # ── Winch 400 Hz ──────────────────────────────────────────────────
-        winch.step(tension_now, DT)
+        winch.step(runner.anchor_tension, DT)
 
         # ── Physics 400 Hz ────────────────────────────────────────────────
         omega_body    = runner.omega_body
@@ -231,7 +231,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         prev_accel_ned = sr.get("accel_specific_world")
 
         # ── Safety events ─────────────────────────────────────────────────
-        if runner.tether._last_info.get("slack", False):
+        if runner.tether_result.slack:
             events.record("slack", t_sim, phase_label, altitude,
                           tension=runner.tension_now)
         if runner.tension_now > BREAK_LOAD_N:

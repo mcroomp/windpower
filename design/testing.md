@@ -77,6 +77,50 @@ integration bugs that simple round-trip checks miss:
   `tests/unit/test_cyclic_direction_mapping.py` guard sign and ordering
   conventions through the control chain.
 
+### Tether model validation
+
+The cable contract and model limitations are owned by
+[simulation.md](simulation.md#two-ended-tether-physics).
+
+`tests/unit/test_tether_models.py` checks the original spring constitutive
+law, payout-relative damping, elastic energy/force consistency, slack,
+analytical gravity-only catenaries, endpoint reaction balance, quadratic
+transverse drag, and zero drag for parallel flow. It checks 8/16/32-segment
+convergence and sweeps 50/100/200 m spans, nominal 30/300 N preload, and
+0/10/15 m/s crosswind. Operating-envelope endpoint forces must agree with the
+32-segment reference within 1% plus 0.02 N. Warm-start wind steps must agree
+with independent cold solves; failed solves must raise explicitly. Newton
+regressions check recorded SciPy endpoint forces, oversized-step backtracking,
+singular/nonfinite/stalled steps, and preservation of the warm-start cache on
+failure.
+
+Boundary tests verify the shared Tallak default, attachment position/rotational velocity, attachment
+moment, distinct kite/winch readings in telemetry, and local-load-cell drum
+energy accounting.
+
+```powershell
+uv run python -m pytest tests\unit\test_tether_models.py tests\unit\test_tether_stability.py -q
+uv run python -m pytest tests\simtests\test_steady_flight_lua.py::test_tallak_tether_lua_flight -q
+```
+
+For isolated tether throughput and CPU hotspots, run
+`uv run python -m analysis.profile_tether`. It compares steady, moving,
+cold-start, and sagging solves, 8/16/32-segment moving solves, and the spring
+model. Unprofiled repeated timings are separate from the moving 16-segment
+`cProfile` capture. Results, latency percentiles, convergence diagnostics,
+and profiler artifacts go to `simulation/logs/tether_profile/`. Inputs are
+prebuilt; these rates exclude input construction and the rest of the physics
+loop, so they are not full-stack throughput or a real-time guarantee.
+
+The Tallak flight smoke test runs the real Lua controller for 10 simulated
+seconds. It requires no bad events, 50--496 N tension, altitude within 2 m
+of its starting point, and horizontal radius below 5 m. This is not a
+gust-transient or long-duration qualification. The original 90-second Lua
+steady-flight and pumping-cycle tests run the Tallak default as full-length
+regressions. The aero-telemetry column test also uses the shared airborne IC,
+and verifies that startup is taut and above ground before checking its original
+aero-column assertions. It does not test ground contact or slack-line deployment.
+
 ## Simtests (`tests/simtests/`)
 
 All simtests are current, repo-local scenarios. They use the `simtest` marker

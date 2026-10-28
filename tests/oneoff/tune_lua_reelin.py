@@ -143,7 +143,7 @@ def run(P=0.02, I=0.10, D=0.0, FF=0.0, FLTD=10.0, SMAX=0.0,
         peak_omega = max(peak_omega, om)
         if phase == "reel_out":
             peak_omega_out = max(peak_omega_out, om)
-        if runner.tether._last_info.get("slack", False):
+        if runner.tether_result.slack:
             slack += 1
         alt = -runner.hub_state["pos"][2]
         min_alt = min(min_alt, alt)

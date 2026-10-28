@@ -22,7 +22,7 @@ from tests.common.mock_ardupilot import MockArdupilot
 from simulation.pumping_planner import TensionCommand
 from simulation.controller import (HeliCyclicController, compute_bz_altitude_hold,
                               compute_rate_cmd, damp_bz_eq_lateral)
-from simulation.mediator import TetherModel
+from simulation.tether import TetherProperties
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
 
@@ -73,7 +73,7 @@ def _build_initial_state():
     state = trim.final_state
     f_est, _ = aero.compute_forces(inputs_eq, state)
     T_est = max(-float(np.dot(f_est.F_world, -tether_hat)), 10.0)
-    k_eff = TetherModel.EA_N / L_TETHER
+    k_eff = TetherProperties().axial_stiffness_n / L_TETHER
     rest_length = L_TETHER - max(T_est / k_eff, 0.001)
     return R0, pos0, omega_spin, rest_length, trim
 

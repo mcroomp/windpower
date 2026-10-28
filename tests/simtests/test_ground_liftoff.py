@@ -17,7 +17,7 @@ Physical scenario
     length, and *tightens* the winch (previously free-spooling) so it reels
     out under tension control from wherever the hub happens to be to the
     full 100 m operating length.
-  - Real elastic tether (default TetherModel) -- during the takeoff climb the
+  - Real elastic tether (default SpringDamperTether) -- during the takeoff climb the
     tether is kept deliberately slack (free-spooled) by tracking the hub's
     actual distance from the anchor; at this short rest length the tether's
     elastic stiffness (k = EA / L) is high enough that any real resistance
@@ -164,7 +164,7 @@ def test_ground_liftoff(simtest_log):
         aero_model=AERO_MODEL,
         z_floor     = 0.0,
     )
-    # Real elastic tether (default TetherModel) -- the tether must physically
+    # Real elastic tether (default SpringDamperTether) -- the tether must physically
     # reel out to TETHER_LEN_TARGET_M, so no constant-force stand-in here.
 
     lua         = MockArdupilot.for_lua(sim, initial_thrust=ic.eq_thrust, wind=WIND_NED, dt=DT)
@@ -237,7 +237,7 @@ def test_ground_liftoff(simtest_log):
             v_rad   = float(np.dot(hub_vel, hub_pos) / dist)
             cruise_v = max(0.0, min(WINCH_V_MAX_OUT, v_rad))
             winch.set_command(cruise_v, TETHER_TEN_TARGET_N)
-            winch.step(runner.tension_now, DT)
+            winch.step(runner.anchor_tension, DT)
             rest_length = winch.rest_length
 
         sr = lua.step(runner, DT, rest_length=rest_length)

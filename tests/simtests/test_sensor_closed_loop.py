@@ -152,7 +152,7 @@ def _run(t_sim: float = T_SIM):
         rate_roll, rate_pitch = (
             compute_rate_cmd(bz_now, body_z_eq, R, kp=2.5, kd=0.0)[:2]
         )
-        dT       = runner.tension_now - tension_target
+        dT       = runner.anchor_tension - tension_target
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
         rest_now += v_winch * DT
         runner.step_from_thrust(DT, float(_IC.eq_thrust), rate_roll, rate_pitch, omega_body,

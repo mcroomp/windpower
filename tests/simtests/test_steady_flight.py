@@ -40,7 +40,6 @@ from tests.simtests._rotor_helpers import (
     load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,
 )
 
-TetherModel = _mediator_module.TetherModel
 
 # Load rotor definition — single source of truth for all physical constants.
 _ROTOR  = load_default_rotor()
@@ -143,7 +142,7 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
             ), _DT_CMD)
         if step % _AP_EVERY == 0:
             ap.tick(step * DT, runner)
-        dT       = runner.tension_now - tension_out
+        dT       = runner.anchor_tension - tension_out
         v_winch  = max(-_WINCH_VMAX, min(_WINCH_VMAX, _WINCH_KP * dT))
         rest_now += v_winch * DT
         sr = ap.step_physics(runner, DT, rest_length=rest_now)
