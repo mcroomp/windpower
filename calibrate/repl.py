@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Protocol
 
+from linkhub_client.client import LinkHubError
 from linkhub_client.messages import MavCmd, MavDataStream, MavModeFlag
 
 from .constants import (
@@ -1101,23 +1102,22 @@ def _cmd_script(session: LinkHubClient, args: list[str]) -> None:
        script list
        script remove <name>"""
     if not args:
-        print("  Usage: script upload <file>")
-        print("         script list")
-        print("         script remove <name>")
-        return
+        raise ValueError("Usage: script upload <file> | script list | script remove <name>")
     sub = args[0].lower()
     if sub == "upload":
         if len(args) != 2:
-            print("  Usage: script upload <file>"); return
+            raise ValueError("Usage: script upload <file>")
         _upload_script(session, args[1])
         return
     if sub == "list":
+        if len(args) != 1:
+            raise ValueError("Usage: script list")
         _list_scripts(session); return
     if sub == "remove":
         if len(args) != 2:
-            print("  Usage: script remove <name>"); return
+            raise ValueError("Usage: script remove <name>")
         _remove_script(session, args[1]); return
-    print(f"  Unknown script subcommand {sub!r}  (valid: upload, list, remove)")
+    raise ValueError(f"Unknown script subcommand {sub!r} (valid: upload, list, remove)")
 
 
 def _cmd_logs(session: LinkHubClient, args: list[str]) -> None:
@@ -1272,8 +1272,11 @@ def _repl(session: LinkHubClient) -> None:
         if cmd == "help":
             print(_HELP)
             continue
-        if not _run_command(session, tokens, force=False):
-            print(f"  Unknown command: {cmd!r}  (type 'help')")
+        try:
+            if not _run_command(session, tokens, force=False):
+                print(f"  Unknown command: {cmd!r}  (type 'help')")
+        except (LinkHubError, OSError, ValueError) as exc:
+            print(f"  [FAIL] {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1355,6 +1358,9 @@ def main() -> None:
                 _repl(session)
         except KeyboardInterrupt:
             print("\nInterrupted.")
+        except (LinkHubError, OSError, ValueError) as exc:
+            print(f"  [FAIL] {exc}")
+            exit_code = 1
         finally:
             session.close()
             print("Disconnected.")

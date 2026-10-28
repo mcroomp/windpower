@@ -37,6 +37,157 @@ Summarised from the investigations below:
 
 ## Historical investigations
 
+### 2026-10-28 repeated native-USB Lua uploads with telemetry load
+
+- Live auto-discovery and `serial.tools.list_ports` confirmed native Pixhawk
+  USB on COM5 at 115200 baud, `VID:PID=3162:0053`, serial
+  `160031001751343131363538`. The controller remained disarmed throughout;
+  no armed or actuator-motion test was performed.
+- All 121 focused Lua/control tests passed before deploying the current
+  81,578-byte `scripts/rawes.lua`. Standard `calibrate script upload` succeeded
+  twice at normal telemetry load, then failed on attempt 3 with
+  `MAVFTP operation failed with code 2 (errno Some(0))`.
+- After reboot and safe-off verification, eight message types were requested
+  at 100 Hz each. Actual pre-upload traffic was 696.6 messages/s and
+  28,936 bytes/s; `LOCAL_POSITION_NED` was not emitted. During the first loaded
+  upload, each of the seven emitted requested types delivered 386 messages
+  over approximately 14.25 seconds (about 27 Hz each), demonstrating that
+  telemetry continued during the transfer rather than assuming requested
+  rates were achieved.
+- Eight of ten loaded uploads succeeded. Attempts 4 and 10 failed with the
+  same code-2/errno-0 response. Canonical journal sequences 2367, 21453, and
+  42796 show the three failures as immediate `CreateDirectory /APM/scripts`
+  negative acknowledgements, before any upload job started. These were not
+  timeouts and do not establish why the controller intermittently returned
+  this filesystem error. Other mkdir attempts received the expected
+  `FileExists` code 8.
+- All ten successful transfer jobs completed remote CRC verification with
+  zero timeouts, retransmissions, or transfer NAKs. Transfer time was
+  11.09-11.20 seconds normally and 14.08-14.34 seconds under telemetry load.
+  Directory listings after every attempt, including failures, retained the
+  complete 81,578-byte script. The CLI returned exit code 0 even for its printed
+  upload failures, so outcome checks used both output and journal evidence.
+- Raw measurements, command transcripts, and the canonical LinkHub journal
+  are under `simulation/logs/lua_upload_stress_20261028/`, run
+  `2961f1f1-7177-4afc-a843-905bb88179e0`. Original telemetry intervals were
+  restored and read back. A final reboot confirmed `RAWES: loaded` and
+  mode-0/disarmed status; complete canonical safe-off passed with output 9
+  off and the script size verified again. No transport/upload implementation
+  was changed.
+
+#### Follow-up: existing-directory error isolation and avoidance
+
+- Live `AUTOPILOT_VERSION` identified Copter 4.7.1, commit prefix `dbe79216`.
+  Forty isolated `CreateDirectory /APM/scripts` calls, with no file uploads,
+  reproduced six code-2/errno-0 failures and 34 expected existing-directory
+  successes. Journal sequences 420, 428, 455, 478, 486, and 501 contain the
+  six error replies. The failure does not require file transfer or heavy
+  telemetry.
+- The matching firmware's
+  [GCS_FTP.cpp](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/GCS_MAVLink/GCS_FTP.cpp)
+  calls `mkdir()` and then separately reads `errno` to translate `EEXIST`
+  into MAVFTP `FileExists`. Its error handler explicitly warns that ChibiOS
+  errno is not thread-local.
+  [AP_Filesystem_FATFS.cpp](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/AP_Filesystem/AP_Filesystem_FATFS.cpp)
+  maps `FR_EXIST` to `EEXIST`, while other filesystem calls clear errno to
+  zero. This supplies a concrete firmware-side race explaining the observed
+  missing error value. The exact competing thread was not traced; the
+  interleaving remains a strongly supported diagnosis, not directly observed.
+- Ten further uploads used the existing LinkHub upload engine unchanged,
+  but first positively verified `scripts` as a directory in `/APM` and
+  omitted redundant mkdir. Seven telemetry types were requested at 100 Hz,
+  as in the earlier load test. All ten uploads completed CRC verification
+  with zero timeouts, retransmissions, or transfer NAKs; every post-upload
+  listing verified 81,578 bytes. This avoids the demonstrated trigger
+  without interpreting an unspecified filesystem failure as success.
+- The 121 focused Lua/control tests passed before these trials. Raw
+  measurements and journal are under
+  `simulation/logs/lua_upload_diagnosis_20261028/`, run
+  `6f506cff-215b-48eb-becf-659e58d1c525`. Telemetry settings were restored.
+  Final reboot, reconnection, script-size verification, live mode-0/disarmed
+  Lua status, and complete canonical safe-off passed. No implementation
+  changes were made; current client guidance belongs to
+  [calibration.md](design/calibration.md#script-upload-file--script-list--script-remove-name).
+
+#### Patched CLI acceptance
+
+- The calibration upload workflow was changed to verify the parent listing,
+  reuse an existing `scripts` directory, and create it only when confirmed
+  absent. Listing failures and a non-directory `scripts` entry abort rather
+  than being interpreted as absence or success.
+- Related script-command failures now reach the CLI error boundary and exit
+  with code 1; the REPL reports the error and remains usable. Scripting restart
+  checks both `SCR_ENABLE` write results instead of printing success after a
+  rejected write. Nineteen new regression cases failed against the original
+  implementation; all 196 focused calibration/client/Lua/control tests passed
+  after the changes. A real missing-file CLI invocation also returned 1.
+- The patched, unmodified `calibrate script upload scripts/rawes.lua` command
+  then succeeded in five normal-load and ten loaded trials. Seven telemetry
+  types were requested at 100 Hz; actual pre-upload load was 605 messages/s
+  and 24,784 bytes/s. All fifteen jobs completed CRC verification with zero
+  timeouts, retransmissions, or transfer NAKs. The canonical journal confirmed
+  no `CreateDirectory` request was sent. Every post-upload listing verified
+  81,578 bytes.
+- Artifacts are under `simulation/logs/lua_upload_fix_20261028/`, run
+  `1fcc6e89-7acc-42a2-9aca-1040751994d9`. Final reboot and reconnection
+  confirmed `RAWES: loaded` and disarmed mode 0. Original telemetry intervals
+  were read back, full canonical safe-off passed, and the task-owned LinkHub
+  was stopped. No armed or actuator-motion test was performed.
+
+#### Firmware review: parameter acknowledgements do not prove Lua restart
+
+- Review of the exact Copter 4.7.1 scripting source found that the stopped
+  thread checks `SCR_ENABLE` only once per second. It must observe zero in
+  that loop before a subsequent nonzero value triggers reload. The CLI's
+  0.5-second zero interval can therefore be missed, even when both parameter
+  writes are acknowledged. The upload/CRC acceptance above remains valid,
+  but its restart-success messages are not evidence of fifteen reloads.
+- The same run's canonical `statustext` query shows `Scripting: stopped` at
+  37.435 s, followed by no restart until 112.518 s despite further successful
+  uploads. Only four `Scripting: restarted` events occurred across all
+  fifteen uploads. The last stop at 242.641 s was followed by fresh
+  `RAWES: loaded` only after the final full reboot at 287.852 s.
+- Firmware explicitly implements `SCRIPTING_CMD_STOP_AND_RESTART` by setting
+  both stop and restart flags, avoiding this parameter-edge timing issue.
+  That is an alternative to investigate with observed restart/load evidence;
+  it is not the current calibration implementation. Deployment continues to
+  require a full reboot, reconnection, live script-status verification, and
+  safe-off under [calibration.md](design/calibration.md).
+
+#### Explicit scripting restart implementation and hardware acceptance
+
+- `_restart_scripting()` was changed to issue `MAV_CMD_SCRIPTING` with
+  `param1=3` (`SCRIPTING_CMD_STOP_AND_RESTART`) instead of writing
+  `SCR_ENABLE`. It refuses an armed vehicle, disabled/unreadable scripting,
+  or a nonzero/unreadable `RAWES_MODE`.
+- Success now requires command acceptance and fresh, ordered firmware restart,
+  RAWES-load, and disarmed mode-0 messages within ten seconds. Observation
+  starts at the pre-command journal cursor and uses the connection-generation
+  guard. A rejected command, missing startup evidence, or reconnection is an
+  explicit failure, not a reason to report success or retry the old toggle.
+- Fifteen restart regressions failed against the toggle implementation.
+  All 210 focused calibration/client/Lua/control tests passed after the change,
+  including acknowledgement-only timeouts, out-of-order startup messages,
+  disabled scripting, armed-state refusal, and generation-change rejection.
+- Live no-argument discovery and board-specific USB enumeration reconfirmed
+  COM5 at 115200 baud on the same native Pixhawk. The patched upload command
+  completed thirteen uploads and thirteen observed Lua reloads: three normal
+  trials and ten with seven telemetry types requested at 100 Hz. Actual
+  pre-upload load was 612.6 messages/s and 25,495 bytes/s.
+- The canonical journal confirmed thirteen `MAV_CMD_SCRIPTING` commands,
+  thirteen `Scripting: restarted` events, and thirteen fresh `RAWES: loaded`
+  events before cleanup reboot. No `SCR_ENABLE` writes occurred. Connection
+  generation remained unchanged throughout the trials: the reloads did not
+  depend on flight-controller reboots. All thirteen 81,578-byte transfers
+  passed remote CRC verification with zero timeouts, retransmissions, or
+  transfer NAKs.
+- Raw measurements and journal are under
+  `simulation/logs/lua_explicit_restart_20261028/`, run
+  `7b989f2e-f7d3-45f4-a340-27e82abe6f66`. Telemetry intervals were restored,
+  then the final deployment reboot/reconnection, script-size verification,
+  fresh Lua startup, and full canonical safe-off passed. The controller stayed
+  disarmed throughout; no actuator-motion test was performed.
+
 ### 2026-10-27 disconnected-actuator stress session
 
 - The operator confirmed the Pixhawk remained reachable, the airframe was

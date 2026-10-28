@@ -372,9 +372,38 @@ reports that a reboot is needed but does not reboot automatically.
 
 ### `script upload <file>` / `script list` / `script remove <name>`
 
-Upload, list, or remove Lua scripts under `/APM/scripts`. `upload` writes the
-file through LinkHub's MAVFTP API and then toggles `SCR_ENABLE 1→0→1` to
-restart the scripting engine.
+Upload, list, or remove Lua scripts under `/APM/scripts`. `upload` first lists
+`/APM` and creates `scripts` only when it is confirmed absent. An existing
+directory is reused; a file at that path or a failed listing aborts the upload.
+This avoids Copter 4.7.1's intermittent `FailErrno`/errno-0 response when
+creating an existing directory without treating unspecified filesystem errors
+as success.
+
+The file is uploaded through LinkHub's CRC-verified MAVFTP transfer jobs.
+The CLI then sends `MAV_CMD_SCRIPTING` with
+`SCRIPTING_CMD_STOP_AND_RESTART` (`param1=3`), leaving `SCR_ENABLE` unchanged.
+Restart requires a disarmed vehicle, `SCR_ENABLE=1`, and `RAWES_MODE=0`;
+run `disarm` before uploading. After command acceptance, it waits up to ten
+seconds for fresh, ordered `Scripting: restarted`, `RAWES: loaded`, and
+disarmed mode-0 status messages. Reads start at the pre-command journal
+cursor and abort if the connection generation changes. Only these observed
+events produce the restart-success message; an acknowledgement alone is
+insufficient.
+
+The explicit command reloads Lua without rebooting the flight controller.
+It cannot start a scripting thread that was never initialized: if scripting
+was disabled at boot or its thread failed to start, enable it and reboot.
+Missing restart/load/status evidence is an error, not a successful reload or
+a reason to fall back silently to parameter toggling. The full deployment
+reboot, reconnection, and safe-off checks below remain required before arming.
+
+File-operation failures, restart failures, missing local files, and invalid
+script-command arguments report `[FAIL]` and produce exit code 1 in one-shot
+CLI use. In the interactive REPL, failures are reported without ending the
+session.
+If an error follows `[OK] Uploaded`, the remote file has been transferred,
+but reload verification has not succeeded; this does not roll back the file.
+Keep the vehicle disarmed and resolve the failure or reboot before use.
 
 Use `script upload` over a confirmed TCP connection to the flight controller
 or its high-speed network bridge, or over positively verified native Pixhawk

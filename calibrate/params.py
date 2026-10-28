@@ -67,11 +67,7 @@ def _config_target_params(*, use_all: bool) -> dict[str, float]:
 
 def _list_scripts(session: LinkHubClient) -> None:
     print(f"  Listing {SCRIPTS_DIR} ...")
-    try:
-        entries = session.list_files(SCRIPTS_DIR)
-    except Exception as exc:
-        print(f"  FTP list failed: {exc}")
-        return
+    entries = session.list_files(SCRIPTS_DIR)
     for entry in entries:
         marker = "D" if entry["is_dir"] else "F"
         suffix = "/" if entry["is_dir"] else f"  ({entry['size']} bytes)"
@@ -81,11 +77,7 @@ def _list_scripts(session: LinkHubClient) -> None:
 def _remove_script(session: LinkHubClient, filename: str) -> None:
     remote = f"{SCRIPTS_DIR}/{os.path.basename(filename)}"
     print(f"  Removing {remote} ...")
-    try:
-        session.remove_file(remote)
-    except Exception as exc:
-        print(f"  [FAIL] {exc}")
-        return
+    session.remove_file(remote)
     print("  [OK] Removed.")
 
 
@@ -95,17 +87,20 @@ def _upload_script(
     restart: bool = True,
 ) -> None:
     if not os.path.isfile(local_path):
-        print(f"  ERROR: file not found: {local_path}")
-        return
+        raise FileNotFoundError(f"Script file not found: {local_path}")
     remote = f"{SCRIPTS_DIR}/{os.path.basename(local_path)}"
     print(f"  Uploading {local_path}")
     print(f"         -> {remote} ...")
-    try:
+    parent, name = SCRIPTS_DIR.rsplit("/", 1)
+    entry = next(
+        (entry for entry in session.list_files(parent) if entry["name"] == name),
+        None,
+    )
+    if entry is None:
         session.create_directory(SCRIPTS_DIR)
-        written = session.upload_file(local_path, remote)
-    except Exception as exc:
-        print(f"  [FAIL] Upload failed: {exc}")
-        return
+    elif not entry["is_dir"]:
+        raise NotADirectoryError(f"Remote script path is not a directory: {SCRIPTS_DIR}")
+    written = session.upload_file(local_path, remote)
     print(f"  [OK] Uploaded {written} bytes.")
     if restart:
         _restart_scripting(session)

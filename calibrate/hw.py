@@ -8,6 +8,7 @@ import math
 import time
 from dataclasses import dataclass
 
+from linkhub_client.client import LinkHubError
 from linkhub_client.messages import (
     EkfStatusFlags,
     MavCmd,
@@ -376,11 +377,54 @@ def _drain(session: LinkHubClient, msg_types, duration: float) -> list:
 # ---------------------------------------------------------------------------
 
 def _restart_scripting(session: LinkHubClient) -> None:
-    """Restart Lua scripting engine by toggling SCR_ENABLE (no reboot needed)."""
-    print("  Restarting scripting engine (SCR_ENABLE 1->0->1) ...")
-    session.set_param("SCR_ENABLE", 0)
-    time.sleep(0.5)
-    session.set_param("SCR_ENABLE", 1)
+    """Request a Lua restart and verify fresh firmware and RAWES startup events."""
+    if session.is_armed:
+        raise LinkHubError("Scripting restart requires a disarmed vehicle")
+    if session.get_param("SCR_ENABLE") != 1:
+        raise LinkHubError("Scripting restart requires SCR_ENABLE=1; enable it and reboot")
+    if session.get_param("RAWES_MODE") != 0:
+        raise LinkHubError("Scripting restart requires RAWES_MODE=0; run disarm first")
+
+    cursor = session.current_cursor()
+    generation = session.generation
+    print("  Restarting scripting engine (SCRIPTING_CMD_STOP_AND_RESTART) ...")
+    result = session.command(
+        MavCmd.SCRIPTING,
+        [3.0],  # SCRIPTING_CMD_STOP_AND_RESTART in numeric COMMAND_LONG.param1.
+    )
+    if result["result"] != MavResult.ACCEPTED:
+        raise LinkHubError(f"Scripting restart rejected: {result['result']}")
+
+    restarted = False
+    loaded = False
+    deadline = time.monotonic() + 10.0
+    while (remaining := deadline - time.monotonic()) > 0.0:
+        message, cursor = read_one(
+            session,
+            cursor,
+            ["STATUSTEXT"],
+            wait=min(0.5, remaining),
+            expected_generation=generation,
+        )
+        if message is None:
+            continue
+        decoded = decode_message(message)
+        if not isinstance(decoded, Statustext):
+            continue
+        text = decoded.text
+        print(f"  [FC] {text}")
+        if text == "Scripting: restarted":
+            restarted = True
+            loaded = False
+        elif restarted and text.startswith("RAWES: loaded "):
+            loaded = True
+        elif loaded and text == "RAWES: mode 0 (none)  disarmed":
+            break
+    else:
+        raise LinkHubError(
+            "Scripting restart not verified: fresh restart, RAWES load, and disarmed "
+            "mode-0 status were not all observed; reboot and restore safe-off"
+        )
     print("  Scripting engine restarted.")
 
 
