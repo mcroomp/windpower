@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,7 @@ def test_hardware_config_does_not_import_simulation_or_scipy():
             "    assert name.split('.')[0] not in ('arduloop', 'scipy'), name\n",
         ],
         cwd=Path(__file__).resolve().parents[2],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
         capture_output=True,
         text=True,
         check=False,

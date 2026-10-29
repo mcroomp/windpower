@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,8 +57,9 @@ def test_owned_linkhub_reports_forced_shutdown(caplog):
     process = Mock()
     process.poll.return_value = None
     process.wait.side_effect = [subprocess.TimeoutExpired("linkhub", 10), 1]
-    with pytest.raises(RuntimeError, match="UDP cleanup may be incomplete"):
-        linkhub._stop_process(process)
+    with caplog.at_level(logging.ERROR, logger=linkhub.__name__):
+        with pytest.raises(RuntimeError, match="UDP cleanup may be incomplete"):
+            linkhub._stop_process(process)
     process.kill.assert_called_once_with()
     assert "forcing exit" in caplog.text
 
