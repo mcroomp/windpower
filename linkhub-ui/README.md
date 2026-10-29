@@ -113,7 +113,35 @@ missing. With both artifacts present, a normal launch needs no Python or uv.
   scan;
 - defaults the HTTP port to `8999`;
 - serves `linkhub-ui\dist` through LinkHub's `--static-dir`;
+- enables the optional external motor backend with `--motor-name-prefix BLDC`,
+  initially disconnected;
 - adds `--no-cache` so a browser refresh picks up a new build immediately.
+
+## Bluetooth motor panel
+
+Click **Motor**, then **Scan**, select the intended device by name and ID, and
+click **Connect**. Scanning uses the **LinkHub server's Bluetooth adapter**,
+not Web Bluetooth on the browser machine. Devices must advertise a name
+starting with the server's configured prefix and expose Nordic UART.
+Scanning takes the configured scan timeout (10 s by default).
+For a manually launched LinkHub, pass `--motor-name-prefix BLDC` to enable it.
+No adapter or device is needed until scanning/connecting.
+
+Connecting leaves the motor off. Set the **Speed** slider and click **Turn on**.
+The slider commands speed percentage, not closed-loop RPM. While running,
+changes update the command; zero speed and **Turn off / stop** stop it.
+Direction is preserved from the server's current motor state.
+The panel can remain open alongside the flight diagnostic/calibration panels.
+
+Only an explicit **Turn on** starts browser lease renewal. Closing this panel,
+hiding the tab, Escape, or a failed request stops renewal and attempts safe-stop.
+After a browser crash/network loss the server's 2 s command lease expires;
+the heartbeat supervisor checks expiry every 500 ms by default. There is no
+automatic restart after expiry, reconnect, or reopening the panel.
+Another client's running motor is displayed but never adopted for renewal.
+The offline demo shows the backend as unavailable and never accesses Bluetooth.
+Keep clear of the mechanism; a transport-level stop is not physical stop feedback.
+See [LinkHub motor semantics](../design/linkhub.md#bluetooth-bench-motor).
 
 ## `npm` scripts
 

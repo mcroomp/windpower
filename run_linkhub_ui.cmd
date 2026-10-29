@@ -88,6 +88,7 @@ call "%REPO%\linkhub\target\release\linkhub.exe" serve ^
     --port "%PORT%" ^
     --data-dir "%REPO%\simulation\logs\linkhub" ^
     --static-dir "%REPO%\linkhub-ui\dist" ^
+    --motor-name-prefix BLDC ^
     --no-cache
 
 set "EXIT_CODE=%ERRORLEVEL%"

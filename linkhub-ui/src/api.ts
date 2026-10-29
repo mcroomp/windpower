@@ -3,6 +3,8 @@ import type {
   JsonObject,
   LinkHubStatus,
   MessageBatch,
+  MotorDevice,
+  MotorStatus,
   ParameterResult,
   ServiceStatus,
 } from "./types";
@@ -108,6 +110,28 @@ export class LinkHubApi {
 
   status(signal?: AbortSignal): Promise<LinkHubStatus> {
     return this.request("GET", "/v1/mavlink/status", undefined, signal);
+  }
+
+  motorStatus(): Promise<MotorStatus> {
+    return this.request("GET", "/v1/motor", undefined, AbortSignal.timeout(3_000));
+  }
+
+  motorDevices(): Promise<{ devices: MotorDevice[] }> {
+    return this.request("GET", "/v1/motor/devices", undefined, AbortSignal.timeout(30_000));
+  }
+
+  connectMotor(deviceId: string): Promise<MotorStatus> {
+    return this.request("POST", "/v1/motor/connect", { device_id: deviceId }, AbortSignal.timeout(30_000));
+  }
+
+  runMotor(deviceId: string, speedPercent: number, direction: "forward" | "reverse", timeoutMs: number): Promise<MotorStatus> {
+    return this.request("PUT", "/v1/motor", {
+      device_id: deviceId, speed_percent: speedPercent, direction, timeout_ms: timeoutMs,
+    }, AbortSignal.timeout(3_000));
+  }
+
+  stopMotor(): Promise<MotorStatus> {
+    return this.request("POST", "/v1/motor/stop", {}, AbortSignal.timeout(3_000));
   }
 
   async currentCursor(signal?: AbortSignal): Promise<string> {

@@ -703,11 +703,13 @@ class LinkHubClient:
 
     def motor_set(
         self,
+        device_id: str,
         speed_percent: int,
         direction: str,
         timeout_ms: int = 2000,
     ) -> dict[str, Any]:
         return self._request_json("PUT", "/v1/motor", {
+            "device_id": device_id,
             "speed_percent": speed_percent,
             "direction": direction,
             "timeout_ms": timeout_ms,
@@ -844,6 +846,7 @@ class LinkHubMotorController:
         self.speed = speed
         self.direction = direction
         self.enabled = False
+        self._device_id: str | None = None
         self._renew_stop = threading.Event()
         self._renew_thread: threading.Thread | None = None
 
@@ -853,6 +856,10 @@ class LinkHubMotorController:
             raise LinkHubError("LinkHub motor support is not configured")
         if not status.get("connected"):
             status = self._session.motor_reconnect()
+        device_id = status.get("device_id")
+        if not isinstance(device_id, str) or not device_id:
+            raise LinkHubError("LinkHub motor did not report a connected device ID")
+        self._device_id = device_id
         self.stop()
         return str(status.get("device") or "BLDC")
 
@@ -866,8 +873,8 @@ class LinkHubMotorController:
     def start(self) -> None:
         if self.speed <= 0:
             raise ValueError("motor speed must be positive before start")
-        self.enabled = True
         self._renew()
+        self.enabled = True
         if self._renew_thread is None:
             self._renew_stop.clear()
             self._renew_thread = threading.Thread(
@@ -890,7 +897,10 @@ class LinkHubMotorController:
         self._session.motor_stop()
 
     def _renew(self) -> None:
+        if self._device_id is None:
+            raise LinkHubError("Connect the Bluetooth motor before starting it")
         self._session.motor_set(
+            self._device_id,
             self.speed,
             "forward" if self.direction == "F" else "reverse",
             timeout_ms=2000,

@@ -30,6 +30,19 @@ function fixture() {
 }
 
 describe("recorded SITL demo", () => {
+  it("disables Bluetooth motor access in the offline replay", async () => {
+    const { api } = fixture();
+    expect(await api.motorStatus()).toEqual({ available: false });
+    for (const action of [
+      () => api.motorDevices(),
+      () => api.connectMotor("motor-1"),
+      () => api.runMotor("motor-1", 10, "forward", 2000),
+      () => api.stopMotor(),
+    ]) {
+      await expect(action()).rejects.toMatchObject({ status: 403, message: expect.stringContaining("read-only") });
+    }
+  });
+
   it("points the rendered tether downward throughout the recorded pumping cycle", () => {
     const motion = new VehicleMotion();
     let now = 0;

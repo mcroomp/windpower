@@ -46,6 +46,27 @@ describe("formatMavResult", () => {
 });
 
 describe("typed wire contract", () => {
+  it("uses the motor discovery, exact selection, leased command and stop endpoints", async () => {
+    const fetchMock = stubFetch({ available: true });
+    const api = new LinkHubApi();
+    await api.motorStatus();
+    await api.motorDevices();
+    await api.connectMotor("motor-2");
+    expect(requestBody(fetchMock)).toEqual({ device_id: "motor-2" });
+    await api.runMotor("motor-2", 15, "forward", 2000);
+    expect(requestBody(fetchMock)).toEqual({
+      device_id: "motor-2", speed_percent: 15, direction: "forward", timeout_ms: 2000,
+    });
+    await api.stopMotor();
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init.method])).toEqual([
+      ["/v1/motor", "GET"],
+      ["/v1/motor/devices", "GET"],
+      ["/v1/motor/connect", "POST"],
+      ["/v1/motor", "PUT"],
+      ["/v1/motor/stop", "POST"],
+    ]);
+  });
+
   it("reads selected parameters in one batch operation with timeout and retries", async () => {
     const records = [
       { name: "SERVO9_MIN", value: 1000, type: mavEnum(MavParamType.INT16), index: 1, count: 2, after_cursor: "v1:7" },

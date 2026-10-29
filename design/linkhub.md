@@ -51,7 +51,7 @@ DroneBridge registration and listener setup.
 
 ### Exclusive DroneBridge UDP lifecycle
 
-`--dronebridge-url` is an explicit **exclusive-use** option, accepted only
+`--dronebridge-url` (or `LINKHUB_DRONEBRIDGE_URL`) is an explicit **exclusive-use** option, accepted only
 with a remote-peer `udp:` connection. It queries the bridge's client list
 before startup. On graceful service exit, LinkHub stops its transport writer,
 clears **all** bridge UDP clients including the saved target, and queries the
@@ -66,6 +66,11 @@ errors or remaining clients are reported as cleanup failures.
 
 Do not enable this option on a shared bridge. A killed process, a crash, or
 lost HTTP access to the bridge skips cleanup; check the bridge afterwards.
+
+Graceful signals are Ctrl+C, Windows Ctrl+Break, and Unix SIGTERM. Calibration
+gives its owned LinkHub process a Windows process group and sends Ctrl+Break
+(SIGTERM on Unix), allowing verified cleanup before it exits. Failed cleanup
+is logged and causes a nonzero process exit.
 
 ## Unified journal
 
@@ -138,6 +143,31 @@ lives in `linkhub/src/transfer/` and scheduling in
 Route-by-route invocation examples, request bodies, and CLI usage live in
 [linkhub/README.md](../linkhub/README.md); this document keeps the shared API
 semantics.
+
+### Bluetooth bench motor
+
+`--motor-name-prefix` enables the external rotor-drive backend. It starts
+disconnected and initializes Bluetooth only when a client scans or connects,
+so an absent adapter does not prevent MAVLink service startup.
+Discovery lists matching device names and opaque IDs from the server's adapter;
+an explicit connection selects one exact ID, never another matching device.
+The Nordic UART service is verified at connection time.
+Connecting or switching devices sends safe-stop and never starts the motor.
+Scanning is rejected while running.
+
+Every running command includes the connected `device_id`, speed percentage,
+direction, and a finite lease duration. LinkHub rejects commands for a
+different device. Motor operations and the heartbeat supervisor are serialized.
+The supervisor sends safe-stop when the lease expires, checked on its
+configured heartbeat cycle (500 ms by default). A browser failure therefore
+does not leave an indefinitely renewed command. This is a LinkHub-side lease,
+not proof that Bluetooth delivery or physical stopping succeeded.
+
+The browser renews a 2 s lease every 500 ms only for a motor it explicitly
+started. Closing its motor panel, hiding the tab, or a request failure revokes
+renewal and attempts a stop. A suspended browser must not revive an expired
+lease, and reopening the panel never starts or adopts a running motor.
+UI operation is described in the [motor panel guide](../linkhub-ui/README.md#bluetooth-motor-panel).
 
 Generic records, diagnostics, raw MAVLink frames, and decoded MAVLink messages
 are finite projections over the same cursor space. Every journal-backed GET
@@ -336,6 +366,25 @@ build a message (`POST /v1/mavlink/messages`) take `fields` in this form, and a
 numeric enumeration value or a missing non-extension field is rejected.
 
 ### Parameter values
+
+Selected-name reads use `POST /v1/mavlink/parameters` with
+`{"names":["SERVO9_MIN","SERVO9_MAX"],"timeout_ms":15000,"retries":2}`.
+The response is `{"parameters":[...]}`, using the same typed parameter records
+as single reads, including `name`, `value`, `type`, `index`, `count`, and
+`after_cursor`. Results preserve requested order; names are trimmed/uppercased
+and validated before any request is sent. Duplicate normalized names are
+rejected. An empty selection returns an empty result without MAVLink traffic.
+
+Batch reads and writes share the parameter-operation lock with single and
+full-list operations. Each batch subscribes before sending, pipelines the
+pending requests without waiting for individual replies, and matches replies
+by name plus target system/component. Retry rounds resend only missing names.
+`retries` is the maximum additional rounds, not retries per individual HTTP
+request. One timeout budget covers lock acquisition, sending, reply collection,
+and retries; the remaining budget is divided among the remaining rounds.
+Only complete batches succeed. A missing reply causes the standard timeout
+error, not a success-shaped partial response. Batch writes are not atomic:
+earlier writes may already have applied if the operation fails.
 
 The protocol API represents ArduPilot parameters as
 `client::ParameterValue::{Int8(i8), Int16(i16), Int32(i32), Real32(f32)}`.

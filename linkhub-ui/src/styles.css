@@ -236,7 +236,8 @@ h2 {
 
 #yaw-toggle,
 #wobble-toggle,
-#swash-toggle {
+#swash-toggle,
+#motor-toggle {
   padding: 4px 10px;
   border: 1px solid #40506b;
   border-radius: 999px;
@@ -249,7 +250,8 @@ h2 {
 
 #yaw-toggle[aria-pressed="true"],
 #wobble-toggle[aria-pressed="true"],
-#swash-toggle[aria-pressed="true"] {
+#swash-toggle[aria-pressed="true"],
+#motor-toggle[aria-pressed="true"] {
   border-color: #2d8f6f;
   color: #71ddb4;
   background: rgba(30, 123, 89, 0.14);
@@ -304,6 +306,51 @@ h2 {
 .swash-open .swash-panel {
   display: block;
 }
+
+.motor-panel {
+  display: none;
+  position: relative;
+  z-index: 3;
+  flex: none;
+  max-height: 32vh;
+  overflow: auto;
+  padding: 10px;
+  border-top: 1px solid #263249;
+  background: #080d16;
+  font-size: 12px;
+}
+
+.motor-open .motor-panel { display: block; }
+.motor-head, .motor-controls, .motor-controls label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.motor-head {
+  position: sticky;
+  top: -10px;
+  z-index: 4;
+  justify-content: space-between;
+  padding: 4px 0;
+  background: #080d16;
+}
+.motor-controls { margin: 10px 0; }
+.motor-controls select { max-width: min(360px, 65vw); }
+.motor-controls input[type="range"] { width: 140px; }
+.motor-panel button, .motor-panel select {
+  padding: 5px 8px;
+  border: 1px solid #40506b;
+  border-radius: 5px;
+  color: #e8edf5;
+  background: #111a29;
+  font: inherit;
+}
+.motor-panel button:disabled, .motor-panel select:disabled, .motor-panel input:disabled { opacity: 0.4; }
+.motor-panel button:not(:disabled) { cursor: pointer; }
+.motor-panel .motor-off { border-color: #ed7777; color: #ffaaaa; }
+.motor-warning, .motor-panel .error { color: #f0c36b; }
+.motor-panel small { color: #aebdd2; }
 
 .swash-head, .swash-actions {
   display: flex;

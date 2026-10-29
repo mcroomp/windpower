@@ -203,6 +203,8 @@ export class DemoBackend {
     try {
       const body = init?.body === undefined ? {} : object(JSON.parse(String(init.body)));
       const path = url.pathname;
+      if (method === "GET" && path === "/v1/motor") return json({ available: false });
+      if (path.startsWith("/v1/motor")) return json({ message: READ_ONLY }, 403);
       if (method === "GET" && path === "/v1/status") {
         return json({ service: "LinkHub recorded SITL replay", api_version: 1, run_id: GENERATION, cursor: this.cursor });
       }
