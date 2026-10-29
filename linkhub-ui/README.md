@@ -165,6 +165,10 @@ There is no checked-in Vite proxy configuration and the frontend uses relative
 live LinkHub API, either serve the built UI through LinkHub or put your own
 reverse proxy in front of the dev server.
 
+Telemetry waits used by the shared browser/CLI passive controller reject with
+the signal's abort reason on cancellation, including when the signal was
+already aborted before the wait began, rather than reporting a later timeout.
+
 ## Node CLI
 
 The npm CLI and browser terminal share `CommandRunner`, `PassiveController`,
