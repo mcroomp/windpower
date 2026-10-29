@@ -152,6 +152,7 @@ export class TelemetryStore {
     signal?: AbortSignal,
   ): Promise<MessageRecord> {
     return new Promise((resolve, reject) => {
+      signal?.throwIfAborted();
       const timeout = globalThis.setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out after ${(timeoutMs / 1000).toFixed(1)} s`));

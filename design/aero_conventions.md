@@ -79,6 +79,33 @@ For near-level hover/landing cases, upward aerodynamic force appears as
 the full vector in world or body coordinates rather than assuming a
 simple `-F_world[2]` scalar captures the whole thrust picture.
 
+## Servo-flap aerodynamic-centre offset
+
+The dynbem rotor parameter `ServoFlapActuation.ac_offset_m` is a signed
+**chordwise distance in metres**, not a body/NED coordinate or a cyclic
+phase angle. With section coordinate `x` increasing from leading edge
+toward trailing edge:
+
+```text
+ac_offset_m = x_ac - x_feathering_axis
+```
+
+- Positive: AC aft of the feathering axis; restoring aerodynamic spring.
+- Zero: AC on the axis; no aerodynamic spring from this offset.
+- Negative: AC forward of the axis; destabilising aerodynamic spring.
+
+Positive blade feathering is nose-up (increasing local angle of attack).
+The spring contribution is `M_aero = -k_aero * theta`: positive offset
+gives positive stiffness and a nose-down restoring moment for nose-up
+pitch. This describes the offset contribution, not the stability of the
+complete blade/flap/control system. It does not change the body-frame
+cyclic signs above.
+
+The dynbem owners are `AGENTS.md`, "Servo-flap sign conventions", and
+`docs/BEM_COMMON.md`, "Servo-Flap Feathering Model"; the field contract is
+in `dynbem_rs/src/rotor_definition.rs`. Windpower does not pass this offset
+as a `RotorInputs` field.
+
 ## Wind convention
 
 Wind vectors in this repo are treated as **ambient air-velocity vectors

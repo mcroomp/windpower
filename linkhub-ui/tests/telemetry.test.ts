@@ -99,6 +99,85 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks());
 
+describe("telemetry waits", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each([undefined, new Error("cancelled before waiting")])(
+    "rejects an already-aborted signal with its reason (%s)",
+    async (reason) => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      controller.abort(reason);
+      const telemetry = new TelemetryStore(new LinkHubApi());
+      const predicate = vi.fn(() => true);
+      const outcome = telemetry.waitFor(predicate, 10_000, controller.signal)
+        .catch((error: unknown) => error);
+
+      expect(vi.getTimerCount()).toBe(0);
+      expect(await outcome).toBe(controller.signal.reason);
+      expect(predicate).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("cancels a pending wait and clears its timeout", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const telemetry = new TelemetryStore(new LinkHubApi());
+    const reason = new Error("cancelled while waiting");
+    const outcome = telemetry.waitFor(() => true, 10_000, controller.signal)
+      .catch((error: unknown) => error);
+
+    controller.abort(reason);
+
+    expect(await outcome).toBe(reason);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("still times out when no record arrives", async () => {
+    vi.useFakeTimers();
+    const telemetry = new TelemetryStore(new LinkHubApi());
+    const outcome = telemetry.waitFor(() => true, 1_000)
+      .catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(await outcome).toEqual(new Error("Timed out after 1.0 s"));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("resolves on a matching record and removes the wait listener and timer", async () => {
+    vi.useFakeTimers();
+    const api = new LinkHubApi();
+    vi.spyOn(api, "status").mockResolvedValue({ ...status("first"), cursor: "v1:2" });
+    vi.spyOn(api, "setMessageRates").mockResolvedValue({});
+    const record = {
+      received_time: "t", received_time_ns: 1, direction: "rx" as const,
+      system_id: 1, component_id: 1, message: "STATUSTEXT", cursor: "v1:1",
+      fields: { text: "runup complete" },
+    };
+    vi.spyOn(api, "readMessages")
+      .mockResolvedValueOnce({
+        records: [record, { ...record, cursor: "v1:2" }],
+        next_cursor: "v1:2",
+      })
+      .mockImplementation(() => new Promise(() => {}));
+    const telemetry = new TelemetryStore(api);
+    const predicate = vi.fn(() => true);
+    const outcome = telemetry.waitFor(predicate, 10_000);
+
+    try {
+      await telemetry.start();
+
+      expect(await outcome).toBe(record);
+      expect(predicate).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      telemetry.stop();
+    }
+  });
+});
+
 describe("live display telemetry", () => {
   it("applies profile parameters as floats after the rates", async () => {
     const api = new LinkHubApi();
