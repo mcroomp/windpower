@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import signal
 import subprocess
 import time
 import urllib.error
@@ -17,6 +19,7 @@ _DEFAULT_SERVER = "http://127.0.0.1:8999"
 # default) at up to 3 s per probe, so the wait here must cover a full sweep,
 # not just one candidate.
 _DEFAULT_HEARTBEAT_TIMEOUT_S = 60.0
+_LOG = logging.getLogger(__name__)
 
 
 def _service_status(server: str, path: str) -> int | None:
@@ -59,14 +62,24 @@ def _connection_label(connection: str | None, baud: int | None) -> str:
 
 
 def _stop_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
+    returncode = process.poll()
+    if returncode is not None:
+        if returncode:
+            raise RuntimeError(f"LinkHub exited with {returncode}")
         return
-    process.terminate()
+    if os.name == "nt":
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        process.terminate()
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+        returncode = process.wait(timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        _LOG.error("LinkHub graceful shutdown timed out; forcing exit; UDP cleanup may be incomplete")
         process.kill()
         process.wait(timeout=5)
+        raise RuntimeError("LinkHub did not finish graceful shutdown; UDP cleanup may be incomplete") from exc
+    if returncode:
+        raise RuntimeError(f"LinkHub shutdown failed with exit code {returncode}")
 
 
 def _start_linkhub(
@@ -87,7 +100,11 @@ def _start_linkhub(
         command.extend(("--baud", str(baud)))
     if motor_name_prefix:
         command.extend(("--motor-name-prefix", motor_name_prefix))
-    return subprocess.Popen(command, cwd=_REPO_ROOT)
+    return subprocess.Popen(
+        command,
+        cwd=_REPO_ROOT,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
 
 
 @contextmanager

@@ -72,6 +72,11 @@ top level:
 
 Parameter convenience reads preserve Python `int`/`float` values instead of
 coercing all values to `float`; record APIs also retain the MAVLink type.
+`hub.get_params(["SERVO9_MIN", "SERVO9_MAX"], timeout=15.0, retries=2)`
+reads selected names in one pipelined HTTP operation and returns a dictionary
+of typed parameter records keyed by normalized name. Errors propagate rather
+than returning partial results. `fetch_all_param_records()` still fetches the
+entire table; `set_params()` performs a batch write.
 Parameter operations use classic messages, including batch/list operations;
 packed MAVFTP parameter access is not implemented. Supported types and
 classic-wire precision limits are owned by

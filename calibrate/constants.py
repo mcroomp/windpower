@@ -38,12 +38,6 @@ _REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SIM_DIR    = os.path.join(_REPO_ROOT, "simulation")
 
 
-def load_ap_params(*args, **kwargs):
-    """Load simulation parameters only when a config operation needs them."""
-    from simulation.param_defaults import load_ap_params as _load_ap_params
-
-    return _load_ap_params(*args, **kwargs)
-
 # ---------------------------------------------------------------------------
 # GB4008 motor constants (used in diag torque estimates)
 # ---------------------------------------------------------------------------

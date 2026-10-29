@@ -325,6 +325,25 @@ class LinkHubClient:
             for item in result["parameters"]
         }
 
+    def get_params(
+        self,
+        names: list[str],
+        *,
+        timeout: float = 15.0,
+        retries: int = 2,
+    ) -> dict[str, dict[str, Any]]:
+        """Read selected parameters in one pipelined operation; errors propagate."""
+        result = self._request_json(
+            "POST",
+            "/v1/mavlink/parameters",
+            {"names": names, "timeout_ms": round(timeout * 1000), "retries": retries},
+            timeout=timeout + 1.0,
+        )
+        return {
+            str(item["name"]): _decode_parameter(item)
+            for item in result["parameters"]
+        }
+
     def set_params(
         self,
         parameters: list[dict[str, Any]],

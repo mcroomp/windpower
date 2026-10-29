@@ -32,10 +32,17 @@ Top-level options are:
 ```
 
 When the default local endpoint (`http://127.0.0.1:8999`) is not running,
-`calibrate` can start the release LinkHub binary automatically. LinkHub itself
-performs serial discovery and heartbeat confirmation; `--connection` and
-`--baud` only restrict which candidates it probes. `--server` points to an
+`calibrate` can start the release LinkHub binary automatically. With the default
+`auto` connection, LinkHub performs serial discovery and heartbeat confirmation;
+a serial `--connection` or `--baud` restricts the scan. Explicit network
+connections select the corresponding transport. `--server` points to an
 already-running LinkHub instance.
+
+Calibration stops only a LinkHub process it started, using a graceful signal so
+transport cleanup can finish; failed or forced shutdown is reported explicitly.
+Exclusive DroneBridge UDP cleanup is configured through LinkHub's inherited
+`LINKHUB_DRONEBRIDGE_URL` environment variable; its behavior and limitations are
+owned by [LinkHub lifecycle semantics](linkhub.md#exclusive-dronebridge-udp-lifecycle).
 
 Per [arming.md](arming.md), the first hardware operation in a session should
 omit `--connection` and `--baud` so LinkHub can auto-detect the live Pixhawk
@@ -75,6 +82,11 @@ starts quickly. Install the optional simulation environment only when needed:
 ```bash
 uv sync --dev --extra simulation
 ```
+
+Hardware configuration reads parameter files through the dependency-free
+loader in `groundstation/parameter_files.py`; it does not import simulation
+parameter factories, ArduLoop, or SciPy. Simulation uses the same parser with
+its own default file chain.
 
 The workstation uses `UV_NO_SYNC=1`, so `uv run` does not re-sync
 automatically; run `uv sync` explicitly when dependencies change.
