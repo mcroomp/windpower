@@ -112,10 +112,12 @@ impl IntoResponse for ApiError {
             Self::Operation(_) => (StatusCode::SERVICE_UNAVAILABLE, "operation_failed"),
             Self::Motor(
                 MotorError::InvalidSpeed
+                | MotorError::InvalidDirection
                 | MotorError::InvalidTimeout { .. }
                 | MotorError::InvalidDevice,
             ) => (StatusCode::BAD_REQUEST, "invalid_motor_command"),
             Self::Motor(MotorError::Running) => (StatusCode::CONFLICT, "motor_running"),
+            Self::Motor(MotorError::Stopping) => (StatusCode::CONFLICT, "motor_stopping"),
             Self::Motor(MotorError::DeviceChanged) => {
                 (StatusCode::CONFLICT, "motor_device_changed")
             }

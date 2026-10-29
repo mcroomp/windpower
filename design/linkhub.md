@@ -152,16 +152,44 @@ so an absent adapter does not prevent MAVLink service startup.
 Discovery lists matching device names and opaque IDs from the server's adapter;
 an explicit connection selects one exact ID, never another matching device.
 The Nordic UART service is verified at connection time.
-Connecting or switching devices sends safe-stop and never starts the motor.
+Connecting initializes the motor off. Switching devices first completes the
+previous motor's controlled stop and never starts the selected motor.
 Scanning is rejected while running.
 
 Every running command includes the connected `device_id`, speed percentage,
-direction, and a finite lease duration. LinkHub rejects commands for a
-different device. Motor operations and the heartbeat supervisor are serialized.
-The supervisor sends safe-stop when the lease expires, checked on its
-configured heartbeat cycle (500 ms by default). A browser failure therefore
-does not leave an indefinitely renewed command. This is a LinkHub-side lease,
-not proof that Bluetooth delivery or physical stopping succeeded.
+direction, and a finite lease duration. The current motor is forward-only;
+reverse requests are rejected. LinkHub rejects commands for a different device.
+Motor operations and the supervisor are serialized.
+
+Speed requests are targets, not immediate writes. A Rust-owned motion profile
+limits command rate to 25 percentage points/s and changes in that rate to
+25 percentage points/s². A settled 0-to-100% or 100-to-0% transition takes
+5 seconds: 1 second increasing ramp rate, 3 seconds at maximum rate, and
+1 second reducing ramp rate. Smaller moves are shorter. Retargeting preserves
+the current command and ramp rate, including when a new target requires first
+slowing the old ramp before moving toward the new target. Repeated lease renewals
+do not reset the profile. Output is quantized to the motor protocol's integer
+percentages. The supervisor advances at most one 20 ms profile step per tick;
+delays extend the move rather than causing catch-up jumps.
+
+Explicit stop, lease expiry, reconnect, device switching, and graceful service
+shutdown all target zero through this profile. A stop cannot be interrupted by
+a running command; wait for off before explicitly restarting. Stop requests wait
+for profile completion, but cancelling their HTTP handler does not cancel the
+stop: the supervisor continues it. Heartbeats continue during ramp-down.
+The disable/brake command is sent only after the command profile reaches zero,
+not at the beginning of a stop. Status distinguishes applied `speed_percent`,
+`target_speed_percent`, and `stopping`; none is measured RPM.
+
+Lease expiry is checked on the profile tick, independently of the configured
+heartbeat interval (500 ms by default). Browser failure therefore starts a
+controlled stop after expiry rather than leaving an indefinitely renewed command.
+These are command-shaping guarantees while LinkHub and Bluetooth are operational,
+not verified acceleration, tooth force, Bluetooth delivery, or physical stopping.
+A zero command does not establish zero mechanical RPM. Link loss, process crash,
+power loss, and the motor controller's own watchdog/braking behavior need
+motor-firmware/hardware protection. Write failures are reported as unconfirmed
+motor state; LinkHub does not send an abrupt brake as an error fallback.
 
 The browser renews a 2 s lease every 500 ms only for a motor it explicitly
 started. Closing its motor panel, hiding the tab, or a request failure revokes

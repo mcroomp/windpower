@@ -21,6 +21,8 @@ export type MotorStatus = { available: false } | {
   device_id: string | null;
   running: boolean;
   speed_percent: number;
+  target_speed_percent: number;
+  stopping: boolean;
   direction: "forward" | "reverse";
   command_expires_in_ms: number | null;
   error: string | null;

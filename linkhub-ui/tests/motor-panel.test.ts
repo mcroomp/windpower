@@ -51,7 +51,7 @@ function setup(initial: MotorStatus = connected()) {
       return status;
     }),
     runMotor: vi.fn(async (_id: string, speed: number): Promise<MotorStatus> => {
-      status = { ...connected(), running: true, speed_percent: speed, command_expires_in_ms: 2000 };
+      status = { ...connected(), running: true, speed_percent: speed, target_speed_percent: speed, command_expires_in_ms: 2000 };
       return status;
     }),
     stopMotor: vi.fn(async () => { status = connected(); return status; }),
@@ -68,6 +68,7 @@ function connected(): Extract<MotorStatus, { available: true }> {
   return {
     available: true, connected: true, device: "BLDC A", device_id: "motor-1",
     running: false, speed_percent: 0, direction: "forward",
+    target_speed_percent: 0, stopping: false,
     command_expires_in_ms: null, error: null,
   };
 }
@@ -83,6 +84,20 @@ afterEach(() => {
 });
 
 describe("Bluetooth motor panel", () => {
+  it("shows applied versus target commands and a server-owned stop", async () => {
+    const { panel, elements, api, setStatus } = setup({
+      ...connected(), running: true, speed_percent: 30, target_speed_percent: 80,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(elements.get("state")!.textContent).toContain("30% -> 80%");
+    setStatus({ ...connected(), running: true, stopping: true, speed_percent: 20 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(elements.get("state")!.textContent).toBe("STOPPING - 20%");
+    expect(elements.get("on")!.disabled).toBe(true);
+    expect(api.runMotor).not.toHaveBeenCalled();
+    panel.dispose();
+  });
+
   it("keeps controls stable while a background status refresh is pending", async () => {
     const { panel, api, elements } = setup();
     await vi.advanceTimersByTimeAsync(0);

@@ -131,7 +131,7 @@ export class LinkHubApi {
   }
 
   stopMotor(): Promise<MotorStatus> {
-    return this.request("POST", "/v1/motor/stop", {}, AbortSignal.timeout(3_000));
+    return this.request("POST", "/v1/motor/stop", {}, AbortSignal.timeout(15_000));
   }
 
   async currentCursor(signal?: AbortSignal): Promise<string> {
