@@ -5,6 +5,8 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+from groundstation.parameter_files import load_parameter_files
+
 from .constants import (
     LinkHubClient,
     SCRIPTS_DIR,
@@ -13,7 +15,6 @@ from .constants import (
     _CALIBRATION_PARAM_PREFIXES,
     _RAWES_COMMON_PARM_PATH,
     _RAWES_HARDWARE_PARM_PATH,
-    load_ap_params,
 )
 from .hw import _restart_scripting
 
@@ -26,7 +27,7 @@ def _is_calibration_param(name: str) -> bool:
 
 
 def _load_shared_hw_target_params() -> dict[str, float]:
-    raw = load_ap_params([
+    raw = load_parameter_files([
         _AP_BASE_PARM_PATH,
         _RAWES_COMMON_PARM_PATH,
         _RAWES_HARDWARE_PARM_PATH,
@@ -39,7 +40,7 @@ def _load_shared_hw_target_params() -> dict[str, float]:
 
 
 def _load_common_override_target_params() -> dict[str, float]:
-    raw = load_ap_params([
+    raw = load_parameter_files([
         _RAWES_COMMON_PARM_PATH,
         _RAWES_HARDWARE_PARM_PATH,
     ])

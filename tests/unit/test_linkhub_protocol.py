@@ -571,6 +571,30 @@ def test_client_propagates_parameter_operation_timeouts(monkeypatch) -> None:
     assert requests[1][3] == {"timeout": 5.0}
 
 
+def test_client_reads_selected_parameter_records(monkeypatch) -> None:
+    client = LinkHubClient()
+    requests = []
+
+    def request(method, path, body=None, **kwargs):
+        requests.append((method, path, body, kwargs))
+        return {"parameters": [
+            {"name": "SERVO9_MIN", "value": 1000, "type": {"type": "MAV_PARAM_TYPE_INT16"},
+             "index": 1, "count": 2, "after_cursor": "v1:7"},
+            {"name": "RAWES_YAW_SLP", "value": 0.5, "type": {"type": "MAV_PARAM_TYPE_REAL32"},
+             "index": 2, "count": 2, "after_cursor": "v1:8"},
+        ]}
+
+    monkeypatch.setattr(client, "_request_json", request)
+    records = client.get_params(["SERVO9_MIN", "RAWES_YAW_SLP"], timeout=6, retries=1)
+    assert requests == [("POST", "/v1/mavlink/parameters",
+                         {"names": ["SERVO9_MIN", "RAWES_YAW_SLP"], "timeout_ms": 6000, "retries": 1},
+                         {"timeout": 7.0})]
+    assert records["SERVO9_MIN"]["type"] is MavParamType.INT16
+    assert type(records["SERVO9_MIN"]["value"]) is int
+    assert records["RAWES_YAW_SLP"]["value"] == 0.5
+    assert records["RAWES_YAW_SLP"]["after_cursor"] == "v1:8"
+
+
 def test_client_encodes_and_decodes_parameter_types(monkeypatch) -> None:
     client = LinkHubClient()
     requests = []
