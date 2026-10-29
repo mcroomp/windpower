@@ -110,8 +110,14 @@ impl IntoResponse for ApiError {
                 (StatusCode::BAD_GATEWAY, "mavlink_transfer_failed")
             }
             Self::Operation(_) => (StatusCode::SERVICE_UNAVAILABLE, "operation_failed"),
-            Self::Motor(MotorError::InvalidSpeed | MotorError::InvalidTimeout { .. }) => {
-                (StatusCode::BAD_REQUEST, "invalid_motor_command")
+            Self::Motor(
+                MotorError::InvalidSpeed
+                | MotorError::InvalidTimeout { .. }
+                | MotorError::InvalidDevice,
+            ) => (StatusCode::BAD_REQUEST, "invalid_motor_command"),
+            Self::Motor(MotorError::Running) => (StatusCode::CONFLICT, "motor_running"),
+            Self::Motor(MotorError::DeviceChanged) => {
+                (StatusCode::CONFLICT, "motor_device_changed")
             }
             Self::Motor(_) => (StatusCode::SERVICE_UNAVAILABLE, "motor_unavailable"),
             Self::GenerationChanged { .. } => (StatusCode::CONFLICT, "generation_changed"),
@@ -226,6 +232,8 @@ pub fn router_with_motor_and_static(
         )
         .route("/v1/mavlink/transfers/{id}/content", get(transfer_content))
         .route("/v1/motor", get(motor_status).put(set_motor))
+        .route("/v1/motor/devices", get(motor_devices))
+        .route("/v1/motor/connect", axum::routing::post(connect_motor))
         .route("/v1/motor/stop", axum::routing::post(stop_motor))
         .route("/v1/motor/reconnect", axum::routing::post(reconnect_motor))
         .route("/v1/mavlink/status", get(mavlink_status))
@@ -1365,8 +1373,30 @@ async fn motor_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     ))
 }
 
+async fn motor_devices(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let devices = require_motor(&state)?.scan().await?;
+    Ok(Json(json!({ "devices": devices })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectMotorRequest {
+    device_id: String,
+}
+
+async fn connect_motor(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ConnectMotorRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let motor = require_motor(&state)?;
+    motor.connect_device(request.device_id).await?;
+    Ok(Json(
+        serde_json::to_value(motor.status()).expect("motor status is serializable"),
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 struct SetMotorRequest {
+    device_id: String,
     speed_percent: u8,
     direction: MotorDirection,
     timeout_ms: u64,
@@ -1378,7 +1408,12 @@ async fn set_motor(
 ) -> Result<Json<Value>, ApiError> {
     let motor = require_motor(&state)?;
     motor
-        .set_running(request.speed_percent, request.direction, request.timeout_ms)
+        .set_running(
+            request.device_id,
+            request.speed_percent,
+            request.direction,
+            request.timeout_ms,
+        )
         .await?;
     Ok(Json(
         serde_json::to_value(motor.status()).expect("motor status is serializable"),

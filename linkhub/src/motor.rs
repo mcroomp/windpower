@@ -76,10 +76,17 @@ impl MotorConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MotorDevice {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MotorStatus {
     pub available: bool,
     pub connected: bool,
     pub device: Option<String>,
+    pub device_id: Option<String>,
     pub running: bool,
     pub speed_percent: u8,
     pub direction: MotorDirection,
@@ -95,6 +102,12 @@ pub enum MotorError {
     InvalidSpeed,
     #[error("timeout_ms must be in 1..{maximum_ms}")]
     InvalidTimeout { maximum_ms: u64 },
+    #[error("device_id must not be empty")]
+    InvalidDevice,
+    #[error("Stop the motor before scanning for Bluetooth devices")]
+    Running,
+    #[error("The selected Bluetooth motor is no longer connected")]
+    DeviceChanged,
     #[error("Bluetooth motor is disconnected")]
     Disconnected,
     #[error("Bluetooth motor operation failed: {0}")]
@@ -102,11 +115,18 @@ pub enum MotorError {
 }
 
 pub trait MotorBackend: Send + 'static {
-    fn connect(
+    fn scan(
         &mut self,
         name_prefix: &str,
         scan_timeout: Duration,
-    ) -> impl Future<Output = Result<String, MotorError>> + Send;
+    ) -> impl Future<Output = Result<Vec<MotorDevice>, MotorError>> + Send;
+
+    fn connect(
+        &mut self,
+        name_prefix: &str,
+        device_id: Option<&str>,
+        scan_timeout: Duration,
+    ) -> impl Future<Output = Result<MotorDevice, MotorError>> + Send;
 
     fn write(&mut self, command: &str) -> impl Future<Output = Result<(), MotorError>> + Send;
 
@@ -117,6 +137,7 @@ pub trait MotorBackend: Send + 'static {
 struct State {
     connected: bool,
     device: Option<String>,
+    device_id: Option<String>,
     running: bool,
     speed_percent: u8,
     direction: MotorDirection,
@@ -129,6 +150,7 @@ impl Default for State {
         Self {
             connected: false,
             device: None,
+            device_id: None,
             running: false,
             speed_percent: 0,
             direction: MotorDirection::Forward,
@@ -139,6 +161,7 @@ impl Default for State {
 }
 
 struct Inner<B> {
+    operation: AsyncMutex<()>,
     backend: AsyncMutex<B>,
     config: MotorConfig,
     state: Mutex<State>,
@@ -154,8 +177,18 @@ pub type MotorHandle = Arc<dyn MotorService>;
 pub trait MotorService: Send + Sync {
     fn status(&self) -> MotorStatus;
 
+    fn scan(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MotorDevice>, MotorError>> + Send + '_>>;
+
+    fn connect_device(
+        &self,
+        device_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, MotorError>> + Send + '_>>;
+
     fn set_running(
         &self,
+        device_id: String,
         speed_percent: u8,
         direction: MotorDirection,
         timeout_ms: u64,
@@ -173,6 +206,7 @@ impl<B: MotorBackend> MotorController<B> {
         config.validate()?;
         Ok(Self {
             inner: Arc::new(Inner {
+                operation: AsyncMutex::new(()),
                 backend: AsyncMutex::new(backend),
                 config,
                 state: Mutex::new(State::default()),
@@ -182,15 +216,52 @@ impl<B: MotorBackend> MotorController<B> {
     }
 
     pub async fn connect(&self) -> Result<String, MotorError> {
+        let _operation = self.inner.operation.lock().await;
+        self.connect_inner().await
+    }
+
+    pub async fn scan(&self) -> Result<Vec<MotorDevice>, MotorError> {
+        let _operation = self.inner.operation.lock().await;
+        if lock(&self.inner.state).running {
+            return Err(MotorError::Running);
+        }
+        self.inner
+            .backend
+            .lock()
+            .await
+            .scan(
+                &self.inner.config.name_prefix,
+                self.inner.config.scan_timeout,
+            )
+            .await
+    }
+
+    pub async fn connect_device(&self, device_id: String) -> Result<String, MotorError> {
+        if device_id.trim().is_empty() {
+            return Err(MotorError::InvalidDevice);
+        }
+        let _operation = self.inner.operation.lock().await;
+        self.disconnect(true).await?;
+        lock(&self.inner.state).device_id = Some(device_id);
+        self.connect_inner().await
+    }
+
+    async fn connect_inner(&self) -> Result<String, MotorError> {
         self.stop_supervisor();
+        let device_id = lock(&self.inner.state).device_id.clone();
         let result = {
             let mut backend = self.inner.backend.lock().await;
-            let device = backend
+            let device = match backend
                 .connect(
                     &self.inner.config.name_prefix,
+                    device_id.as_deref(),
                     self.inner.config.scan_timeout,
                 )
-                .await?;
+                .await
+            {
+                Ok(device) => device,
+                Err(error) => return self.record_error(error),
+            };
             if let Err(error) = backend.write(SAFE_STOP_COMMAND).await {
                 let _ = backend.disconnect().await;
                 return self.record_error(error);
@@ -201,12 +272,13 @@ impl<B: MotorBackend> MotorController<B> {
         {
             let mut state = lock(&self.inner.state);
             state.connected = true;
-            state.device = Some(result.clone());
+            state.device = Some(result.name.clone());
+            state.device_id = Some(result.id);
             mark_stopped(&mut state);
             state.error = None;
         }
         self.start_supervisor();
-        Ok(result)
+        Ok(result.name)
     }
 
     pub fn status(&self) -> MotorStatus {
@@ -215,6 +287,7 @@ impl<B: MotorBackend> MotorController<B> {
             available: true,
             connected: state.connected,
             device: state.device.clone(),
+            device_id: state.device_id.clone(),
             running: state.running,
             speed_percent: state.speed_percent,
             direction: state.direction,
@@ -230,10 +303,12 @@ impl<B: MotorBackend> MotorController<B> {
 
     pub async fn set_running(
         &self,
+        device_id: &str,
         speed_percent: u8,
         direction: MotorDirection,
         timeout_ms: u64,
     ) -> Result<(), MotorError> {
+        let _operation = self.inner.operation.lock().await;
         if !(1..=100).contains(&speed_percent) {
             return Err(MotorError::InvalidSpeed);
         }
@@ -241,6 +316,9 @@ impl<B: MotorBackend> MotorController<B> {
             return Err(MotorError::InvalidTimeout {
                 maximum_ms: self.inner.config.maximum_command_timeout_ms,
             });
+        }
+        if lock(&self.inner.state).device_id.as_deref() != Some(device_id) {
+            return Err(MotorError::DeviceChanged);
         }
 
         let command = format!("D:{};B:0;S:{speed_percent};E:1\n", direction.wire_value());
@@ -255,17 +333,20 @@ impl<B: MotorBackend> MotorController<B> {
     }
 
     pub async fn stop(&self) -> Result<(), MotorError> {
+        let _operation = self.inner.operation.lock().await;
         self.write(SAFE_STOP_COMMAND).await?;
         mark_stopped(&mut lock(&self.inner.state));
         Ok(())
     }
 
     pub async fn reconnect(&self) -> Result<String, MotorError> {
+        let _operation = self.inner.operation.lock().await;
         self.disconnect(true).await?;
-        self.connect().await
+        self.connect_inner().await
     }
 
     pub async fn close(&self) -> Result<(), MotorError> {
+        let _operation = self.inner.operation.lock().await;
         self.disconnect(true).await
     }
 
@@ -330,18 +411,30 @@ impl<B: MotorBackend> MotorService for MotorController<B> {
         MotorController::status(self)
     }
 
+    fn scan(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MotorDevice>, MotorError>> + Send + '_>> {
+        Box::pin(MotorController::scan(self))
+    }
+
+    fn connect_device(
+        &self,
+        device_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, MotorError>> + Send + '_>> {
+        Box::pin(MotorController::connect_device(self, device_id))
+    }
+
     fn set_running(
         &self,
+        device_id: String,
         speed_percent: u8,
         direction: MotorDirection,
         timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<(), MotorError>> + Send + '_>> {
-        Box::pin(MotorController::set_running(
-            self,
-            speed_percent,
-            direction,
-            timeout_ms,
-        ))
+        Box::pin(async move {
+            MotorController::set_running(self, &device_id, speed_percent, direction, timeout_ms)
+                .await
+        })
     }
 
     fn stop(&self) -> Pin<Box<dyn Future<Output = Result<(), MotorError>> + Send + '_>> {
@@ -375,6 +468,7 @@ async fn supervise<B: MotorBackend>(weak: Weak<Inner<B>>, interval: Duration) {
         let Some(inner) = weak.upgrade() else {
             return;
         };
+        let _operation = inner.operation.lock().await;
 
         let expired = {
             let state = lock(&inner.state);
@@ -411,65 +505,123 @@ async fn supervise<B: MotorBackend>(weak: Weak<Inner<B>>, interval: Duration) {
 }
 
 mod bluetooth {
-    use super::{MotorBackend, MotorError, NUS_RX_UUID, NUS_SERVICE_UUID};
+    use super::{MotorBackend, MotorDevice, MotorError, NUS_RX_UUID, NUS_SERVICE_UUID};
     use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
     use btleplug::platform::{Adapter, Manager, Peripheral};
     use std::time::Duration;
     use uuid::Uuid;
 
     pub struct BtleplugBackend {
-        adapter: Adapter,
+        adapter: Option<Adapter>,
         peripheral: Option<Peripheral>,
     }
 
     impl BtleplugBackend {
         pub async fn new() -> Result<Self, MotorError> {
-            let manager = Manager::new().await.map_err(backend_error)?;
-            let adapter = manager
-                .adapters()
-                .await
-                .map_err(backend_error)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| MotorError::Backend("no Bluetooth adapter found".to_owned()))?;
             Ok(Self {
-                adapter,
+                adapter: None,
                 peripheral: None,
             })
+        }
+
+        async fn adapter(&mut self) -> Result<&Adapter, MotorError> {
+            if self.adapter.is_none() {
+                let manager = Manager::new().await.map_err(backend_error)?;
+                let adapter = manager
+                    .adapters()
+                    .await
+                    .map_err(backend_error)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| MotorError::Backend("no Bluetooth adapter found".to_owned()))?;
+                self.adapter = Some(adapter);
+            }
+            self.adapter
+                .as_ref()
+                .ok_or_else(|| MotorError::Backend("no Bluetooth adapter found".to_owned()))
+        }
+
+        async fn devices(
+            &mut self,
+            name_prefix: &str,
+        ) -> Result<Vec<(Peripheral, MotorDevice)>, MotorError> {
+            let mut devices = Vec::new();
+            for peripheral in self
+                .adapter()
+                .await?
+                .peripherals()
+                .await
+                .map_err(backend_error)?
+            {
+                let properties = peripheral.properties().await.map_err(backend_error)?;
+                if let Some(name) = properties.and_then(|value| value.local_name)
+                    && name.starts_with(name_prefix)
+                {
+                    let id = peripheral.id().to_string();
+                    devices.push((peripheral, MotorDevice { id, name }));
+                }
+            }
+            devices.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+            Ok(devices)
         }
     }
 
     impl MotorBackend for BtleplugBackend {
-        async fn connect(
+        async fn scan(
             &mut self,
             name_prefix: &str,
             scan_timeout: Duration,
-        ) -> Result<String, MotorError> {
-            self.adapter
+        ) -> Result<Vec<MotorDevice>, MotorError> {
+            self.adapter()
+                .await?
+                .start_scan(ScanFilter::default())
+                .await
+                .map_err(backend_error)?;
+            tokio::time::sleep(scan_timeout).await;
+            let result = self.devices(name_prefix).await;
+            self.adapter()
+                .await?
+                .stop_scan()
+                .await
+                .map_err(backend_error)?;
+            Ok(result?.into_iter().map(|(_, device)| device).collect())
+        }
+
+        async fn connect(
+            &mut self,
+            name_prefix: &str,
+            device_id: Option<&str>,
+            scan_timeout: Duration,
+        ) -> Result<MotorDevice, MotorError> {
+            self.adapter()
+                .await?
                 .start_scan(ScanFilter::default())
                 .await
                 .map_err(backend_error)?;
             let deadline = tokio::time::Instant::now() + scan_timeout;
-            let found = 'scan: loop {
-                for peripheral in self.adapter.peripherals().await.map_err(backend_error)? {
-                    let properties = peripheral.properties().await.map_err(backend_error)?;
-                    let name = properties.and_then(|value| value.local_name);
-                    if name
-                        .as_deref()
-                        .is_some_and(|name| name.starts_with(name_prefix))
-                    {
-                        break 'scan (peripheral, name.unwrap_or_else(|| name_prefix.to_owned()));
+            let result = async {
+                loop {
+                    for (peripheral, device) in self.devices(name_prefix).await? {
+                        if device_id.is_none_or(|id| id == device.id) {
+                            return Ok((peripheral, device));
+                        }
                     }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(MotorError::Backend(format!(
+                            "No Bluetooth motor found for {}",
+                            device_id.unwrap_or(name_prefix)
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                if tokio::time::Instant::now() >= deadline {
-                    self.adapter.stop_scan().await.map_err(backend_error)?;
-                    return Err(MotorError::Backend(format!(
-                        "No Bluetooth device named {name_prefix}* found"
-                    )));
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            };
-            self.adapter.stop_scan().await.map_err(backend_error)?;
+            }
+            .await;
+            self.adapter()
+                .await?
+                .stop_scan()
+                .await
+                .map_err(backend_error)?;
+            let found = result?;
 
             found.0.connect().await.map_err(backend_error)?;
             found.0.discover_services().await.map_err(backend_error)?;
@@ -484,7 +636,7 @@ mod bluetooth {
                 let _ = found.0.disconnect().await;
                 return Err(MotorError::Backend(format!(
                     "{} does not expose the Nordic UART service",
-                    found.1
+                    found.1.name
                 )));
             }
             self.peripheral = Some(found.0);
@@ -544,6 +696,13 @@ impl MotorController<BtleplugBackend> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
 
     #[derive(Clone, Default)]
     struct MockBackend {
@@ -551,13 +710,29 @@ mod tests {
     }
 
     impl MotorBackend for MockBackend {
-        async fn connect(
+        async fn scan(
             &mut self,
             name_prefix: &str,
             _scan_timeout: Duration,
-        ) -> Result<String, MotorError> {
-            lock(&self.calls).push(format!("connect:{name_prefix}"));
-            Ok(format!("{name_prefix}-mock"))
+        ) -> Result<Vec<MotorDevice>, MotorError> {
+            lock(&self.calls).push("scan".to_owned());
+            Ok(vec![MotorDevice {
+                id: "motor-1".to_owned(),
+                name: format!("{name_prefix}-mock"),
+            }])
+        }
+
+        async fn connect(
+            &mut self,
+            name_prefix: &str,
+            device_id: Option<&str>,
+            _scan_timeout: Duration,
+        ) -> Result<MotorDevice, MotorError> {
+            lock(&self.calls).push(format!("connect:{}", device_id.unwrap_or(name_prefix)));
+            Ok(MotorDevice {
+                id: device_id.unwrap_or("motor-1").to_owned(),
+                name: format!("{name_prefix}-mock"),
+            })
         }
 
         async fn write(&mut self, command: &str) -> Result<(), MotorError> {
@@ -594,7 +769,7 @@ mod tests {
         assert_eq!(motor.connect().await.unwrap(), "BLDC-mock");
 
         motor
-            .set_running(10, MotorDirection::Forward, 20)
+            .set_running("motor-1", 10, MotorDirection::Forward, 20)
             .await
             .unwrap();
         tokio::task::yield_now().await;
@@ -628,19 +803,27 @@ mod tests {
         let (motor, calls) = test_controller(Duration::from_secs(1), 10_000);
 
         assert_eq!(
-            motor.set_running(0, MotorDirection::Forward, 1_000).await,
+            motor
+                .set_running("motor-1", 0, MotorDirection::Forward, 1_000)
+                .await,
             Err(MotorError::InvalidSpeed)
         );
         assert_eq!(
-            motor.set_running(101, MotorDirection::Forward, 1_000).await,
+            motor
+                .set_running("motor-1", 101, MotorDirection::Forward, 1_000)
+                .await,
             Err(MotorError::InvalidSpeed)
         );
         assert_eq!(
-            motor.set_running(10, MotorDirection::Forward, 0).await,
+            motor
+                .set_running("motor-1", 10, MotorDirection::Forward, 0)
+                .await,
             Err(MotorError::InvalidTimeout { maximum_ms: 10_000 })
         );
         assert_eq!(
-            motor.set_running(10, MotorDirection::Forward, 10_001).await,
+            motor
+                .set_running("motor-1", 10, MotorDirection::Forward, 10_001)
+                .await,
             Err(MotorError::InvalidTimeout { maximum_ms: 10_000 })
         );
         assert!(lock(&calls).is_empty());
@@ -651,7 +834,7 @@ mod tests {
         let (motor, calls) = test_controller(Duration::from_secs(1), 10_000);
         motor.connect().await.unwrap();
         motor
-            .set_running(25, MotorDirection::Reverse, 1_000)
+            .set_running("motor-1", 25, MotorDirection::Reverse, 1_000)
             .await
             .unwrap();
         assert_eq!(
@@ -660,6 +843,7 @@ mod tests {
                 available: true,
                 connected: true,
                 device: Some("BLDC-mock".to_owned()),
+                device_id: Some("motor-1".to_owned()),
                 running: true,
                 speed_percent: 25,
                 direction: MotorDirection::Reverse,
@@ -674,8 +858,11 @@ mod tests {
 
         let calls = lock(&calls);
         assert_eq!(
-            calls.iter().filter(|call| *call == "connect:BLDC").count(),
-            2
+            calls
+                .iter()
+                .filter(|call| *call == "connect:motor-1")
+                .count(),
+            1
         );
         assert!(
             calls
@@ -685,5 +872,124 @@ mod tests {
                 >= 4
         );
         assert_eq!(calls.iter().filter(|call| *call == "disconnect").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn device_selection_stops_previous_motor_and_never_starts_selected_motor() {
+        let (motor, calls) = test_controller(Duration::from_secs(1), 10_000);
+        assert_eq!(motor.scan().await.unwrap()[0].id, "motor-1");
+        motor.connect().await.unwrap();
+        motor
+            .set_running("motor-1", 10, MotorDirection::Forward, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(motor.scan().await, Err(MotorError::Running));
+        motor.connect_device("motor-2".to_owned()).await.unwrap();
+        assert!(!motor.status().running);
+        assert_eq!(motor.status().device_id.as_deref(), Some("motor-2"));
+        let calls = lock(&calls);
+        let selection = calls
+            .iter()
+            .position(|call| call == "connect:motor-2")
+            .unwrap();
+        assert_eq!(
+            &calls[selection - 2..=selection + 1],
+            &[
+                SAFE_STOP_COMMAND.to_owned(),
+                "disconnect".to_owned(),
+                "connect:motor-2".to_owned(),
+                SAFE_STOP_COMMAND.to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_device_selection_does_not_touch_backend() {
+        let (motor, calls) = test_controller(Duration::from_secs(1), 10_000);
+        assert_eq!(
+            motor.connect_device(" ".to_owned()).await,
+            Err(MotorError::InvalidDevice)
+        );
+        assert!(lock(&calls).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_commands_cannot_power_a_different_device() {
+        let (motor, calls) = test_controller(Duration::from_secs(1), 10_000);
+        motor.connect_device("motor-2".to_owned()).await.unwrap();
+        let before = lock(&calls).len();
+        assert_eq!(
+            motor
+                .set_running("motor-1", 25, MotorDirection::Forward, 2_000)
+                .await,
+            Err(MotorError::DeviceChanged)
+        );
+        assert_eq!(lock(&calls).len(), before);
+        assert!(!motor.status().running);
+    }
+
+    #[tokio::test]
+    async fn http_device_selection_and_leased_commands() {
+        async fn call(app: &Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let (journal, task) = crate::journal::JournalHandle::start(
+            crate::journal::JournalConfig::for_directory(directory.path(), uuid::Uuid::new_v4()),
+        )
+        .await
+        .unwrap();
+        let (motor, _) = test_controller(Duration::from_secs(1), 10_000);
+        let motor = Arc::new(motor);
+        let app = crate::http::router_with_motor(journal.clone(), None, Some(motor.clone()));
+
+        let (code, devices) = call(&app, "GET", "/v1/motor/devices", json!({})).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(devices["devices"][0]["id"], "motor-1");
+
+        let (code, status) = call(
+            &app,
+            "POST",
+            "/v1/motor/connect",
+            json!({"device_id": "motor-1"}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(status["connected"], true);
+        assert_eq!(status["running"], false);
+        assert_eq!(status["device_id"], "motor-1");
+
+        let (code, _) = call(&app, "PUT", "/v1/motor", json!({
+            "device_id": "wrong", "speed_percent": 10, "direction": "forward", "timeout_ms": 2000
+        })).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        let (code, status) = call(&app, "PUT", "/v1/motor", json!({
+            "device_id": "motor-1", "speed_percent": 10, "direction": "forward", "timeout_ms": 2000
+        })).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(status["running"], true);
+        let (code, _) = call(&app, "GET", "/v1/motor/devices", json!({})).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        let (code, status) = call(&app, "POST", "/v1/motor/stop", json!({})).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(status["running"], false);
+        motor.close().await.unwrap();
+        journal.shutdown().await.unwrap();
+        task.await.unwrap();
     }
 }

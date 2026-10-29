@@ -1,18 +1,9 @@
 import type { LinkHubApi } from "./api";
+import { sleep } from "./sleep";
 import { YAW_MESSAGES, type YawModel } from "./yaw-model";
 
 const POLL_PAUSE_MS = 50;
 const RETRY_MS = 500;
-
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = globalThis.setTimeout(resolve, ms);
-    signal.addEventListener("abort", () => {
-      globalThis.clearTimeout(timer);
-      resolve();
-    }, { once: true });
-  });
-}
 
 /**
  * Reads every yaw-related frame from the LinkHub journal into a YawModel.

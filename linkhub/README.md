@@ -192,7 +192,7 @@ Defaults come from `linkhub\src\main.rs`.
 | `--baud` | unset | Restrict discovery to one baud rate. |
 | `--discovery-bauds` | `115200,57600,38400,19200,9600` | Baud list scanned when `--baud` is not supplied. |
 | `--discovery-timeout-ms` | `3000` | Heartbeat probe timeout per port/baud candidate. |
-| `--motor-name-prefix` | unset | Enable Bluetooth motor support for devices whose name matches the prefix. |
+| `--motor-name-prefix` | unset | Enable Bluetooth motor support for devices whose name matches the prefix; starts disconnected. |
 | `--motor-scan-timeout-ms` | `10000` | Bluetooth motor scan timeout. |
 | `--motor-heartbeat-ms` | `500` | Bluetooth motor heartbeat interval. |
 | `--motor-max-command-timeout-ms` | `10000` | Maximum allowed motor command timeout. |
@@ -251,8 +251,22 @@ Routes come from `linkhub\src\http.rs`.
 | `/v1/mavlink/transfers/{id}/content` | `GET` | The verified bytes of a completed transfer. |
 | `/v1/mavlink/status` | `GET` | Live link + vehicle status snapshot. |
 | `/v1/motor` | `GET`, `PUT` | Optional Bluetooth motor status and set-running command. |
+| `/v1/motor/devices` | `GET` | Scan the server's Bluetooth adapter for matching motor names and opaque device IDs; rejected while running. |
+| `/v1/motor/connect` | `POST` | Connect an exact `device_id`, safely stopping any previous connection; leaves the motor off. |
 | `/v1/motor/stop` | `POST` | Optional Bluetooth motor stop command. |
-| `/v1/motor/reconnect` | `POST` | Optional Bluetooth motor reconnect. |
+| `/v1/motor/reconnect` | `POST` | Reconnect the selected motor, or the first matching device if none has been selected; leaves it off. |
+
+`GET /v1/motor` returns `available: false` when the backend is disabled.
+When enabled, status includes `connected`, `device`, `device_id`, `running`,
+`speed_percent`, `direction`, `command_expires_in_ms`, and `error`.
+`GET /v1/motor/devices` returns `{"devices": [{"id": "...", "name": "BLDC..."}]}`.
+`POST /v1/motor/connect` takes `{"device_id": "..."}`.
+`PUT /v1/motor` takes `{"device_id": "...", "speed_percent": 10,
+"direction": "forward", "timeout_ms": 2000}`; speed is `1..100`, direction is
+`forward` or `reverse`, and timeout must be positive and no greater than
+`--motor-max-command-timeout-ms`. Device changes return HTTP 409.
+Use `POST /v1/motor/stop` to turn off, not a zero-speed running command.
+See [motor lease semantics](../design/linkhub.md#bluetooth-bench-motor).
 
 ### Common query/body parameters
 

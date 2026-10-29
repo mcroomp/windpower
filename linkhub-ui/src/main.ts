@@ -27,6 +27,7 @@ import { WobbleModel } from "./wobble-model";
 import { WobblePanel } from "./wobble-panel";
 import { WobbleRecorder } from "./wobble-recorder";
 import { SwashPanel } from "./swash-panel";
+import { MotorPanel } from "./motor-panel";
 
 function required<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -247,6 +248,15 @@ telemetry.onConnection((connected, error) => {
 telemetry.onWarning((message) => write(message, "error"));
 
 const scenePanel = required<HTMLElement>(".scene-panel");
+const motorToggle = required<HTMLButtonElement>("#motor-toggle");
+const motorPanel = new MotorPanel(required<HTMLElement>("#motor-panel"), api, write);
+motorToggle.addEventListener("click", () => {
+  const open = !motorPanel.isOpen;
+  scenePanel.classList.toggle("motor-open", open);
+  motorToggle.setAttribute("aria-pressed", String(open));
+  if (open) motorPanel.open();
+  else motorPanel.close();
+});
 const swashToggle = required<HTMLButtonElement>("#swash-toggle");
 const swashPanel = new SwashPanel(required<HTMLElement>("#swash-panel"), passive, telemetry, write, (limits) => {
   swashLimits = limits;
@@ -405,6 +415,7 @@ window.addEventListener("beforeunload", () => {
   wobbleRecorder.stop();
   wobblePanel.dispose();
   swashPanel.dispose();
+  motorPanel.dispose();
   scene.dispose();
   telemetry.stop();
 });

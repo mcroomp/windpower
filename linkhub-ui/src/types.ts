@@ -9,6 +9,23 @@ import type {
 
 export type JsonObject = Record<string, unknown>;
 
+export interface MotorDevice {
+  id: string;
+  name: string;
+}
+
+export type MotorStatus = { available: false } | {
+  available: true;
+  connected: boolean;
+  device: string | null;
+  device_id: string | null;
+  running: boolean;
+  speed_percent: number;
+  direction: "forward" | "reverse";
+  command_expires_in_ms: number | null;
+  error: string | null;
+};
+
 export interface LinkHubStatus {
   connected: boolean;
   ready: boolean;

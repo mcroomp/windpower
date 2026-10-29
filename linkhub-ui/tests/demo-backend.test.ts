@@ -30,6 +30,19 @@ function fixture() {
 }
 
 describe("recorded SITL demo", () => {
+  it("disables Bluetooth motor access in the offline replay", async () => {
+    const { api } = fixture();
+    expect(await api.motorStatus()).toEqual({ available: false });
+    for (const action of [
+      () => api.motorDevices(),
+      () => api.connectMotor("motor-1"),
+      () => api.runMotor("motor-1", 10, "forward", 2000),
+      () => api.stopMotor(),
+    ]) {
+      await expect(action()).rejects.toMatchObject({ status: 403, message: expect.stringContaining("read-only") });
+    }
+  });
+
   it("points the rendered tether downward throughout the recorded pumping cycle", () => {
     const motion = new VehicleMotion();
     let now = 0;
@@ -182,6 +195,44 @@ describe("recorded SITL demo", () => {
     await runner.execute("config check");
     expect(messages.join("\n")).toContain("differ");
     await expect(runner.execute("param set H_COL_MIN 1200")).rejects.toThrow("read-only");
+  });
+
+  it("preserves cursor boundaries and pagination after trimming the journal", async () => {
+    const { api, advance } = fixture();
+    let sequence = 0;
+    for (let cycle = 0; cycle < 30 && sequence <= 60_000; cycle += 1) {
+      advance(pumpingCycle.duration * 1000);
+      sequence = Number((await api.currentCursor()).slice(3));
+    }
+    expect(sequence).toBeGreaterThan(60_000);
+    const retained = await api.queryMessages({ after: "v1:0", limit: 60_000 });
+    expect(retained.records).toHaveLength(60_000);
+    const first = Number(retained.records[0]!.cursor.slice(3));
+    expect(first).toBe(sequence - 60_000 + 1);
+    for (const offset of [-2, -1, 0, 30_000, 59_999, 60_000]) {
+      const after = `v1:${first + offset}`;
+      const batch = await api.queryMessages({ after, limit: 2 });
+      const start = Math.max(0, offset + 1);
+      expect(batch.records).toEqual(retained.records.slice(start, start + 2));
+      expect(batch.next_cursor).toBe(start + 2 < 60_000 ? batch.records.at(-1)?.cursor : retained.next_cursor);
+    }
+  });
+
+  it("calculates throughput from only the trailing three seconds", async () => {
+    const { api, advance } = fixture();
+    advance(25_000);
+    const batch = await api.queryMessages({ after: "v1:0", limit: 10_000 });
+    const expected: Record<string, number> = {};
+    for (const record of batch.records) {
+      if (record.received_time_ns >= 22e9) {
+        expected[record.message] = (expected[record.message] ?? 0) + 64 / 3;
+      }
+    }
+    const status = await api.status();
+    expect(status.rx_bps_by_message).toEqual(expected);
+    expect(status.rx_bps).toBeCloseTo(Object.values(expected).reduce((sum, value) => sum + value, 0));
+    advance(10_000);
+    expect((await api.status()).rx_bps_by_message).not.toEqual(expected);
   });
 
   it("drives the real telemetry store and chart readers across a loop", async () => {

@@ -394,7 +394,6 @@ async fn configure_motor(
         maximum_command_timeout_ms,
     })
     .await?;
-    controller.connect().await?;
     Ok(Some(std::sync::Arc::new(controller)))
 }
 
