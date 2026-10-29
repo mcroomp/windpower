@@ -52,13 +52,16 @@ traffic at 64 bytes per delivered frame, not measured link bandwidth. Boot and
 arrival timestamps are rebased monotonically each loop so the production chart
 readers keep working. The natural end-to-start cut is not an invented blending
 trajectory. Browser journal history and catch-up after a suspended tab are
-bounded.
+bounded. Cursor reads skip already-consumed records, and throughput scans only
+the trailing three seconds rather than the full retained journal.
 
 The browser-local adapter replaces the Rust service, not the frontend control,
 rendering, or analysis code. This demo does not validate binary MAVLink transport
 or the Rust service. Integration tests exercise the production `LinkHubApi`,
 `TelemetryStore`, `CommandRunner`, `PassiveController` reconciliation,
 `YawRecorder`, and `WobbleRecorder`.
+Chart polling releases each completed delay's abort listener, keeping cancellation
+cost bounded across replay loops and long-running live sessions.
 
 To generate a replay fixture from selected run artifacts:
 

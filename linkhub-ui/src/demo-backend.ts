@@ -174,10 +174,11 @@ export class DemoBackend {
 
   private status(): LinkHubStatus {
     const rx: Record<string, number> = {};
-    for (const record of this.journal) {
-      if (record.received_time_ns / 1e9 >= this.now() - 3) {
-        rx[record.message] = (rx[record.message] ?? 0) + 64 / 3;
-      }
+    const cutoff = this.now() - 3;
+    for (let index = this.journal.length - 1; index >= 0; index -= 1) {
+      const record = this.journal[index]!;
+      if (record.received_time_ns / 1e9 < cutoff) break;
+      rx[record.message] = (rx[record.message] ?? 0) + 64 / 3;
     }
     return {
       ...this.state, connected: true, ready: true, connection: "recorded-sitl-replay",
@@ -225,11 +226,13 @@ export class DemoBackend {
         const names = url.searchParams.get("messages")?.split(",");
         const direction = url.searchParams.get("direction");
         const lag = url.searchParams.get("max_lag_ms");
-        let records = this.journal.filter((record) =>
-          Number(record.cursor.slice(3)) > after
-          && (!direction || record.direction === direction)
+        const cutoff = lag === null ? -Infinity : this.now() * 1000 - Number(lag);
+        // Sequences are contiguous within the retained journal, including after trimming.
+        const start = Math.max(0, after - (this.sequence - this.journal.length));
+        let records = this.journal.slice(start).filter((record) =>
+          (!direction || record.direction === direction)
           && (!names || names.includes(record.message))
-          && (lag === null || record.received_time_ns / 1e6 >= this.now() * 1000 - Number(lag)));
+          && record.received_time_ns / 1e6 >= cutoff);
         if (url.searchParams.get("collapse") === "true") {
           const latest = new Map<string, MessageRecord>();
           for (const record of records) {
