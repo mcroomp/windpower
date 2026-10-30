@@ -133,13 +133,16 @@ No adapter or device is needed until scanning/connecting.
 Connecting leaves the motor off. Set the **Speed** slider and click **Turn on**.
 The slider commands speed percentage, not closed-loop RPM. While running,
 changes update the command; zero speed and **Turn off / stop** stop it.
-Direction is preserved from the server's current motor state.
+The motor is forward-only. Status displays the applied and target percentages.
+All changes use the server-owned smooth profile; see the
+[profile limits and hardware limitations](../design/linkhub.md#bluetooth-bench-motor).
 The panel can remain open alongside the flight diagnostic/calibration panels.
 
 Only an explicit **Turn on** starts browser lease renewal. Closing this panel,
 hiding the tab, Escape, or a failed request stops renewal and attempts safe-stop.
 After a browser crash/network loss the server's 2 s command lease expires;
-the heartbeat supervisor checks expiry every 500 ms by default. There is no
+the supervisor starts controlled ramp-down on its next profile tick. Stops are
+not immediate; the request waits for the server-owned ramp to finish. There is no
 automatic restart after expiry, reconnect, or reopening the panel.
 Another client's running motor is displayed but never adopted for renewal.
 The offline demo shows the backend as unavailable and never accesses Bluetooth.

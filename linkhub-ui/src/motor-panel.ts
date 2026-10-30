@@ -56,7 +56,8 @@ export class MotorPanel {
       </div>
       <small>Uses Bluetooth on the LinkHub server. Connecting leaves the motor off.
         A 2 s lease is renewed every 500 ms while this visible panel owns the motor.
-        Hiding the tab or closing the panel stops it; browser loss lets the lease expire.</small>`;
+        All speed changes use a server-side smooth profile (5 s full scale).
+        Hiding the tab, closing the panel, or lease expiry ramps down, not an immediate stop.</small>`;
     const element = <T extends HTMLElement>(role: string): T => {
       const found = root.querySelector<T>(`[data-role="${role}"]`);
       if (!found) throw new Error(`Missing motor element ${role}`);
@@ -170,7 +171,7 @@ export class MotorPanel {
     const status = await this.api.runMotor(this.ownedDevice, speed, direction, LEASE_MS);
     this.update(status);
     if (revision !== this.revision) return;
-    if (!status.available || !status.connected || !status.running || status.device_id !== this.ownedDevice) {
+    if (!status.available || !status.connected || !status.running || status.stopping || status.device_id !== this.ownedDevice) {
       throw new Error("Motor did not confirm the requested running state");
     }
     this.leaseDeadline = started + LEASE_MS;
@@ -184,7 +185,7 @@ export class MotorPanel {
         this.update(status);
         if (!this.ownedDevice) return;
         if (!this.opened || document.hidden || performance.now() >= this.leaseDeadline
-          || !status.available || !status.connected || !status.running || status.device_id !== this.ownedDevice) {
+          || !status.available || !status.connected || !status.running || status.stopping || status.device_id !== this.ownedDevice) {
           this.ownedDevice = null;
           this.revision += 1;
           this.update(await this.api.stopMotor());
@@ -248,7 +249,8 @@ export class MotorPanel {
     const stateText = this.error
       ?? (available ? status.error : null)
       ?? (status?.available === false ? "Motor backend disabled in LinkHub" : !status ? "Loading"
-        : running ? `ON - ${status.speed_percent}%${this.ownedDevice ? "" : " (another client)"}`
+        : status.available && status.stopping ? `STOPPING - ${status.speed_percent}%`
+        : running ? `ON - ${status.speed_percent}% -> ${status.target_speed_percent}%${this.ownedDevice ? "" : " (another client)"}`
         : connected ? `OFF - ${status.device}` : "Disconnected");
     if (this.state.textContent !== stateText) this.state.textContent = stateText;
     this.state.classList.toggle("error", Boolean(this.error || (available && status.error)));

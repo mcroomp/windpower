@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -11,7 +12,11 @@ use tokio::time::Instant;
 
 pub const NUS_SERVICE_UUID: &str = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 pub const NUS_RX_UUID: &str = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-const SAFE_STOP_COMMAND: &str = "S:0;E:0;B:1\n";
+const SAFE_STOP_COMMAND: &str = "S:0;E:0;B:0\n";
+const PROFILE_INTERVAL: Duration = Duration::from_millis(20);
+// A full-scale move has 1 s acceleration, 3 s cruise, and 1 s deceleration.
+const MAX_COMMAND_RATE: f64 = 25.0;
+const MAX_COMMAND_ACCELERATION: f64 = 25.0;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -89,6 +94,8 @@ pub struct MotorStatus {
     pub device_id: Option<String>,
     pub running: bool,
     pub speed_percent: u8,
+    pub target_speed_percent: u8,
+    pub stopping: bool,
     pub direction: MotorDirection,
     pub command_expires_in_ms: Option<u64>,
     pub error: Option<String>,
@@ -100,6 +107,10 @@ pub enum MotorError {
     InvalidConfiguration(&'static str),
     #[error("speed_percent must be in 1..100")]
     InvalidSpeed,
+    #[error("This motor supports forward direction only")]
+    InvalidDirection,
+    #[error("Motor is stopping; wait until it is off before starting again")]
+    Stopping,
     #[error("timeout_ms must be in 1..{maximum_ms}")]
     InvalidTimeout { maximum_ms: u64 },
     #[error("device_id must not be empty")]
@@ -134,6 +145,94 @@ pub trait MotorBackend: Send + 'static {
 }
 
 #[derive(Debug)]
+struct Segment {
+    seconds: f64,
+    acceleration: f64,
+}
+
+#[derive(Debug, Default)]
+struct MotionProfile {
+    position: f64,
+    velocity: f64,
+    target: u8,
+    segments: VecDeque<Segment>,
+}
+
+impl MotionProfile {
+    fn retarget(&mut self, target: u8) {
+        if target == self.target {
+            return;
+        }
+        self.target = target;
+        self.segments.clear();
+        let mut position = self.position;
+        let mut velocity = self.velocity;
+        let distance = f64::from(target) - position;
+        let stopping_distance = velocity * velocity / (2.0 * MAX_COMMAND_ACCELERATION);
+        // A nearby or opposite target cannot instantaneously reverse the ramp.
+        if velocity * distance < 0.0 || stopping_distance > distance.abs() {
+            self.push_segment(
+                velocity.abs() / MAX_COMMAND_ACCELERATION,
+                -velocity.signum() * MAX_COMMAND_ACCELERATION,
+            );
+            position += velocity * velocity.abs() / (2.0 * MAX_COMMAND_ACCELERATION);
+            velocity = 0.0;
+        }
+
+        let distance = f64::from(target) - position;
+        let direction = distance.signum();
+        let initial_rate = velocity * direction;
+        let peak_rate = (MAX_COMMAND_ACCELERATION * distance.abs()
+            + initial_rate * initial_rate / 2.0)
+            .sqrt()
+            .min(MAX_COMMAND_RATE);
+        self.push_segment(
+            (peak_rate - initial_rate) / MAX_COMMAND_ACCELERATION,
+            direction * MAX_COMMAND_ACCELERATION,
+        );
+        let cruise_distance = distance.abs()
+            - (2.0 * peak_rate * peak_rate - initial_rate * initial_rate)
+                / (2.0 * MAX_COMMAND_ACCELERATION);
+        if peak_rate > 0.0 {
+            self.push_segment(cruise_distance / peak_rate, 0.0);
+        }
+        self.push_segment(
+            peak_rate / MAX_COMMAND_ACCELERATION,
+            -direction * MAX_COMMAND_ACCELERATION,
+        );
+    }
+
+    fn push_segment(&mut self, seconds: f64, acceleration: f64) {
+        if seconds > 1e-9 {
+            self.segments.push_back(Segment {
+                seconds,
+                acceleration,
+            });
+        }
+    }
+
+    fn advance(&mut self, mut seconds: f64) {
+        while let Some(segment) = self.segments.front_mut() {
+            let step = seconds.min(segment.seconds);
+            self.position += self.velocity * step + segment.acceleration * step * step / 2.0;
+            self.velocity += segment.acceleration * step;
+            segment.seconds -= step;
+            seconds -= step;
+            if segment.seconds <= 1e-9 {
+                self.segments.pop_front();
+            }
+            if seconds <= 1e-9 {
+                break;
+            }
+        }
+        if self.segments.is_empty() {
+            self.position = f64::from(self.target);
+            self.velocity = 0.0;
+        }
+    }
+}
+
+#[derive(Debug)]
 struct State {
     connected: bool,
     device: Option<String>,
@@ -143,6 +242,11 @@ struct State {
     direction: MotorDirection,
     expires_at: Option<Instant>,
     error: Option<String>,
+    profile: MotionProfile,
+    stopping: bool,
+    stop_epoch: u64,
+    heartbeat_at: Instant,
+    profile_at: Instant,
 }
 
 impl Default for State {
@@ -156,6 +260,11 @@ impl Default for State {
             direction: MotorDirection::Forward,
             expires_at: None,
             error: None,
+            profile: MotionProfile::default(),
+            stopping: false,
+            stop_epoch: 0,
+            heartbeat_at: Instant::now(),
+            profile_at: Instant::now(),
         }
     }
 }
@@ -217,6 +326,9 @@ impl<B: MotorBackend> MotorController<B> {
 
     pub async fn connect(&self) -> Result<String, MotorError> {
         let _operation = self.inner.operation.lock().await;
+        if lock(&self.inner.state).connected {
+            self.disconnect().await?;
+        }
         self.connect_inner().await
     }
 
@@ -241,7 +353,7 @@ impl<B: MotorBackend> MotorController<B> {
             return Err(MotorError::InvalidDevice);
         }
         let _operation = self.inner.operation.lock().await;
-        self.disconnect(true).await?;
+        self.disconnect().await?;
         lock(&self.inner.state).device_id = Some(device_id);
         self.connect_inner().await
     }
@@ -290,6 +402,8 @@ impl<B: MotorBackend> MotorController<B> {
             device_id: state.device_id.clone(),
             running: state.running,
             speed_percent: state.speed_percent,
+            target_speed_percent: state.profile.target,
+            stopping: state.stopping,
             direction: state.direction,
             command_expires_in_ms: state.expires_at.map(|expires_at| {
                 let millis = expires_at
@@ -308,6 +422,13 @@ impl<B: MotorBackend> MotorController<B> {
         direction: MotorDirection,
         timeout_ms: u64,
     ) -> Result<(), MotorError> {
+        let epoch = {
+            let state = lock(&self.inner.state);
+            if state.stopping {
+                return Err(MotorError::Stopping);
+            }
+            state.stop_epoch
+        };
         let _operation = self.inner.operation.lock().await;
         if !(1..=100).contains(&speed_percent) {
             return Err(MotorError::InvalidSpeed);
@@ -317,15 +438,28 @@ impl<B: MotorBackend> MotorController<B> {
                 maximum_ms: self.inner.config.maximum_command_timeout_ms,
             });
         }
+        if direction != MotorDirection::Forward {
+            return Err(MotorError::InvalidDirection);
+        }
         if lock(&self.inner.state).device_id.as_deref() != Some(device_id) {
             return Err(MotorError::DeviceChanged);
         }
-
-        let command = format!("D:{};B:0;S:{speed_percent};E:1\n", direction.wire_value());
-        self.write(&command).await?;
         let mut state = lock(&self.inner.state);
+        if !state.connected {
+            return Err(MotorError::Disconnected);
+        }
+        if state.stop_epoch != epoch || state.stopping {
+            return Err(MotorError::Stopping);
+        }
+        if state
+            .expires_at
+            .is_some_and(|expiry| Instant::now() >= expiry)
+        {
+            begin_stop(&mut state);
+            return Err(MotorError::Stopping);
+        }
         state.running = true;
-        state.speed_percent = speed_percent;
+        state.profile.retarget(speed_percent);
         state.direction = direction;
         state.expires_at = Some(Instant::now() + Duration::from_millis(timeout_ms));
         state.error = None;
@@ -334,46 +468,38 @@ impl<B: MotorBackend> MotorController<B> {
 
     pub async fn stop(&self) -> Result<(), MotorError> {
         let _operation = self.inner.operation.lock().await;
-        self.write(SAFE_STOP_COMMAND).await?;
-        mark_stopped(&mut lock(&self.inner.state));
-        Ok(())
+        self.smooth_stop().await
     }
 
     pub async fn reconnect(&self) -> Result<String, MotorError> {
         let _operation = self.inner.operation.lock().await;
-        self.disconnect(true).await?;
+        self.disconnect().await?;
         self.connect_inner().await
     }
 
     pub async fn close(&self) -> Result<(), MotorError> {
         let _operation = self.inner.operation.lock().await;
-        self.disconnect(true).await
+        self.disconnect().await
     }
 
-    async fn write(&self, command: &str) -> Result<(), MotorError> {
+    async fn smooth_stop(&self) -> Result<(), MotorError> {
         if !lock(&self.inner.state).connected {
             return Err(MotorError::Disconnected);
         }
-        let result = self.inner.backend.lock().await.write(command).await;
-        if let Err(error) = result {
-            return self.record_error(error);
+        begin_stop(&mut lock(&self.inner.state));
+        while lock(&self.inner.state).running {
+            tokio::time::sleep(PROFILE_INTERVAL).await;
+            advance_motor(&self.inner, PROFILE_INTERVAL).await?;
         }
         Ok(())
     }
 
-    async fn disconnect(&self, safe_stop: bool) -> Result<(), MotorError> {
+    async fn disconnect(&self) -> Result<(), MotorError> {
+        if lock(&self.inner.state).connected {
+            self.smooth_stop().await?;
+        }
         self.stop_supervisor();
-        let connected = lock(&self.inner.state).connected;
-        let result = {
-            let mut backend = self.inner.backend.lock().await;
-            let stop_result = if safe_stop && connected {
-                backend.write(SAFE_STOP_COMMAND).await
-            } else {
-                Ok(())
-            };
-            let disconnect_result = backend.disconnect().await;
-            stop_result.and(disconnect_result)
-        };
+        let result = self.inner.backend.lock().await.disconnect().await;
         {
             let mut state = lock(&self.inner.state);
             state.connected = false;
@@ -386,10 +512,7 @@ impl<B: MotorBackend> MotorController<B> {
     }
 
     fn record_error<T>(&self, error: MotorError) -> Result<T, MotorError> {
-        let mut state = lock(&self.inner.state);
-        state.connected = false;
-        mark_stopped(&mut state);
-        state.error = Some(error.to_string());
+        record_motor_error(&self.inner, &error);
         Err(error)
     }
 
@@ -460,46 +583,102 @@ fn mark_stopped(state: &mut State) {
     state.running = false;
     state.speed_percent = 0;
     state.expires_at = None;
+    state.profile = MotionProfile::default();
+    state.stopping = false;
+}
+
+fn begin_stop(state: &mut State) {
+    if !state.stopping {
+        state.stop_epoch += 1;
+        state.stopping = true;
+        state.expires_at = None;
+        state.profile.retarget(0);
+    }
+    if !state.running {
+        state.stopping = false;
+    }
+}
+
+fn record_motor_error<B>(inner: &Inner<B>, error: &MotorError) {
+    let mut state = lock(&inner.state);
+    state.connected = false;
+    state.expires_at = None;
+    state.error = Some(error.to_string());
+    tracing::error!(%error, "Bluetooth motor state is unconfirmed");
+}
+
+async fn advance_motor<B: MotorBackend>(
+    inner: &Inner<B>,
+    step: Duration,
+) -> Result<(), MotorError> {
+    let (command, finished) = {
+        let mut state = lock(&inner.state);
+        if !state.connected {
+            return Err(MotorError::Disconnected);
+        }
+        if state
+            .expires_at
+            .is_some_and(|expiry| Instant::now() >= expiry)
+        {
+            begin_stop(&mut state);
+        }
+        if !state.running {
+            (None, false)
+        } else {
+            // Never catch up after a stalled task/link with a large command jump.
+            let now = Instant::now();
+            let elapsed = now.saturating_duration_since(state.profile_at).min(step);
+            state.profile_at = now;
+            state.profile.advance(elapsed.as_secs_f64());
+            let finished = state.stopping && state.profile.segments.is_empty();
+            let speed = state.profile.position.round().clamp(0.0, 100.0) as u8;
+            let command = if finished {
+                Some(SAFE_STOP_COMMAND.to_owned())
+            } else if speed != state.speed_percent {
+                Some(format!(
+                    "D:{};B:0;S:{speed};E:1\n",
+                    state.direction.wire_value()
+                ))
+            } else {
+                None
+            };
+            state.speed_percent = speed;
+            (command, finished)
+        }
+    };
+    let result = async {
+        let mut backend = inner.backend.lock().await;
+        if let Some(command) = command {
+            backend.write(&command).await?;
+        }
+        if Instant::now() >= lock(&inner.state).heartbeat_at {
+            backend.write("H\n").await?;
+            lock(&inner.state).heartbeat_at = Instant::now() + inner.config.heartbeat_interval;
+        }
+        Ok::<_, MotorError>(())
+    }
+    .await;
+    if let Err(error) = result {
+        record_motor_error(inner, &error);
+        return Err(error);
+    }
+    if finished {
+        mark_stopped(&mut lock(&inner.state));
+    }
+    Ok(())
 }
 
 async fn supervise<B: MotorBackend>(weak: Weak<Inner<B>>, interval: Duration) {
+    let step = PROFILE_INTERVAL.min(interval);
     loop {
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(step).await;
         let Some(inner) = weak.upgrade() else {
             return;
         };
         let _operation = inner.operation.lock().await;
 
-        let expired = {
-            let state = lock(&inner.state);
-            state.running
-                && state
-                    .expires_at
-                    .is_some_and(|expiry| Instant::now() >= expiry)
-        };
-        let mut backend = inner.backend.lock().await;
-        let result = async {
-            if expired {
-                backend.write(SAFE_STOP_COMMAND).await?;
-            }
-            backend.write("H\n").await
-        }
-        .await;
-        if result.is_err() {
-            let _ = backend.write(SAFE_STOP_COMMAND).await;
-        }
-        drop(backend);
-
-        let mut state = lock(&inner.state);
-        match result {
-            Ok(()) if expired => mark_stopped(&mut state),
-            Ok(()) => {}
-            Err(error) => {
-                state.connected = false;
-                mark_stopped(&mut state);
-                state.error = Some(error.to_string());
-                return;
-            }
+        if advance_motor(&inner, step).await.is_err() {
+            return;
         }
     }
 }
@@ -707,6 +886,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MockBackend {
         calls: Arc<Mutex<Vec<String>>>,
+        fail_writes: Arc<Mutex<bool>>,
     }
 
     impl MotorBackend for MockBackend {
@@ -737,6 +917,9 @@ mod tests {
 
         async fn write(&mut self, command: &str) -> Result<(), MotorError> {
             lock(&self.calls).push(command.to_owned());
+            if *lock(&self.fail_writes) {
+                return Err(MotorError::Backend("mock write failure".to_owned()));
+            }
             Ok(())
         }
 
@@ -763,18 +946,147 @@ mod tests {
         )
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn command_expiry_sends_safe_stop() {
-        let (motor, calls) = test_controller(Duration::from_millis(5), 100);
-        assert_eq!(motor.connect().await.unwrap(), "BLDC-mock");
+    async fn elapse(milliseconds: u64) {
+        tokio::task::yield_now().await;
+        for _ in 0..milliseconds / 20 {
+            tokio::time::advance(PROFILE_INTERVAL).await;
+            tokio::task::yield_now().await;
+        }
+    }
 
+    fn check_profile_step(profile: &mut MotionProfile) {
+        let position = profile.position;
+        let velocity = profile.velocity;
+        profile.advance(0.02);
+        assert!(
+            (-1e-8..=100.0 + 1e-8).contains(&profile.position),
+            "{profile:?}"
+        );
+        assert!(profile.velocity.abs() <= MAX_COMMAND_RATE + 1e-8);
+        assert!((profile.velocity - velocity).abs() <= MAX_COMMAND_ACCELERATION * 0.02 + 1e-8);
+        assert!((profile.position - position).abs() <= MAX_COMMAND_RATE * 0.02 + 1e-8);
+    }
+
+    #[test]
+    fn full_scale_profile_takes_five_seconds_in_both_directions() {
+        let mut profile = MotionProfile::default();
+        for target in [100, 0] {
+            profile.retarget(target);
+            for _ in 0..249 {
+                check_profile_step(&mut profile);
+                assert!(!profile.segments.is_empty());
+            }
+            check_profile_step(&mut profile);
+            assert!(profile.segments.is_empty());
+            assert_eq!(profile.position, f64::from(target));
+            assert_eq!(profile.velocity, 0.0);
+        }
+    }
+
+    #[test]
+    fn arbitrary_retargeting_preserves_command_and_rate_limits() {
+        let mut profile = MotionProfile::default();
+        let mut random = 17_u32;
+        for _ in 0..5_000 {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let position = profile.position;
+            let velocity = profile.velocity;
+            profile.retarget((random % 101) as u8);
+            assert_eq!(profile.position, position);
+            assert_eq!(profile.velocity, velocity);
+            for _ in 0..7 {
+                check_profile_step(&mut profile);
+            }
+        }
+        profile.retarget(0);
+        for _ in 0..350 {
+            check_profile_step(&mut profile);
+        }
+        assert_eq!(profile.position, 0.0);
+        assert!(profile.segments.is_empty());
+    }
+
+    #[test]
+    fn renewing_the_same_target_does_not_restart_the_profile() {
+        let mut profile = MotionProfile::default();
+        profile.retarget(100);
+        for _ in 0..250 {
+            profile.retarget(100);
+            check_profile_step(&mut profile);
+        }
+        assert_eq!(profile.position, 100.0);
+        assert!(profile.segments.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_targets_are_applied_gradually_and_renewals_preserve_progress() {
+        let (motor, calls) = test_controller(Duration::from_millis(500), 10_000);
+        motor.connect().await.unwrap();
         motor
-            .set_running("motor-1", 10, MotorDirection::Forward, 20)
+            .set_running("motor-1", 100, MotorDirection::Forward, 2_000)
             .await
             .unwrap();
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(19)).await;
-        tokio::task::yield_now().await;
+        assert_eq!(motor.status().speed_percent, 0);
+        assert_eq!(motor.status().target_speed_percent, 100);
+        assert!(!lock(&calls).iter().any(|call| call.starts_with("D:")));
+        for _ in 0..10 {
+            elapse(500).await;
+            motor
+                .set_running("motor-1", 100, MotorDirection::Forward, 2_000)
+                .await
+                .unwrap();
+        }
+        assert_eq!(motor.status().speed_percent, 100);
+        {
+            let calls = lock(&calls);
+            let speeds: Vec<u8> = calls
+                .iter()
+                .filter_map(|call| {
+                    call.strip_prefix("D:F;B:0;S:")?
+                        .strip_suffix(";E:1\n")?
+                        .parse()
+                        .ok()
+                })
+                .collect();
+            assert_eq!(speeds, (1..=100).collect::<Vec<_>>());
+        }
+        motor.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_lease_cannot_be_renewed_before_supervisor_notices_it() {
+        let (motor, _) = test_controller(Duration::from_millis(500), 10_000);
+        motor.connect().await.unwrap();
+        motor
+            .set_running("motor-1", 100, MotorDirection::Forward, 20)
+            .await
+            .unwrap();
+        // The supervisor has not been scheduled yet.
+        tokio::time::advance(Duration::from_millis(40)).await;
+        assert_eq!(
+            motor
+                .set_running("motor-1", 100, MotorDirection::Forward, 2_000)
+                .await,
+            Err(MotorError::Stopping)
+        );
+        assert_eq!(motor.status().target_speed_percent, 0);
+        motor.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn command_expiry_ramps_down_before_safe_stop() {
+        let (motor, calls) = test_controller(Duration::from_millis(500), 10_000);
+        assert_eq!(motor.connect().await.unwrap(), "BLDC-mock");
+        motor
+            .set_running("motor-1", 100, MotorDirection::Forward, 1_200)
+            .await
+            .unwrap();
+        elapse(1_180).await;
+        assert!(motor.status().running);
+        assert!(motor.status().speed_percent > 0);
+        elapse(40).await;
+        assert!(motor.status().stopping);
+        assert_eq!(motor.status().target_speed_percent, 0);
         assert!(motor.status().running);
         assert_eq!(
             lock(&calls)
@@ -783,10 +1095,13 @@ mod tests {
                 .count(),
             1
         );
-        tokio::time::advance(Duration::from_millis(6)).await;
-        tokio::task::yield_now().await;
-
-        assert!(lock(&calls).contains(&"D:F;B:0;S:10;E:1\n".to_owned()));
+        assert_eq!(
+            motor
+                .set_running("motor-1", 100, MotorDirection::Forward, 2_000)
+                .await,
+            Err(MotorError::Stopping)
+        );
+        elapse(6_000).await;
         assert!(
             lock(&calls)
                 .iter()
@@ -798,10 +1113,145 @@ mod tests {
         motor.close().await.unwrap();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_stop_is_completed_by_the_supervisor() {
+        let (motor, calls) = test_controller(Duration::from_millis(500), 10_000);
+        let motor = Arc::new(motor);
+        motor.connect().await.unwrap();
+        motor
+            .set_running("motor-1", 100, MotorDirection::Forward, 10_000)
+            .await
+            .unwrap();
+        elapse(5_000).await;
+        assert_eq!(motor.status().speed_percent, 100);
+        let stopping = {
+            let motor = motor.clone();
+            tokio::spawn(async move { motor.stop().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(motor.status().stopping);
+        stopping.abort();
+        assert!(stopping.await.unwrap_err().is_cancelled());
+        elapse(1_000).await;
+        assert!(motor.status().running);
+        assert!(motor.status().speed_percent < 100);
+        assert_eq!(
+            lock(&calls)
+                .iter()
+                .filter(|call| *call == SAFE_STOP_COMMAND)
+                .count(),
+            1
+        );
+        elapse(4_200).await;
+        assert!(!motor.status().running);
+        assert_eq!(motor.status().speed_percent, 0);
+        assert_eq!(
+            lock(&calls)
+                .iter()
+                .filter(|call| *call == SAFE_STOP_COMMAND)
+                .count(),
+            2
+        );
+        motor.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_stop_keeps_heartbeats_and_ramps_before_disabling_without_braking() {
+        let (motor, calls) = test_controller(Duration::from_millis(500), 10_000);
+        motor.connect().await.unwrap();
+        motor
+            .set_running("motor-1", 100, MotorDirection::Forward, 10_000)
+            .await
+            .unwrap();
+        elapse(5_000).await;
+        let before = lock(&calls).len();
+        let started = Instant::now();
+        motor.stop().await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(5));
+        let calls = lock(&calls);
+        assert_eq!(
+            calls.iter().filter(|call| *call == "S:0;E:0;B:0\n").count(),
+            2
+        );
+        assert!(calls.iter().all(|call| !call.contains("B:1")));
+        let stopping = &calls[before..];
+        assert!(stopping.iter().filter(|call| *call == "H\n").count() >= 9);
+        let speeds: Vec<u8> = stopping
+            .iter()
+            .filter_map(|call| {
+                call.strip_prefix("D:F;B:0;S:")?
+                    .strip_suffix(";E:1\n")?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        assert_eq!(speeds.first(), Some(&99));
+        assert_eq!(speeds.last(), Some(&0));
+        assert!(speeds.windows(2).all(|pair| pair[0] - pair[1] == 1));
+        assert_eq!(
+            stopping
+                .iter()
+                .filter(|call| *call == SAFE_STOP_COMMAND)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_supervisor_does_not_catch_up_with_a_large_jump() {
+        let (motor, _) = test_controller(Duration::from_millis(500), 10_000);
+        motor.connect().await.unwrap();
+        motor
+            .set_running("motor-1", 100, MotorDirection::Forward, 10_000)
+            .await
+            .unwrap();
+        elapse(1_000).await;
+        let operation = motor.inner.operation.lock().await;
+        let before = motor.status().speed_percent;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        drop(operation);
+        tokio::task::yield_now().await;
+        assert!(motor.status().speed_percent <= before + 1);
+        motor.close().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_ramp_write_reports_uncertainty_without_abrupt_brake() {
+        let backend = MockBackend::default();
+        let failures = backend.fail_writes.clone();
+        let calls = backend.calls.clone();
+        let motor = MotorController::with_backend(backend, MotorConfig::default()).unwrap();
+        motor.connect().await.unwrap();
+        motor
+            .set_running("motor-1", 100, MotorDirection::Forward, 10_000)
+            .await
+            .unwrap();
+        elapse(5_000).await;
+        *lock(&failures) = true;
+        assert!(motor.stop().await.is_err());
+        assert!(!motor.status().connected);
+        assert!(motor.status().running);
+        assert!(motor.status().error.unwrap().contains("mock write failure"));
+        assert_eq!(
+            lock(&calls)
+                .iter()
+                .filter(|call| *call == SAFE_STOP_COMMAND)
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn validates_commands_before_touching_backend() {
         let (motor, calls) = test_controller(Duration::from_secs(1), 10_000);
 
+        assert_eq!(
+            motor
+                .set_running("motor-1", 10, MotorDirection::Reverse, 1_000)
+                .await,
+            Err(MotorError::InvalidDirection)
+        );
         assert_eq!(
             motor
                 .set_running("motor-1", 0, MotorDirection::Forward, 1_000)
@@ -829,12 +1279,12 @@ mod tests {
         assert!(lock(&calls).is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stop_and_reconnect_are_safe() {
         let (motor, calls) = test_controller(Duration::from_secs(1), 10_000);
         motor.connect().await.unwrap();
         motor
-            .set_running("motor-1", 25, MotorDirection::Reverse, 1_000)
+            .set_running("motor-1", 25, MotorDirection::Forward, 1_000)
             .await
             .unwrap();
         assert_eq!(
@@ -845,8 +1295,10 @@ mod tests {
                 device: Some("BLDC-mock".to_owned()),
                 device_id: Some("motor-1".to_owned()),
                 running: true,
-                speed_percent: 25,
-                direction: MotorDirection::Reverse,
+                speed_percent: 0,
+                target_speed_percent: 25,
+                stopping: false,
+                direction: MotorDirection::Forward,
                 command_expires_in_ms: motor.status().command_expires_in_ms,
                 error: None,
             }
@@ -869,25 +1321,32 @@ mod tests {
                 .iter()
                 .filter(|call| *call == SAFE_STOP_COMMAND)
                 .count()
-                >= 4
+                >= 3
         );
         assert_eq!(calls.iter().filter(|call| *call == "disconnect").count(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn device_selection_stops_previous_motor_and_never_starts_selected_motor() {
         let (motor, calls) = test_controller(Duration::from_secs(1), 10_000);
         assert_eq!(motor.scan().await.unwrap()[0].id, "motor-1");
         motor.connect().await.unwrap();
         motor
-            .set_running("motor-1", 10, MotorDirection::Forward, 1_000)
+            .set_running("motor-1", 100, MotorDirection::Forward, 10_000)
             .await
             .unwrap();
+        elapse(5_000).await;
         assert_eq!(motor.scan().await, Err(MotorError::Running));
+        let started = Instant::now();
         motor.connect_device("motor-2".to_owned()).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(5));
         assert!(!motor.status().running);
         assert_eq!(motor.status().device_id.as_deref(), Some("motor-2"));
-        let calls = lock(&calls);
+        let calls: Vec<_> = lock(&calls)
+            .iter()
+            .filter(|call| *call != "H\n")
+            .cloned()
+            .collect();
         let selection = calls
             .iter()
             .position(|call| call == "connect:motor-2")
@@ -901,6 +1360,62 @@ mod tests {
                 SAFE_STOP_COMMAND.to_owned(),
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_and_close_wait_for_the_same_ramp() {
+        let (motor, calls) = test_controller(Duration::from_millis(500), 10_000);
+        motor.connect().await.unwrap();
+        for reconnect in [true, false] {
+            motor
+                .set_running("motor-1", 100, MotorDirection::Forward, 10_000)
+                .await
+                .unwrap();
+            elapse(5_000).await;
+            let started = Instant::now();
+            if reconnect {
+                motor.reconnect().await.unwrap();
+            } else {
+                motor.close().await.unwrap();
+            }
+            assert!(started.elapsed() >= Duration::from_secs(5));
+            assert!(!motor.status().running);
+            assert_eq!(motor.status().connected, reconnect);
+        }
+        let calls: Vec<_> = lock(&calls)
+            .iter()
+            .filter(|call| *call != "H\n")
+            .cloned()
+            .collect();
+        for (index, call) in calls.iter().enumerate() {
+            if call == "disconnect" {
+                assert_eq!(calls[index - 1], "S:0;E:0;B:0\n");
+                assert_eq!(calls[index - 2], "D:F;B:0;S:0;E:1\n");
+            }
+        }
+        assert!(calls.iter().all(|call| !call.contains("B:1")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_queued_before_stop_cannot_restart_the_motor_afterwards() {
+        let (motor, _) = test_controller(Duration::from_millis(500), 10_000);
+        let motor = Arc::new(motor);
+        motor.connect().await.unwrap();
+        let operation = motor.inner.operation.lock().await;
+        let pending = {
+            let motor = motor.clone();
+            tokio::spawn(async move {
+                motor
+                    .set_running("motor-1", 100, MotorDirection::Forward, 10_000)
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        begin_stop(&mut lock(&motor.inner.state));
+        drop(operation);
+        assert_eq!(pending.await.unwrap(), Err(MotorError::Stopping));
+        assert!(!motor.status().running);
+        motor.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -978,6 +1493,11 @@ mod tests {
             "device_id": "wrong", "speed_percent": 10, "direction": "forward", "timeout_ms": 2000
         })).await;
         assert_eq!(code, StatusCode::CONFLICT);
+        let (code, error) = call(&app, "PUT", "/v1/motor", json!({
+            "device_id": "motor-1", "speed_percent": 10, "direction": "reverse", "timeout_ms": 2000
+        })).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"], "invalid_motor_command");
         let (code, status) = call(&app, "PUT", "/v1/motor", json!({
             "device_id": "motor-1", "speed_percent": 10, "direction": "forward", "timeout_ms": 2000
         })).await;

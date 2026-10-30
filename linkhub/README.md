@@ -258,14 +258,18 @@ Routes come from `linkhub\src\http.rs`.
 
 `GET /v1/motor` returns `available: false` when the backend is disabled.
 When enabled, status includes `connected`, `device`, `device_id`, `running`,
-`speed_percent`, `direction`, `command_expires_in_ms`, and `error`.
+`speed_percent` (applied command), `target_speed_percent`, `stopping`, `direction`,
+`command_expires_in_ms`, and `error`. Command percentages are not measured RPM.
 `GET /v1/motor/devices` returns `{"devices": [{"id": "...", "name": "BLDC..."}]}`.
 `POST /v1/motor/connect` takes `{"device_id": "..."}`.
 `PUT /v1/motor` takes `{"device_id": "...", "speed_percent": 10,
 "direction": "forward", "timeout_ms": 2000}`; speed is `1..100`, direction is
-`forward` or `reverse`, and timeout must be positive and no greater than
+`forward` only (reverse is rejected), and timeout must be positive and no greater than
 `--motor-max-command-timeout-ms`. Device changes return HTTP 409.
 Use `POST /v1/motor/stop` to turn off, not a zero-speed running command.
+All targets and stop paths use the Rust-owned smooth profile, with a 5 s
+settled full-scale transition. Stop waits for ramp-down; cancelling the request
+does not cancel the ramp. Run commands during a stop return HTTP 409.
 See [motor lease semantics](../design/linkhub.md#bluetooth-bench-motor).
 
 ### Common query/body parameters
