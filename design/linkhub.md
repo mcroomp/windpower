@@ -177,8 +177,10 @@ shutdown all target zero through this profile. A stop cannot be interrupted by
 a running command; wait for off before explicitly restarting. Stop requests wait
 for profile completion, but cancelling their HTTP handler does not cancel the
 stop: the supervisor continues it. Heartbeats continue during ramp-down.
-The disable/brake command is sent only after the command profile reaches zero,
-not at the beginning of a stop. Status distinguishes applied `speed_percent`,
+The drive-disable command (`S:0;E:0;B:0`) is sent only after the command profile
+reaches zero, not at the beginning of a stop. Braking is disabled for both
+connection initialization and all stop paths, allowing residual rotation to coast.
+Status distinguishes applied `speed_percent`,
 `target_speed_percent`, and `stopping`; none is measured RPM.
 
 Lease expiry is checked on the profile tick, independently of the configured

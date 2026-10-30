@@ -12,7 +12,7 @@ use tokio::time::Instant;
 
 pub const NUS_SERVICE_UUID: &str = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 pub const NUS_RX_UUID: &str = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-const SAFE_STOP_COMMAND: &str = "S:0;E:0;B:1\n";
+const SAFE_STOP_COMMAND: &str = "S:0;E:0;B:0\n";
 const PROFILE_INTERVAL: Duration = Duration::from_millis(20);
 // A full-scale move has 1 s acceleration, 3 s cruise, and 1 s deceleration.
 const MAX_COMMAND_RATE: f64 = 25.0;
@@ -1156,7 +1156,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn explicit_stop_keeps_heartbeats_and_ramps_before_braking() {
+    async fn explicit_stop_keeps_heartbeats_and_ramps_before_disabling_without_braking() {
         let (motor, calls) = test_controller(Duration::from_millis(500), 10_000);
         motor.connect().await.unwrap();
         motor
@@ -1169,6 +1169,11 @@ mod tests {
         motor.stop().await.unwrap();
         assert!(started.elapsed() >= Duration::from_secs(5));
         let calls = lock(&calls);
+        assert_eq!(
+            calls.iter().filter(|call| *call == "S:0;E:0;B:0\n").count(),
+            2
+        );
+        assert!(calls.iter().all(|call| !call.contains("B:1")));
         let stopping = &calls[before..];
         assert!(stopping.iter().filter(|call| *call == "H\n").count() >= 9);
         let speeds: Vec<u8> = stopping
@@ -1384,10 +1389,11 @@ mod tests {
             .collect();
         for (index, call) in calls.iter().enumerate() {
             if call == "disconnect" {
-                assert_eq!(calls[index - 1], SAFE_STOP_COMMAND);
+                assert_eq!(calls[index - 1], "S:0;E:0;B:0\n");
                 assert_eq!(calls[index - 2], "D:F;B:0;S:0;E:1\n");
             }
         }
+        assert!(calls.iter().all(|call| !call.contains("B:1")));
     }
 
     #[tokio::test(start_paused = true)]
