@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rotor-camera"
+version = "0.1.0"
+description = "Local camera-based rotor marker tracking and measurement"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python>=4.10",
+    "pyside6>=6.8",
+    "pyqtgraph>=0.13.7",
+]
+
+[project.scripts]
+rotor-camera = "rotor_camera.app:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rotor_camera"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--confcutdir=tests"
+
+[tool.uv]
+managed = true
+
+[[tool.uv.index]]
+name = "microsoft-python"
+url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+default = true
