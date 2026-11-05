@@ -135,12 +135,12 @@ and run on the host Python environment, not in Docker.
 | `test_steady_flight_lua.py` | In-process `rawes.lua` steady flight from the same IC |
 | `test_steady_flight_ic_angle_only.py` | Minimal guided-angle steady-flight replay using IC attitude only |
 | `test_steady_flight_offplane.py` | Off-plane steady-flight boundedness from a rotated launch plane |
-| `test_pump_cycle_unified.py` | Python pumping-cycle controller plus governed winch |
-| `test_pump_cycle_lua.py` | Lua pumping-cycle mirror of the unified pumping test |
+| `test_pump_cycle_unified.py` | Python pumping-cycle controller plus coupled torque-driven winch |
+| `test_pump_cycle_lua.py` | Lua pumping-cycle mirror using the same coupled drum |
 | `test_landing.py` | Python landing prototype; currently skipped pending controller rework |
 | `test_landing_lua.py` | Lua landing prototype; currently skipped (Lua landing mode 4 is not implemented) |
 | `test_sensor_closed_loop.py` | Sensor consistency tests; the sustained closed-loop case is currently skipped for rotation-matrix drift |
-| `test_ground_liftoff.py` | Takeoff-to-steady transition scenario; currently marked skipped while behavior is investigated |
+| `test_ground_liftoff.py` | Bounded tensioned Lua takeoff to at least 50 m payout and established inclined steady-flight orientation |
 | `test_yaw_regulation_lua.py` | Closed-loop Lua yaw-trim observer against the torque plant |
 
 ### Shared simtest machinery
@@ -201,6 +201,47 @@ stores:
 
 `tests/common/mock_ardupilot.py` rate-gates telemetry with
 `_tel_every_from_env()`, which reads `RAWES_TEL_HZ` and defaults to `20 Hz`.
+
+### Takeoff scenario limits
+
+`test_ground_liftoff.py` is an enabled simulation regression, not a hardware
+takeoff procedure. It starts with a preloaded elastic tether and a pre-spun rotor,
+with the winch governed throughout launch: there is no slack/free-spool phase.
+The launch tension target is 100 N throughout, not a hard lower bound; a load
+around 50 N is acceptable. Both the winch and flight stack
+receive that command, not physics-truth measured tension. Actual slack (zero
+tension) and the tether breaking load are hard failures.
+
+The test stops immediately on slack, overload, ground contact, non-finite
+altitude/load, failure to lift off within 20 simulated seconds, or failure to
+reach the takeoff-to-steady transition within 60 simulated seconds. Tension
+limits include every physics substep, not just logged frames. It saves the
+exact terminal frame and stop reason before asserting failure.
+
+Takeoff requests a 50-degree downwind lean above the 2 m clearance height.
+Handoff requires at least 8 m payout, a steady body-axis target tilted at
+least 30 degrees, alignment within 8 degrees, and body rates at most
+0.5 rad/s. Success requires tracking the steady controller's
+inclined body-axis target (at least 30 degrees from down, within 5 degrees,
+body rates at most 0.5 rad/s) continuously for 0.2 seconds, with at least
+50 m of unstretched tether paid out. Short-tether alignment is not success.
+The commanded altitude follows a 25-degree tether elevation, with a 3 m
+minimum and length capped at 50 m for the altitude calculation. After liftoff
+the winch receives a 0.8 m/s payout cruise. It stops when both requirements
+hold; there is no 100 m payout requirement or post-success flight. Reaching
+50 m starts a 45-second orientation-settling deadline. The overall simulation
+bound is 150 seconds and the wall-clock timeout is 900 seconds. Progress
+telemetry is saved every 10 simulated seconds as well as at termination.
+
+The scenario explicitly selects `SpringDamperTether`, a straight elastic cable;
+other scenarios retain the default quasi-static cable. Preload uses the actual axle attachment
+distance, not hub-centre distance.
+
+The winch receives only the production cable-side command and anchor-end load-cell
+boundary. Its finite-inertia torque plant and the elastic tether are stepped
+together; physical assumptions are owned by [simulation.md](simulation.md#winch-and-ground-side-boundaries).
+Do not substitute hub-truth length tracking, a slack launch, or a constant-force
+tether to make the test pass.
 
 ## Telemetry schema change checklist
 

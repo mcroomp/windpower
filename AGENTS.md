@@ -294,8 +294,9 @@ still verified. See `design/sitl_testing.md` for the list.
 
 VS Code test discovery and its `runTests` integration are known broken in this
 workspace. Do not use them or spend task time diagnosing or repairing discovery.
-Run tests through the canonical CLI entry points below instead, with focused
-file selectors where appropriate. This does not waive test requirements: actual
+Run Python unit/simtests with `uv run python -m pytest` through the canonical
+CLI entry points below, with focused file selectors where appropriate.
+This does not waive test requirements: actual
 CLI runner, collection, or test failures still require diagnosis under the
 broken-tooling rule above.
 

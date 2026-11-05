@@ -22,8 +22,14 @@ _rawes_fns = {
     -- ── Pure geometry ───────────────────────────────────────────────────────
 
     bz_altitude_hold    = bz_altitude_hold,
+    takeoff_body_z = takeoff_body_z,
+    TAKEOFF_LEAN_MIN_ALT_M = TAKEOFF_LEAN_MIN_ALT_M,
+    TAKEOFF_LEAN_MAX_RAD = TAKEOFF_LEAN_MAX_RAD,
     wrap_pi              = wrap_pi,
     update_plane_azimuth = update_plane_azimuth,
+    crosswind_rate_cmd = crosswind_rate_cmd,
+    crosswind_body_rates = crosswind_body_rates,
+    send_guided_angle_rate_throttle = send_guided_angle_rate_throttle,
 
     -- ── Param / anchor ───────────────────────────────────────────────────────
 
@@ -100,6 +106,9 @@ _rawes_fns = {
 
     col_trim         = function() return _col_trim end,
     alt_i            = function() return _alt_i end,
+    thrust_trim      = function() return _thrust_trim end,
+    takeoff_alt_i    = function() return _to_alt_i end,
+    takeoff_thrust_trim = function() return _to_thrust_trim end,
 
     -- Latest diagnostics emitted via _diag_set / _diag_emit.
     -- Returns nil when a key has not been set yet.

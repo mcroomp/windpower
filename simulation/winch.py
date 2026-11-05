@@ -1,7 +1,11 @@
 """
-winch.py — Ground-station Winch Controller.
+winch.py — Simulation-side winch controllers and drum plant.
 
-Tension-controlled motion-profile design:
+TorqueWinchController is a finite-inertia drum stepped with the tether by
+PhysicsCore. GovernedWinchController is the speed-governed node stand-in.
+Their laws and physical assumptions are owned by design/simulation.md.
+
+WinchController tension-controlled motion-profile design:
 
   The caller sets a target length and a target tension at ~10 Hz.
   The winch runs a trapezoidal motion profile toward the target length.
@@ -29,6 +33,82 @@ Interface:
     set_target(length_m, tension_n)   10 Hz — from ground planner
     step(tension_measured, dt)        400 Hz
 """
+
+import math
+
+
+class TorqueWinchController:
+    """Finite-inertia drum driven by cable load against generator/motor torque.
+
+    Forces are referred to the cable: reflected_mass_kg = drum inertia / radius².
+    The torque demand is tension_target + speed_damping * (speed - cruise).
+    There is no kinematic speed clamp or prescribed cable length trajectory.
+    """
+
+    def __init__(
+        self, *, rest_length: float, reflected_mass_kg: float,
+        speed_damping_ns_m: float, min_length: float, max_length: float,
+    ) -> None:
+        if not all(math.isfinite(v) for v in (
+            rest_length, reflected_mass_kg, speed_damping_ns_m, min_length, max_length,
+        )):
+            raise ValueError("Winch plant parameters must be finite")
+        if reflected_mass_kg <= 0.0 or speed_damping_ns_m <= 0.0:
+            raise ValueError("Winch inertia and speed damping must be positive")
+        if not 0.0 < min_length <= rest_length <= max_length:
+            raise ValueError("Winch length must lie within positive drum limits")
+        self.rest_length = rest_length
+        self.reflected_mass_kg = reflected_mass_kg
+        self._damping = speed_damping_ns_m
+        self._min_length = min_length
+        self._max_length = max_length
+        self._speed = 0.0
+        self._cruise = 0.0
+        self._tension_target = 0.0
+        self._energy_out_j = 0.0
+        self._energy_in_j = 0.0
+
+    def set_command(self, cruise_v: float, tension_target: float) -> None:
+        if not math.isfinite(cruise_v) or not math.isfinite(tension_target) or tension_target < 0.0:
+            raise ValueError("Winch command must have finite speed and nonnegative tension")
+        self._cruise = cruise_v
+        self._tension_target = tension_target
+
+    def step(self, tension_measured: float, dt: float) -> None:
+        if not math.isfinite(tension_measured) or tension_measured < 0.0 or not math.isfinite(dt) or dt <= 0.0:
+            raise ValueError("Winch step requires nonnegative load and positive finite dt")
+        equilibrium_speed = self._cruise + (
+            tension_measured - self._tension_target
+        ) / self._damping
+        decay = math.exp(-self._damping * dt / self.reflected_mass_kg)
+        speed = equilibrium_speed + (self._speed - equilibrium_speed) * decay
+        displacement = 0.5 * (self._speed + speed) * dt
+        length = max(self._min_length, min(self._max_length, self.rest_length + displacement))
+        displacement = length - self.rest_length
+        self._speed = speed if self._min_length < length < self._max_length else 0.0
+        self.rest_length = length
+        work = tension_measured * displacement
+        self._energy_out_j += max(0.0, work)
+        self._energy_in_j += max(0.0, -work)
+
+    @property
+    def speed_ms(self) -> float:
+        return self._speed
+
+    @property
+    def energy_out_j(self) -> float:
+        return self._energy_out_j
+
+    @property
+    def energy_in_j(self) -> float:
+        return self._energy_in_j
+
+    @property
+    def net_energy_j(self) -> float:
+        return self._energy_out_j - self._energy_in_j
+
+    def log_fields(self) -> dict:
+        return {"winch_speed_ms": self._speed}
 
 
 class WinchController:

@@ -2,20 +2,19 @@
 test_pump_cycle_lua.py -- Lua pumping cycle, mirror of test_pump_cycle_unified.py.
 
 This drives rawes.lua (steady mode, in-process via lupa) with the SAME ground/winch
-harness as test_pump_cycle_unified.py: an inline 2-phase (reel_out/reel_in) state
-machine, a GovernedWinchController (tension-governed, jerk-limited), and a 300/100 N
+harness as test_pump_cycle_unified.py: a 2-phase (reel_out/reel_in) state
+machine, a TorqueWinchController coupled to the tether, and a 300/100 N
 per-phase tension target. The only difference from the unified test is that the
 kite-side controller is the real Lua flight code instead of the Python equivalent.
 
 Division of labour (mirrors real stack):
   Ground (Python, 10 Hz): inline reel_out/reel_in state machine; commands the
-                          GovernedWinchController and sends RAWES_ALT/RAWES_TEN/
+                          TorqueWinchController and sends RAWES_ALT/RAWES_TEN/
                           RAWES_SUB to Lua via GcsComms (send_message).
-  Winch  (400 Hz):        GovernedWinchController -- +/-V_CRUISE cruise with a
-                          proportional tension governor, acceleration- and
-                          jerk-limited for smooth motion.
+  Winch  (physics):      finite-inertia drum, stepped with the tether by
+                          PhysicsCore; +/-V_CRUISE sets the speed reference.
   AP     (Lua, 50 Hz):    rawes.lua steady mode -- altitude PID collective plus
-                          rate-only bz_altitude_hold cyclic. The kite derives the
+                          absolute-angle bz_altitude_hold cyclic. The kite derives the
                           downwind-plane azimuth from its own position (no truth-
                           wind oracle), per the AGENTS.md no-truth-wind invariant.
 """
@@ -30,7 +29,7 @@ import pytest
 pytestmark = [pytest.mark.simtest,
               pytest.mark.timeout(int(os.environ.get("RAWES_PUMP_TIMEOUT", "600")))]
 
-from simulation.winch import GovernedWinchController
+from simulation.winch import TorqueWinchController
 from simulation.winch_node import GovernedWinchNode, Anemometer
 from groundstation.winch_protocol import WinchCommand
 from tests.simtests.simtest_ic import load_ic
@@ -61,15 +60,10 @@ DELTA_L      = 12.0    # tether payout per cycle [m]
 V_CRUISE_OUT = 0.5     # nominal reel-out cruise velocity [m/s]
 V_CRUISE_IN  = 0.5     # nominal reel-in cruise speed [m/s] (applied as -V_CRUISE_IN)
 
-# Governor headroom: cruise is +/-0.5 m/s; the tension governor may push speed up
-# to these bounds to shed an over-tension transient (reel-out) or pull in slack
-# (reel-in). Keep above the cruise so the governor has authority.
-V_MAX_OUT    = 1.5     # max pay-out speed [m/s]
-V_MAX_IN     = 1.5     # max reel-in speed [m/s]
-KP_TENSION   = 4.0e-4  # governor gain [(m/s)/N] -- ~0.5 s tension settling
-ACCEL_MS2    = 2.0     # acceleration limit [m/s^2]
-JERK_MS3     = 10.0    # jerk limit [m/s^3] (S-curve smoothing)
-TENSION_TAU  = 0.08    # load-cell low-pass time constant [s]
+# Simulation assumptions shared with the takeoff drum, not measured hardware.
+DRUM_REFLECTED_MASS_KG = 0.2
+DRUM_SPEED_DAMPING_NS_M = 20.0
+DRUM_MAX_LENGTH_M = 200.0
 
 TENSION_IC       = 300.0   # IC equilibrium tension
 TENSION_REEL_OUT = TENSION_IC
@@ -103,29 +97,25 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     send_anchor_ned(sim, 0.0, 0.0, 0.0)
 
     # ── Physics ───────────────────────────────────────────────────────────────
-    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model)
     ic_alt = float(-_IC.pos[2])
 
-    # ── Winch node: hosts the fast GovernedWinchController loop + load cell + ──
-    # anemometer.  The planner reaches it ONLY through the cable boundary
+    # The planner reaches the winch ONLY through the cable boundary
     # node.exchange(WinchCommand) -> WinchTelemetry (targets down, sensed up).
-    gov = GovernedWinchController(
-        rest_length     = _IC.rest_length,
-        v_max_out       = V_MAX_OUT,
-        v_max_in        = V_MAX_IN,
-        kp_tension      = KP_TENSION,
-        accel_limit_ms2 = ACCEL_MS2,
-        jerk_limit_ms3  = JERK_MS3,
-        tension_tau_s   = TENSION_TAU,
-        min_length      = 2.0,
+    winch = TorqueWinchController(
+        rest_length=_IC.rest_length,
+        reflected_mass_kg=DRUM_REFLECTED_MASS_KG,
+        speed_damping_ns_m=DRUM_SPEED_DAMPING_NS_M,
+        min_length=2.0,
+        max_length=DRUM_MAX_LENGTH_M,
     )
-    node = GovernedWinchNode(gov, Anemometer())
+    node = GovernedWinchNode(winch, Anemometer())
+    runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model, winch=winch)
 
     # ── Ground -> Lua command channel (NAMED_VALUE_FLOAT) ─────────────────────
     comms = GcsComms(sim)
 
     lua = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
-    lua.winch = gov   # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()
+    lua.winch = winch   # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()
 
     events = BadEventLog()
 
@@ -146,7 +136,9 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         capture_settle_s = CAPTURE_SETTLE_S,
     )
 
-    cycle_net_start = [0.0] * N_CYCLES
+    cycle_net_start = 0.0
+    net_per_cycle = []
+    completed_cycles = 0
     phase_label     = "pre_capture_hold"
     captured        = False
 
@@ -203,9 +195,17 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
             comms.send(cmd, DT_PLANNER)
 
         # Telemetry label + per-cycle net-energy bookkeeping
-        if planner.phase != prev_phase and planner.phase == "reel-out":
-            idx = min(planner.cycle_count, N_CYCLES - 1)
-            cycle_net_start[idx] = gov.net_energy_j
+        if planner.cycle_count > completed_cycles:
+            net_per_cycle.append(winch.net_energy_j - cycle_net_start)
+            completed_cycles = planner.cycle_count
+        if planner.phase != prev_phase:
+            print(
+                f"t={t_sim:.2f}s {prev_phase}->{planner.phase} "
+                f"length={node.rest_length:.2f}m speed={winch.speed_ms:.2f}m/s",
+                flush=True,
+            )
+            if planner.phase == "reel-out":
+                cycle_net_start = winch.net_energy_j
         prev_phase = planner.phase
 
         if captured:
@@ -221,11 +221,8 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         if i % LUA_EVERY == 0:
             lua.tick(t_sim, runner, accel_ned=prev_accel_ned)
 
-        # ── Winch node fast loop 400 Hz ────────────────────────────
-        node.step(DT)
-
         # ── Inner physics step driven by GuidedAttitudeController ────────────
-        sr = lua.step(runner, DT, rest_length=node.rest_length)
+        sr = lua.step(runner, DT)
         prev_accel_ned = sr.get("accel_specific_world")
 
         # ── Safety events ─────────────────────────────────────────────────
@@ -237,21 +234,30 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
                           tension=runner.tension_now)
         if runner.hub_state["pos"][2] >= -FLOOR_ALT_M:
             events.record("floor_hit", t_sim, phase_label, altitude)
+            lua.log(runner, sr, force=True)
             break  # kite on ground — simulation over
 
         # ── Telemetry 20 Hz ───────────────────────────────────────────────
         lua.log(runner, sr)
+        if i % round(10.0 / DT) == 0:
+            print(
+                f"t={runner.t_sim:.1f}s phase={phase_label} "
+                f"alt={runner.altitude:.2f}m length={node.rest_length:.2f}m "
+                f"tension={runner.anchor_tension:.1f}N speed={winch.speed_ms:.2f}m/s",
+                flush=True,
+            )
+            lua.write_telemetry(log.log_dir / "telemetry.csv")
 
     # ── Results ───────────────────────────────────────────────────────────────
-    net_per_cycle = [gov.net_energy_j - cycle_net_start[k] for k in range(N_CYCLES)]
-    total_net     = gov.net_energy_j
+    total_net = winch.net_energy_j
 
     cycle_summary = "  ".join(
-        f"c{k+1}={net_per_cycle[k]:.0f}J" for k in range(N_CYCLES)
+        f"c{k+1}={energy:.0f}J" for k, energy in enumerate(net_per_cycle)
     )
     lua_msgs = sim.messages
     parts = [
         f"total_net={total_net:.0f}J",
+        f"completed_cycles={completed_cycles}/{N_CYCLES}",
         cycle_summary,
         f"t_end={t_sim:.1f}s",
         events.summary(),
@@ -266,6 +272,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
         t_end         = t_sim,
         net_per_cycle = net_per_cycle,
         total_net     = total_net,
+        completed_cycles = completed_cycles,
         events        = events,
         floor_hits    = events.count("floor_hit"),
         slack_events  = events.count("slack"),
@@ -300,7 +307,7 @@ def test_lua_pumping_constants():
 
 
 def test_lua_pumping_unified(simtest_log):
-    """3 pumping cycles with rawes.lua (steady mode) + GovernedWinchController.
+    """3 pumping cycles with rawes.lua (steady mode) + TorqueWinchController.
     Pass if no bad events (no tension spike, slack, or floor hit) -- mirrors
     test_pumping_unified."""
     r = _run_pumping(simtest_log)
@@ -308,6 +315,7 @@ def test_lua_pumping_unified(simtest_log):
     if r["events"]:
         failures.append(r["events"].summary())
     assert not failures, "\n  ".join(failures)
+    assert r["completed_cycles"] == N_CYCLES
 
 
 @pytest.mark.skip(reason="Dynamic-inflow comparison only; quasi_static is the default flight model")
@@ -318,3 +326,4 @@ def test_lua_pumping_unified_peters_he(simtest_log):
     if r["events"]:
         failures.append(r["events"].summary())
     assert not failures, "\n  ".join(failures)
+    assert r["completed_cycles"] == N_CYCLES

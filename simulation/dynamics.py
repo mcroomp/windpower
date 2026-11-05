@@ -63,6 +63,7 @@ class RigidBodyDynamics:
         self._reorth = int(reorth_interval)
         self._I_spin = float(I_spin)  # rotor spin inertia (separate DOF)
         self._z_floor = float(z_floor) if z_floor is not None else None
+        self._ground_contact = False
 
         I = np.asarray(I_body, dtype=float)
         self._I_b     = np.diag(I)
@@ -191,7 +192,11 @@ class RigidBodyDynamics:
 
         # Ground floor: prevent hub from falling through altitude floor.
         # In NED, Z increases downward, so the altitude floor is a maximum NED Z value.
-        if self._z_floor is not None and self._pos[2] > self._z_floor:
+        if self._z_floor is not None and (
+            self._pos[2] > self._z_floor
+            or (self._pos[2] == self._z_floor and self._vel[2] > 0.0)
+        ):
+            self._ground_contact = True
             self._pos[2] = self._z_floor
             if self._vel[2] > 0.0:   # downward velocity → zero
                 self._vel[2] = 0.0
@@ -209,6 +214,10 @@ class RigidBodyDynamics:
             "R":     self._R.copy(),
             "omega": self._omega.copy(),
         }
+
+    @property
+    def ground_contact(self) -> bool:
+        return self._ground_contact
 
     @property
     def state(self) -> dict:

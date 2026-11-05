@@ -159,6 +159,21 @@ The repo’s AP-equivalent closed loops live in `arduloop\` and
   kinematic aero mode.
 - The observable boundary exposed through `hub_observe()`.
 
+Spring-damper steps are subdivided to resolve the cable's natural frequency;
+the tether stiffness is not softened. Coupled torque-driven drums also
+subdivide quasi-static elastic-cable steps, using both hub mass and reflected
+drum inertia. Other quasi-static steps retain the caller timestep. Spring
+damping uses endpoint-relative extension rate minus payout speed, not absolute
+hub speed. The drum responds to the anchor-end load; the hub receives the
+distinct kite-end reaction through the current two-ended tether contract.
+
+Ground impact at the configured NED floor is terminal. `PhysicsCore.step()`
+returns the impact frame with `ground_contact=True`, stops any remaining
+substeps, and sets `terminated`. Any subsequent step raises an error rather
+than integrating a clamped body or allowing it to rebound. The mediator writes
+the impact event and final CSV row, then exits lockstep and closes its logs and
+connections. Simtest telemetry also retains impact frames between logging ticks.
+
 Rotor-spin inertia is resolved by `resolve_i_spin_kgm2()` in
 `simulation\rotor_physics.py`: an explicit `I_spin_kgm2` in the rotor definition
 wins; when it is null the value is derived from blade mass and the spinning
@@ -288,10 +303,28 @@ The ground/winch split is now explicit:
   (`WinchCommand`, `WinchTelemetry`).
 - `simulation\winch_node.py::GovernedWinchNode` is a stand-in for the
   fast local winch firmware that does not exist yet.
-- `simulation\winch.py` contains two helpers:
+- `simulation\winch.py` contains three helpers:
   - `WinchController`: target-length motion profile helper.
   - `GovernedWinchController`: tension-governed, jerk-limited velocity
     controller used by the node stand-in.
+  - `TorqueWinchController`: finite-inertia, torque-driven drum used for
+    tensioned launch and the Lua/Python pumping simtests. Cable load accelerates the drum against the commanded
+    generator/motor force plus viscous speed regulation. Its physical state is
+    stepped together with the elastic tether by `PhysicsCore`, not separately
+    by the caller. The node still receives only `WinchCommand` and exposes
+    `WinchTelemetry`.
+
+The takeoff and pumping scenarios use a representative 0.2 kg reflected drum mass
+(`J/r²`, e.g. 0.002 kg m² at 0.1 m radius) and 20 N s/m speed damping. These are
+explicit simulation assumptions, not measured hardware specifications. The
+drum is neither massless nor allowed to prescribe tether length from hub truth.
+The low reflected inertia lets the drum follow changing cable load without
+the slack-producing overshoot seen with the 2 kg launch assumption. Both
+inertias are covered by coupled equilibrium and timestep-convergence tests.
+Pumping retains the default quasi-static tether, a 300/100 N phase target,
+and +/-0.5 m/s cruise reference. Its drum length bounds are 2..200 m.
+Unlike the speed-governed stand-in, the torque drum has no speed,
+acceleration, or jerk clamp: actual motion follows the load/torque balance.
 
 For the node controller, the requested velocity is
 `cruise + kp_tension*(filtered_measured_tension - target_tension)`, then

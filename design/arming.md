@@ -339,6 +339,12 @@ and sets `SERVO1/2/3_TRIM` to the collective midpoint (rounded down).
   still disarmed. Any mismatch or partial write is reported as a failure
   (nothing is rolled back); reload and verify before continuing.
 
+The proposed midpoint must fit all three servo endpoint calibrations. Every
+batch result is checked for presence and the requested value, then all six
+values are independently read back. Mixer calibration is refreshed and
+validated before reporting success. This checks numeric consistency, not
+blade pitch or physical clearance.
+
 `tests/unit/test_collective_lua.py` checks the actual Lua mode, mapping,
 freshness/timeout boundaries, neutralization and arm/configuration rejection.
 `linkhub-ui/tests/collective.test.ts` checks the shared command and client

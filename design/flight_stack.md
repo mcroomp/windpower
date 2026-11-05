@@ -260,7 +260,7 @@ setpoints** (or ACRO RC overrides in modes 2 and 6), while ArduPilot owns the
 | 2 — ACRO manual | normalized `RAWES_RLL` / `RAWES_PIT` through ACRO flybar passthrough | normalized `RAWES_COL` through ACRO collective | manual bench / flight staging |
 | 3 — passive | Lua-captured AHRS quaternion anchor composed with relative `RAWES_ROFF` / `RAWES_POFF` / `RAWES_YOFF` offsets (§4.2b) | IC thrust via GUIDED throttle | armed-but-quiet kinematic release hold |
 | 4 — landing | reserved in the current script; no landing controller runs here yet | reserved | reserved |
-| 5 — takeoff | fixed level attitude (`roll=pitch=0`, current yaw) via GUIDED angle target | altitude-PID climb toward `RAWES_ALT` | vertical climb before handoff to steady |
+| 5 — takeoff | level below clearance, then bounded downwind lean at current yaw via GUIDED angle target | altitude-PID climb toward `RAWES_ALT` | wind-capture climb before handoff to steady |
 | 6 — collective | disarmed ACRO only; fresh bounded cyclic inputs, neutral yaw and low interlock | fresh `RAWES_COL` through ACRO collective; no GUIDED targets or yaw-trim observer | collective/cyclic bench calibration; [safety contract](arming.md#disarmed-collective-setup) |
 
 **Before the first valid position fix:**
@@ -318,6 +318,8 @@ the firmware (a custom message would need a custom firmware build).
 | RAWES_ARM | positive ms | Start/refresh a disarm countdown only if already armed. Ignored with a warning while disarmed; does not arm. |
 | RAWES_SUB | integer substate | Generic substate/diagnostic index. Current pumping uses `0=hold`, `1=reel-out`, `3=reel-in`; `2/4` remain reserved and `1` is also the landing final-drop value in `groundstation.rawes_modes`. |
 | RAWES_ALT | m | Altitude target: steady measures above the resolved anchor; takeoff measures above the EKF origin (§4.5). |
+| RAWES_LEAN | rad | Takeoff disk lean, bounded to 0..60 degrees and held level below 2 m altitude. |
+| RAWES_AZ | rad | Finite downwind bearing from the ground anemometer; required for a nonzero takeoff lean. |
 | RAWES_TEN | N | **Commanded** tether tension (the winch setpoint, broadcast to the AP). Feedforward into the orientation force balance in steady flight. Never the measured/load-cell tension. Ramped locally by RAWES_TRP. |
 | RAWES_ROFF | rad | Passive roll offset relative to the Lua-captured anchor (§4.2b). Latched; may be sent before or after ENTER_PASSIVE. |
 | RAWES_POFF | rad | Passive pitch offset relative to the Lua-captured anchor. |
@@ -467,14 +469,16 @@ Post-GPS, each 50 Hz step:
    native attitude + rate PID closes the cyclic loop at 400 Hz.
 4. **Altitude (feedback):** thrust from a 50 Hz PID on altitude error
    (`thrust = _thrust_trim + KP_ALT·alt_err + KI_ALT·∫alt_err − KD_VZ·vz`, integrator clamped,
-   vz-damping gain-scheduled down while body rates are high, slew-limited). `_thrust_trim`
+   vz-damping gain-scheduled down while roll/pitch rates are high, slew-limited). `_thrust_trim`
    warm-starts from the IC thrust (`RAWES_THR`). Output is the GUIDED throttle.
 
 All rate arguments are zero: steady has no separate position-feedback term.
 
-After capture, `POST_RELEASE_BLEND_S` blends current body-z toward the base
+After cold capture, `POST_RELEASE_BLEND_S` blends current body-z toward the base
 target, while `POST_RELEASE_RECOVERY_S` ramps altitude corrections from the
-IC thrust. Steady sends **current yaw** every flight tick, with zero yaw-rate
+IC thrust. A direct takeoff-to-steady handoff retains the geometric blend but
+preserves the live altitude-PID state instead of restarting collective recovery.
+Steady sends **current yaw** every flight tick, with zero yaw-rate
 input; it does not retain the fixed yaw anchor used by passive mode.
 
 **Collective ownership:** ground never sends collective directly. Lua sends GUIDED
@@ -518,13 +522,17 @@ logic; they are not a deployed Lua control law today.
 
 1. requires `GUIDED` / `GUIDED_NOGPS` plus healthy AHRS;
 2. before position is available, holds a level attitude with IC thrust;
-3. once position is available, holds `roll=pitch=0`, uses current yaw, and runs
-   an independent altitude integrator/thrust state toward `RAWES_ALT`, measuring
+3. once position is available, keeps the disk level below 2 m, then slews
+   toward `RAWES_LEAN` in the downwind direction specified by `RAWES_AZ`,
+   using current yaw and `RAWES_SLW` for the body-axis slew limit;
+4. runs an independent altitude integrator/thrust state toward `RAWES_ALT`, measuring
    altitude from the **EKF origin** rather than subtracting the anchor (and
    without steady's gyro-gated damping or recovery blend);
-4. does **not** perform anchor/elevation tracking or lateral position hold;
-5. relies on the ground station to switch `RAWES_MODE` to steady once the
-   desired climb / tether state has been reached.
+5. rejects lean outside 0..60 degrees and non-finite or missing required bearing;
+6. does **not** perform anchor/elevation tracking or lateral position hold;
+7. relies on the ground station to switch `RAWES_MODE` to steady once the
+   desired climb / tether state has been reached. Leaving takeoff clears the
+   lean and bearing commands so reentry cannot reuse them.
 
 ### 4.6 RAWES_ARM: Timed Disarm
 
@@ -700,8 +708,22 @@ files, not this prose page:
 ### 7.1 Takeoff
 
 The mode-5 behavior is defined once in §4.5. It is an implemented Lua law,
-not evidence that ground-to-flight takeoff has passed acceptance; the current
-liftoff simtest is skipped (see [testing.md](testing.md#current-scenario-files)).
+not evidence of hardware takeoff acceptance; the enabled liftoff simulation
+and its gates are described in [testing.md](testing.md#takeoff-scenario-limits).
+
+A direct takeoff-to-steady handoff preserves the live altitude PID trim,
+integral, and last thrust. It does not restart the cold-capture collective
+recovery blend; the geometric body-axis blend still applies. Cold steady
+capture retains its existing recovery behavior.
+
+The steady altitude controller gates vertical-velocity damping on body roll
+and pitch rates only: rotation about body_z does not tilt the disk and must
+not disable vertical damping. The crosswind math helpers use positive East rotation
+for positive North displacement/velocity, since thrust acts along -body_z.
+Its world-East rate is projected through the full body-to-NED attitude, not
+just yaw; they are not applied by the deployed steady angle-target path.
+Yaw control remains separate. Internal rates are radians/s and are
+converted once to degrees/s at the Guided angle-and-rate API boundary.
 
 ### 7.2 Landing
 

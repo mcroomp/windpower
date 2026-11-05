@@ -19,7 +19,7 @@ Callers own
 -----------
 - Trajectory planners (HoldPlanner, etc.)
 - Altitude-PID collective management (commanded tension is feedforward only)
-- WinchController / tether rest-length updates
+- Winch commands / prescribed tether rest-length updates
 - SITL interface and sensor building (mediator only)
 - Telemetry logging
 
@@ -32,6 +32,7 @@ Returns a result dict.
 from __future__ import annotations
 
 import numpy as np
+import math
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -40,8 +41,12 @@ import os
 
 from simulation.dynamics import RigidBodyDynamics
 from dynbem       import create_aero, RotorInputs, step_omega
-from simulation.tether import DEFAULT_TETHER_MODEL, Tether, TetherInputs, TetherResult, make_tether
+from simulation.tether import (
+    DEFAULT_TETHER_MODEL, SpringDamperTether, TallakQuasiStaticTether,
+    Tether, TetherInputs, TetherResult, make_tether,
+)
 from simulation.frames import cross3
+from simulation.winch import TorqueWinchController
 from simulation.rotor_physics import resolve_i_spin_kgm2
 from simulation.param_defaults import thrust_to_coll_rad as _t2c
 from simulation.torque_model import (
@@ -139,8 +144,10 @@ class PhysicsCore:
         tether_model: str = DEFAULT_TETHER_MODEL,
         anchor_ned: np.ndarray | None = None,
         tether_constant_tension_n: float = 300.0,
+        winch: TorqueWinchController | None = None,
     ):
         self._rotor              = rotor
+        self._winch = winch
         self._wind               = np.asarray(wind, dtype=float).copy()
         self._wind.flags.writeable = False
         self._base_k_ang         = float(base_k_ang)
@@ -197,6 +204,7 @@ class PhysicsCore:
                 constant_tension_n=tether_constant_tension_n,
             )
         self._t_sim      = 0.0
+        self._terminated = False
         self._damp_alpha = 0.0
 
         # Bootstrap tether tension from IC position
@@ -239,6 +247,11 @@ class PhysicsCore:
     @property
     def omega_spin(self) -> float:
         return self._omega_rad_s
+
+    @property
+    def terminated(self) -> bool:
+        """Ground contact is terminal; no subsequent physics step is permitted."""
+        return self._terminated
 
     @property
     def t_sim(self) -> float:
@@ -341,8 +354,52 @@ class PhysicsCore:
             pure damping-to-zero behavior exactly (no hub-motor ODE advance).
 
         """
-        return self._integrate(dt, collective_rad, tilt_lon, tilt_lat,
-                                rest_length, yaw_throttle, payout_rate_ms)
+        if self.terminated:
+            raise RuntimeError(f"Simulation terminated on ground contact at t={self._t_sim:.6f} s")
+        if self._winch is not None and (rest_length is not None or payout_rate_ms is not None):
+            raise ValueError("A coupled drum cannot also receive a prescribed rest length or payout rate")
+        if dt <= 0.0 or not math.isfinite(dt):
+            raise ValueError("Physics timestep must be positive and finite")
+        n_steps = 1
+        if isinstance(self._tether, SpringDamperTether) or (
+            self._winch is not None and isinstance(self._tether, TallakQuasiStaticTether)
+        ):
+            inputs = self._tether_inputs(0.0)
+            length = max(float(np.linalg.norm(
+                inputs.attachment_pos_ned - inputs.anchor_pos_ned,
+            )), 0.1)
+            inverse_mass = 1.0 / self._dyn.mass
+            if self._winch is not None:
+                inverse_mass += 1.0 / self._winch.reflected_mass_kg
+            omega_n = math.sqrt(self._tether.properties.axial_stiffness_n / length * inverse_mass)
+            # Resolve the elastic mode without changing the tether stiffness.
+            n_steps = max(1, math.ceil(dt * omega_n / 0.075))
+        start_length = self.rest_length
+        length_rate = 0.0 if rest_length is None else (rest_length - start_length) / dt
+        sub_dt = dt / n_steps
+        tension_min = math.inf
+        tension_max = -math.inf
+        for i in range(n_steps):
+            if self._winch is not None:
+                self._winch.step(self.anchor_tension, sub_dt)
+                step_length = self._winch.rest_length
+                step_rate = (step_length - self.rest_length) / sub_dt
+            else:
+                step_length = start_length + length_rate * (i + 1) * sub_dt
+                step_rate = length_rate if payout_rate_ms is None else payout_rate_ms
+            result = self._integrate(
+                sub_dt, collective_rad, tilt_lon, tilt_lat,
+                step_length, yaw_throttle, payout_rate_ms=step_rate,
+            )
+            if not math.isfinite(self.tension_now):
+                raise RuntimeError(f"Non-finite tether tension at t={self._t_sim:.6f} s")
+            tension_min = min(tension_min, self.tension_now)
+            tension_max = max(tension_max, self.tension_now)
+            if self.terminated:
+                break
+        result["tension_min"] = tension_min
+        result["tension_max"] = tension_max
+        return result
 
     def warm_inflow(self, collective_rad: float, n_steps: int = 500,
                     dt: float = 1e-3) -> None:
@@ -553,6 +610,7 @@ class PhysicsCore:
             F_net   = result.F_world + tf
             new_hub = self._dyn.step(F_net, M_net, dt,
                                      omega_spin=self._omega_rad_s)
+            self._terminated = self._dyn.ground_contact
 
         # Kinematic state override — applied post-dynamics so t_sim is pre-advance
         if self._kinematic is not None and not (kin_active and self._kinematic_aero_mode == "nul"):
@@ -573,6 +631,7 @@ class PhysicsCore:
             "tilt_lat":     tilt_lat,
             "damp_alpha":   self._damp_alpha,
             "is_kinematic": kin_active,
+            "ground_contact": self.terminated,
             # Specific force in NED world frame: (F_aero + F_tether) / mass.
             # Gravity is excluded — this is what the IMU accelerometer measures.
             # Body frame: accel_body = R.T @ accel_specific_world

@@ -31,7 +31,7 @@ No hub altitude / position / attitude ever crosses the cable boundary.
 
 import numpy as np
 
-from simulation.winch import GovernedWinchController
+from simulation.winch import GovernedWinchController, TorqueWinchController
 from groundstation.winch_protocol import WinchCommand, WinchTelemetry
 
 
@@ -101,11 +101,14 @@ class GovernedWinchNode:
     Physics side (mediator / simulation only -- NOT the protocol)
     -------------------------------------------------------------
     update_sensors(T, w) feed load-cell tension and ambient wind into the node
-    step(dt)             advance the fast governing loop one physics tick
+    step(dt)             advance a speed-governed winch one physics tick
     rest_length          drum encoder, supplies deployed length to physics
+
+    With TorqueWinchController, PhysicsCore advances the drum and tether
+    together. Do not also call node.step() for that coupled plant.
     """
 
-    def __init__(self, winch: GovernedWinchController,
+    def __init__(self, winch: GovernedWinchController | TorqueWinchController,
                  anemometer: "Anemometer | None" = None):
         self._winch      = winch
         self._anemometer = anemometer
@@ -117,7 +120,7 @@ class GovernedWinchNode:
     def update_sensors(self, tension_n: float, wind_world_ned=None) -> None:
         """Feed the load-cell reading and ambient wind into the node.
 
-        Called at the physics rate before step().  tension_n is the tether
+        Called at the physics rate. tension_n is the tether
         load-cell reading [N]; wind_world_ned is the true ambient wind [NED]
         sampled by the co-located anemometer (optional).
         """

@@ -147,7 +147,7 @@ MODE_STEADY  = 1
 MODE_ACRO_MANUAL = 2
 MODE_PASSIVE = 3   -- kinematic capture helper: hold the IC attitude stable during release.
 MODE_LANDING = 4   -- reserved; not implemented here
-MODE_TAKEOFF = 5   -- fixed level attitude + altitude-PID climb; see run_takeoff().
+MODE_TAKEOFF = 5   -- altitude-PID climb with bounded wind-capture lean; see run_takeoff().
 MODE_COLLECTIVE = 6
 local _collective_value = nil
 local _collective_seen_ms = nil
@@ -254,12 +254,16 @@ _to_initialized = false   -- true once first GPS/position fix received
 _to_alt_i       = 0.0     -- altitude-PID integrator [thrust units]
 _to_last_thrust = 0.0     -- slew-limited thrust command [0..1]
 _to_thrust_trim = 0.0     -- IC thrust captured on first fix [0..1]
+_to_bz_goal     = nil
+_capture_from_takeoff = false
+local TAKEOFF_LEAN_MIN_ALT_M = 2.0
+local TAKEOFF_LEAN_MAX_RAD = math.rad(60.0)
 
 -- Altitude hold state
 _el_initialized = false   -- true once first GPS fix with tlen >= MIN_TETHER_M
 _el_rad         = 0.0     -- current rate-limited elevation angle [rad]
 _target_alt     = 0.0     -- target altitude [m]; updated from RAWES_ALT
-_target_alt_cmd = nil     -- physics-truth altitude from ground RAWES_ALT; persists across mode clears
+_target_alt_cmd = nil     -- commanded altitude from ground RAWES_ALT; persists across mode clears
 _tension_n      = 200.0   -- ramped tension feedforward [N]; smoothed output used in bz_altitude_hold
 _tension_cmd_n  = 200.0   -- step-change tension commanded by ground via RAWES_TEN
 _az_ref         = 0.0     -- plane-keeping azimuth estimate [rad] (low-pass of position azimuth)
@@ -422,7 +426,7 @@ local function send_guided_angle_rate_throttle(roll_deg, pitch_deg, yaw_deg, rol
     end
     return vehicle:set_target_angle_and_rate_and_throttle(
         roll_deg, pitch_deg, yaw_deg,
-        rr, pr, yr,
+        math.deg(rr), math.deg(pr), math.deg(yr),
         throttle)
 end
 
@@ -451,6 +455,14 @@ local function bz_altitude_hold(pos, el_rad, tension_n, az_ref)
     return r
 end
 
+local function takeoff_body_z(lean_rad, downwind_azimuth_rad)
+    local bz = Vector3f()
+    bz:x(-math.sin(lean_rad) * math.cos(downwind_azimuth_rad))
+    bz:y(-math.sin(lean_rad) * math.sin(downwind_azimuth_rad))
+    bz:z(math.cos(lean_rad))
+    return bz
+end
+
 -- Wrap an angle to (-pi, pi].
 local function wrap_pi(a)
     return math.atan(math.sin(a), math.cos(a))
@@ -475,6 +487,21 @@ local function update_plane_azimuth(az_ref, pos, tau_s, dt)
     local az_meas = math.atan(pos:y(), pos:x())
     local alpha   = dt / tau_s
     return wrap_pi(az_ref + alpha * wrap_pi(az_meas - az_ref))
+end
+
+local function crosswind_rate_cmd(pos_north, vel_north, kp, kd, rate_max)
+    -- Thrust is along -body_z: tilt North to correct a North excursion.
+    return math.max(-rate_max, math.min(rate_max, kp * pos_north + kd * vel_north))
+end
+
+local function crosswind_body_rates(omega_east)
+    local bx = Vector3f()
+    bx:x(1.0); bx:y(0.0); bx:z(0.0)
+    local by = Vector3f()
+    by:x(0.0); by:y(1.0); by:z(0.0)
+    local bx_world = ahrs:body_to_earth(bx)
+    local by_world = ahrs:body_to_earth(by)
+    return omega_east * bx_world:y(), omega_east * by_world:y()
 end
 
 local function blend_bz(bz_now, bz_goal, alpha)
@@ -738,6 +765,11 @@ end
 -- ── Mode-entry reset ─────────────────────────────────────────────────────────
 
 local function _on_mode_enter(mode)
+    _capture_from_takeoff = mode == MODE_STEADY and _prev_mode == MODE_TAKEOFF
+    if _prev_mode == MODE_TAKEOFF and mode ~= MODE_TAKEOFF then
+        _nv_floats["RAWES_LEAN"] = nil
+        _nv_floats["RAWES_AZ"] = nil
+    end
     if mode == MODE_COLLECTIVE or _prev_mode == MODE_COLLECTIVE then
         _collective_value = nil
         _collective_seen_ms = nil
@@ -783,7 +815,8 @@ local function _on_mode_enter(mode)
         _to_alt_i       = 0.0
         _to_last_thrust = 0.0
         _to_thrust_trim = 0.0
-        gcs:send_text(6, "RAWES takeoff: level climb start")
+        _to_bz_goal = nil
+        gcs:send_text(6, "RAWES takeoff: climb and wind-capture start")
     end
     if mode == MODE_PASSIVE then
         _passive_status_ms    = 0
@@ -864,7 +897,7 @@ local function run_flight()
             local tlen = math.sqrt(rx*rx + ry*ry + rz*rz)
             if tlen >= MIN_TETHER_M then
                 _el_rad       = math.asin(math.max(-1.0, math.min(1.0, -rz / math.max(tlen, 0.1))))
-                -- Use physics-truth altitude if ground provided it via RAWES_ALT;
+                -- Use the commanded altitude if ground provided it via RAWES_ALT;
                 -- otherwise fall back to EKF position (which may have a vertical bias).
                 _target_alt   = _target_alt_cmd or _nv_floats["RAWES_ALT"] or (-rz)
                 local thr_ff  = math.max(0.0, math.min(1.0, ic_thrust_or_default()))
@@ -872,6 +905,11 @@ local function run_flight()
                 _thrust_trim  = thr_ff
                 _last_thrust  = thr_ff
                 _alt_i        = 0.0
+                if _capture_from_takeoff and _to_initialized then
+                    _thrust_trim = _to_thrust_trim
+                    _last_thrust = _to_last_thrust
+                    _alt_i = _to_alt_i
+                end
                 _az_ref         = math.atan(ry, rx)
                 _az_initialized = true
                 _el_initialized = true
@@ -958,6 +996,9 @@ local function run_flight()
         if recovery_alpha < 0.0 then recovery_alpha = 0.0 end
         if recovery_alpha > 1.0 then recovery_alpha = 1.0 end
     end
+    -- A live takeoff handoff already has an active altitude controller.
+    -- Preserve its state instead of blending back to a frozen thrust seed.
+    if _capture_from_takeoff then recovery_alpha = 1.0 end
     local yaw_now = ahrs:get_yaw_rad()
     local roll_deg, pitch_deg = bz_ned_to_roll_pitch(bz_goal, yaw_now)
 
@@ -987,13 +1028,12 @@ local function run_flight()
     local i_max = 1.0 - _thrust_trim
     if _alt_i < i_min then _alt_i = i_min end
     if _alt_i > i_max then _alt_i = i_max end
-    -- Rate-stability gate: fade the vz-damping term while body rates are high.
+    -- Only disk-tilt rates affect vertical damping, not spin about body_z.
     local vz_gate = 1.0
     local gyro_b = ahrs:get_gyro()
     if gyro_b then
         local rate_mag = math.sqrt(gyro_b:x()*gyro_b:x()
-                                 + gyro_b:y()*gyro_b:y()
-                                 + gyro_b:z()*gyro_b:z())
+                                 + gyro_b:y()*gyro_b:y())
         vz_gate = 1.0 - rate_mag / VZ_GATE_RATE_RADS
         if vz_gate < VZ_GATE_MIN then vz_gate = VZ_GATE_MIN end
         if vz_gate > 1.0 then vz_gate = 1.0 end
@@ -1070,14 +1110,10 @@ local function run_flight()
 end
 
 -- ── Takeoff subsystem (MODE_TAKEOFF) ─────────────────────────────────────────
--- Holds a fixed level attitude (body_z = [0,0,1] NED -> roll=pitch=0, thrust
--- straight up) and climbs toward RAWES_ALT via the same altitude-PID
--- collective loop as run_flight, but with no anchor/elevation tracking and no
--- lateral position hold -- drifting downwind during the vertical climb is
--- expected and not corrected.  The ground station is responsible for
--- switching RAWES_MODE to MODE_STEADY (and re-tensioning the winch) once the
--- hub reaches whatever minimum height it has chosen; this mode only executes
--- the climb, it never transitions itself.
+-- Ground requests a bounded wind-capture lean and measured downwind bearing.
+-- Below clearance height the disk stays level; above it the target slews
+-- toward that lean while the altitude PID holds RAWES_ALT. Ground switches to
+-- steady when the actual tether geometry supports the inclined flight attitude.
 local function run_takeoff()
     local mode = vehicle:get_mode()
     if mode ~= GUIDED_MODE_NUM and mode ~= 20 then return end
@@ -1089,6 +1125,7 @@ local function run_takeoff()
     local dt      = FLIGHT_PERIOD_MS * 0.001
     local pos_ned = ahrs:get_relative_position_NED_origin()
     if not pos_ned then
+        _to_bz_goal = nil
         -- No position fix yet -- hold level attitude at IC thrust; the
         -- altitude PID cannot run without a position fix.
         send_guided_angle_rate_throttle(0.0, 0.0, math.deg(yaw_now),
@@ -1104,10 +1141,24 @@ local function run_takeoff()
         gcs:send_text(6, string.format("RAWES takeoff: capture thr=%.3f", _to_thrust_trim))
     end
 
-    -- Altitude relative to the EKF origin (no anchor subtraction -- takeoff
-    -- starts at/near the anchor, and elevation geometry is irrelevant while
-    -- the disk is held level).
+    -- Takeoff starts at the anchor/EKF origin.
     local alt_m = -pos_ned:z()
+    local lean = _nv_floats["RAWES_LEAN"] or 0.0
+    local az = _nv_floats["RAWES_AZ"]
+    if lean ~= lean or lean < 0.0 or lean > TAKEOFF_LEAN_MAX_RAD
+       or (az ~= nil and (az ~= az or math.abs(az) == math.huge))
+       or (lean > 0.0 and az == nil) then
+        gcs:send_text(3, "RAWES takeoff: invalid lean or missing/non-finite downwind bearing")
+        return
+    end
+    if alt_m < TAKEOFF_LEAN_MIN_ALT_M then lean = 0.0 end
+    local requested_bz = takeoff_body_z(lean, az or 0.0)
+    if _to_bz_goal == nil then _to_bz_goal = takeoff_body_z(0.0, 0.0) end
+    local angle = math.rad(angle_between_deg(_to_bz_goal, requested_bz))
+    local alpha = 1.0
+    if angle > 1.0e-6 then alpha = math.min(1.0, _bz_slew * dt / angle) end
+    _to_bz_goal = blend_bz(_to_bz_goal, requested_bz, alpha)
+    local roll_deg, pitch_deg = bz_ned_to_roll_pitch(_to_bz_goal, yaw_now)
     local vz_up = 0.0
     local vel_ned = ahrs:get_velocity_NED()
     if vel_ned then vz_up = -vel_ned:z() end
@@ -1130,17 +1181,17 @@ local function run_takeoff()
     if thrust_delta < -THRUST_SLEW_MAX then thrust_delta = -THRUST_SLEW_MAX end
     _to_last_thrust = _to_last_thrust + thrust_delta
 
-    send_guided_angle_rate_throttle(0.0, 0.0, math.deg(yaw_now),
+    send_guided_angle_rate_throttle(roll_deg, pitch_deg, math.deg(yaw_now),
         0.0, 0.0, 0.0, _to_last_thrust, "takeoff_climb")
 
     _diag_set("OL_AP", alt_p)
     _diag_set("OL_AI", _to_alt_i)
     _diag_set("OL_AD", alt_d)
     _diag_set("OL_COL", _to_last_thrust)
-    _diag_set("OL_EL", 0.0)   -- MODE_TAKEOFF holds a level disk; no elevation geometry tracked
-    _diag_set("BZG_N", 0.0)   -- MODE_TAKEOFF has no body_z_eq goal (level-disk climb, no tension geometry)
-    _diag_set("BZG_E", 0.0)
-    _diag_set("BZG_D", 0.0)
+    _diag_set("OL_EL", 0.0)
+    _diag_set("BZG_N", _to_bz_goal:x())
+    _diag_set("BZG_E", _to_bz_goal:y())
+    _diag_set("BZG_D", _to_bz_goal:z())
 
     if _diag % 250 == 1 then
         gcs:send_text(6, string.format(
