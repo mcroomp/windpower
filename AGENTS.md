@@ -220,6 +220,8 @@ still verified. See `design/sitl_testing.md` for the list.
 
 ## Workflow Rules
 
+- Do not add `Co-authored-by` trailers or co-author attribution comments to
+  commit messages, pull request descriptions, or pull request comments.
 - **Critical — do not bypass broken tooling.** If a required build, test runner,
   language server, MCP query, or other project tool does not work as expected,
   stop the task and diagnose the tool failure first. Do not substitute a weaker

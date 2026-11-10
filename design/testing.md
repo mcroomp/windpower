@@ -71,6 +71,7 @@ targeting Python 3.14. It does not impose a formatter gate.
 ```powershell
 uv run ruff check .
 uv run ruff check . --fix   # safe fixes only; review changes before committing
+uv run python -m pytest tests/lint --run-lint -m lint -v
 ```
 
 Archived code, scratch files, and generated run logs are excluded. Protocol
@@ -82,13 +83,19 @@ handles whose ownership spans multiple calls.
 builds if Ruff or Pyright fails. CI's lint job gates both Python tests and the stack image
 build. Docker `build` and `build-lite` commands lint a read-only mount of the
 repository with the image's Python, Ruff, and Pyright before reporting success, including
-cache-hit builds. `tests/conftest.py` also runs both checks with the test interpreter before every
-pytest session (including collection-only invocations and Docker stack workers).
-Lint/type errors, warnings, or missing tools stop the session explicitly.
+cache-hit builds.
+
+Ruff and Pyright are tests under `tests/lint/`, marked `lint` and skipped by
+default. Pass `--run-lint` to enable them; `-m lint` alone does not enable them.
+CI's dedicated lint job explicitly runs this category and gates downstream jobs.
+Ordinary unit/simtest sessions, collection-only invocations, and Docker stack
+workers do not launch static checks. The stack runner's pre-worker build check
+still validates the image/source combination once before starting workers.
+Lint/type errors, warnings, or missing tools fail the enabled lint tests.
 
 For standalone type diagnostics, install development dependencies and the simulation
 extra (`uv sync --dev --extra simulation`), then run `uv run pyright --warnings`.
-The basic-mode configuration in `pyrightconfig.json` gates builds, CI, and tests;
+The basic-mode configuration in `pyrightconfig.json` gates builds, CI, and opt-in lint tests;
 it has no baseline error allowance. Gates pass the active interpreter explicitly
 so Docker checks never resolve packages from a mounted Windows virtual environment.
 Simulation dependencies
@@ -105,6 +112,7 @@ do not synchronize `tests/unit/`.
 | Setting | Current value |
 |---|---|
 | Global pytest timeout | `600` seconds |
+| `lint` marker | repository-wide Ruff/Pyright checks; skipped unless `--run-lint` is passed |
 | `simtest` marker | full physics simulation |
 | `sitl` marker | Docker-backed ArduPilot SITL test |
 | `expensive` marker | loop-heavy unit test that is useful to exclude during quick local runs |
