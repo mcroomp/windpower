@@ -86,7 +86,7 @@ try:
     pv.set_plot_theme("document")
     pv.global_theme.notebook = False
 except ImportError:
-    print("PyVista not found.  Install with:  pip install pyvista")
+    print("PyVista not found. Run: uv sync --dev --extra simulation")
     sys.exit(1)
 
 # Suppress VTK/PyVista debug and warning messages

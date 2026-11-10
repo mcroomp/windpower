@@ -30,6 +30,10 @@ simulation = [
     "pyvista",
     "scipy",
 ]
+sitl = [
+    "empy==3.3.4",
+    "pexpect",
+]
 
 [dependency-groups]
 dev = [

@@ -27,7 +27,7 @@ from pathlib import Path
 try:
     import pyvista as pv
 except ImportError:
-    sys.exit("PyVista not found.  pip install pyvista")
+    sys.exit("PyVista not found. Run: uv sync --dev --extra simulation")
 
 from viz3d.telemetry import CSVSource
 from viz3d.visualize_3d import RAWESVisualizer, fit_camera

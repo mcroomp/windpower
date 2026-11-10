@@ -8,8 +8,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
         scripts/docker_image_hash.sh \
         .node-version \
         simulation/Dockerfile \
-        simulation/requirements.txt \
-        simulation/requirements-docker.txt \
+        .python-version \
+        pyproject.toml \
+        uv.lock \
+        linkhub_client/pyproject.toml \
         linkhub/Cargo.toml \
         linkhub/Cargo.lock
     do

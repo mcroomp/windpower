@@ -3,7 +3,7 @@
 run_tests.py — pytest wrapper with streaming output and filtering.
 
 Usage:
-    python simulation/run_tests.py [--filter all|summary|failures]
+    uv run python simulation/run_tests.py [--filter all|summary|failures]
                                    [--summary FILE] [pytest args...]
 
 Filter modes:
@@ -19,12 +19,11 @@ Per-test physics logs (telemetry.csv, mediator.log, etc.) go in
 simulation/logs/{test_name}/ and are written by each test fixture.
 
 Examples:
-    python simulation/run_tests.py tests/unit -m "not simtest" -q
-    python simulation/run_tests.py --filter failures tests/unit -v
-    python simulation/run_tests.py tests/unit -k test_aero
+    uv run python simulation/run_tests.py tests/unit -m "not simtest" -q
+    uv run python simulation/run_tests.py --filter failures tests/unit -v
+    uv run python simulation/run_tests.py tests/unit -k test_aero
 """
 
-import hashlib
 import json
 import os
 import subprocess
@@ -34,8 +33,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VENV_PYTHON = ".venv/Scripts/python.exe"
-REQUIREMENTS = "simulation/requirements.txt"
+REPO = Path(__file__).resolve().parents[1]
 DEFAULT_SUMMARY = "simulation/logs/suite_summary.json"
 
 # ANSI colours
@@ -48,40 +46,6 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _ensure_venv_fresh(python: str) -> None:
-    """Install/upgrade packages if requirements.txt changed since the last run.
-
-    Uses a hash stamp stored alongside the venv so the check is near-instant
-    (~0 ms) when nothing has changed, and auto-installs only when needed.
-    """
-    req = Path(REQUIREMENTS)
-    if not req.exists():
-        return
-
-    digest = hashlib.sha256(req.read_bytes()).hexdigest()
-    stamp = Path(python).parent / ".requirements_hash"
-
-    if stamp.exists() and stamp.read_text().strip() == digest:
-        return  # already up to date
-
-    print(
-        f"{YELLOW}[env] requirements.txt changed — running pip install...{RESET}",
-        flush=True,
-    )
-    result = subprocess.run(
-        [python, "-m", "pip", "install", "-q", "-r", str(req)],
-        capture_output=False,
-    )
-    if result.returncode != 0:
-        print(
-            f"{RED}[env] pip install failed (exit {result.returncode}){RESET}",
-            flush=True,
-        )
-    else:
-        stamp.write_text(digest)
-        print(f"{GREEN}[env] venv up to date{RESET}", flush=True)
 
 
 def _strip(line: str) -> str:
@@ -173,10 +137,7 @@ def main() -> int:
     if not pytest_args:
         pytest_args = ["tests/unit", "-m", "not simtest", "-q"]
 
-    _venv = Path(VENV_PYTHON)
-    python = str(_venv.resolve()) if _venv.exists() else sys.executable
-    _ensure_venv_fresh(python)
-    cmd = [python, "-u", "-m", "pytest"] + pytest_args
+    cmd = ["uv", "run", "--no-sync", "--project", str(REPO), "python", "-u", "-m", "pytest", *pytest_args]
 
     print(f"{CYAN}{'-' * 70}{RESET}")
     print(f"{CYAN}cmd:    {' '.join(cmd)}{RESET}")
