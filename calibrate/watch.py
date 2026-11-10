@@ -118,7 +118,7 @@ def _watch_esc(session, duration, log):
     cols = ["t_s", "erpm", "mech_rpm", "rotor_rpm", "voltage_v", "current_a", "temp_c"]
     esc_name, esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
     idx = (MOTOR_ESC_CHANNEL - 1) % 4
-    state = {"erpm": None, "volt": None, "curr": None, "temp": None}
+    state: dict[str, float | None] = {"erpm": None, "volt": None, "curr": None, "temp": None}
 
     def handle(st, msg, t_rel):
         if not isinstance(msg, EscTelemetry) or msg.message_name != esc_name:
@@ -220,7 +220,7 @@ def _watch_attitude(session, duration, log):
         "mav_att_pitch_rate_rads",
         "mav_att_yaw_rate_rads",
     ]
-    state = {
+    state: dict[str, float | None] = {
         "roll": None,
         "pitch": None,
         "yaw": None,
@@ -274,7 +274,7 @@ def _watch_attitude(session, duration, log):
 
 def _watch_power(session, duration, log):
     cols = ["t_s", "vbat_v", "current_a", "power_w"]
-    state = {"vbat": None, "curr": None}
+    state: dict[str, float | None] = {"vbat": None, "curr": None}
 
     def handle(st, msg, t_rel):
         match msg:

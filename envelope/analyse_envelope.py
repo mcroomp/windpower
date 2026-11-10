@@ -32,6 +32,7 @@ import argparse
 import math
 
 import numpy as np
+from simulation.rotor_physics import require_mass_kg
 
 
 from envelope.point_mass import simulate_point, balance_bz, tether_hat
@@ -54,7 +55,7 @@ PHASES: dict[str, dict] = {
 
 def _print_geometry(elevation_deg: float, tension_n: float, wind_speed: float) -> None:
     from envelope.rotor_helpers import load_default_rotor
-    mass   = float(load_default_rotor().inertia.mass_kg)
+    mass   = require_mass_kg(load_default_rotor())
     weight = mass * _G
     t_hat  = tether_hat(elevation_deg)
     F_teth = tension_n * t_hat

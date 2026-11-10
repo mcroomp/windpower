@@ -14,6 +14,7 @@ from collections.abc import Callable
 import numpy as np
 import pyvista as pv
 from matplotlib.colors import ListedColormap
+from vtkmodules.vtkCommonCore import vtkCommand
 
 from viz3d.telemetry import TelemetryFrame
 from viz3d.visualize_3d import (
@@ -352,7 +353,7 @@ def demo_data(t: float, controls: _DemoControls | None = None) -> PassiveViewDat
         t=t,
         actual_q=actual_q,
         target_q=actual_q,
-        servo_pwm=servo_pwm,
+        servo_pwm=(servo_pwm[0], servo_pwm[1], servo_pwm[2]),
         motor_pwm=motor_pwm,
         rotor_rpm=None,
         pos_ned=(
@@ -395,7 +396,7 @@ class PassiveLiveView:
         self._rendered_frames = 0
         self._skipped_frames = 0
         self._restore_camera_after_key = False
-        self._key_actors: dict[str, object] = {}
+        self._key_actors: dict[str, pv.CornerAnnotation | pv.Text] = {}
         self._key_flash_deadlines: dict[str, float] = {}
         self.abort_requested = False
 
@@ -403,7 +404,7 @@ class PassiveLiveView:
             title="RAWES passive - live instrument bay and rotor",
             window_size=[1100, 760],
         )
-        self._plotter.set_background("#101025")
+        pv.Plotter.set_background(self._plotter, "#101025")
 
         instrument_bay = _checkerboard_disk(_INSTRUMENT_BAY_RADIUS_M)
         instrument_bay.extrude(
@@ -514,8 +515,8 @@ class PassiveLiveView:
         self._collective_chart.y_axis.label = "DOWN"
         self._collective_chart.y_axis.tick_labels_visible = False
         self._collective_chart.y_axis.grid = False
-        self._plotter.add_chart(self._cyclic_chart, self._collective_chart)
-        self._plotter.set_chart_interaction(False)
+        pv.Plotter.add_chart(self._plotter, self._cyclic_chart, self._collective_chart)
+        pv.Plotter.set_chart_interaction(self._plotter, False)
         self._add_keyboard_help()
 
         key_map = {
@@ -531,17 +532,17 @@ class PassiveLiveView:
             "equal": ("collective", 1),
         }
         for key, change in key_map.items():
-            self._plotter.add_key_event(
-                key, lambda c=change: self._activate_control(c[0], c[1])
+            pv.Plotter.add_key_event(
+                self._plotter, key, lambda c=change: self._activate_control(c[0], c[1])
             )
-        self._plotter.add_key_event("space", self._set_target_to_actual)
-        self._plotter.add_key_event("Escape", self._request_abort)
+        pv.Plotter.add_key_event(self._plotter, "space", self._set_target_to_actual)
+        pv.Plotter.add_key_event(self._plotter, "Escape", self._request_abort)
         self._set_neutral_camera()
         self._plotter.show(interactive_update=True, auto_close=False)
         self._disable_default_keyboard_camera_controls()
 
     @staticmethod
-    def _set_keycap_active(actor: object, active: bool) -> None:
+    def _set_keycap_active(actor: pv.CornerAnnotation | pv.Text, active: bool) -> None:
         prop = actor.GetTextProperty()
         background = "#ffb300" if active else "#303040"
         foreground = "#101010" if active else "#ffffff"
@@ -602,12 +603,14 @@ class PassiveLiveView:
     def _disable_default_keyboard_camera_controls(self) -> None:
         if self._plotter.iren is None:
             return
-        self._plotter.set_chart_interaction(False)
+        pv.Plotter.set_chart_interaction(self._plotter, False)
         interactor = self._plotter.iren.interactor
+        if interactor is None:
+            raise RuntimeError("Live view interactor was not initialized")
         interactor.RemoveObservers("KeyPressEvent")
         interactor.RemoveObservers("CharEvent")
         interactor.AddObserver(
-            "KeyPressEvent",
+            vtkCommand.KeyPressEvent,
             self._plotter.iren.key_press_event,
         )
 

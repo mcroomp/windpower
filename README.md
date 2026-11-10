@@ -194,7 +194,7 @@ On Windows, `setup.cmd` owns the complete setup:
 - Use uv to install managed Python 3.14.10 and sync locked development and
   simulation dependencies, including editable `rawes` and `linkhub-client`.
   No existing Python, `py` launcher, or pip installation is needed.
-- Check Python with Ruff, run `npm ci` and build the UI, then build the LinkHub release binary.
+- Check Python with Ruff and Pyright, run `npm ci` and build the UI, then build the LinkHub release binary.
 
 Git Bash delegates to the same Windows bootstrap. If WinGet is missing, install
 or update **App Installer** from Microsoft Store first. Setup stops explicitly
@@ -230,7 +230,7 @@ locked tarball URLs, rather than contacting the public npm registry directly.
 If an older uv reports no download for the pinned Python release, update uv
 using its owning package manager (on Windows, `winget upgrade --id astral-sh.uv`).
 
-Ruff runs before local builds and every pytest session, and gates CI builds and
+Ruff and basic-mode Pyright run before local builds and every pytest session, and gate CI builds and
 tests. See [Python linting](design/testing.md#python-linting) for the
 modernization + simplification profile and standalone commands.
 

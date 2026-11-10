@@ -19,7 +19,7 @@ import pytest
 
 import math
 import numpy as np
-from tests.unit._aero_probe import make_probe, probe_steady
+from tests.common.aero_probe import make_probe, probe_steady
 from simulation.tether import SpringDamperTether, TetherInputs
 
 pytestmark = pytest.mark.expensive

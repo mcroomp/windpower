@@ -1,3 +1,4 @@
+from unittest.mock import Mock
 import pytest
 
 import calibrate.hw as calibrate_hw
@@ -83,7 +84,7 @@ def test_arm_command_uses_normal_arm_and_bounded_disarm(monkeypatch):
         lambda _session, force=False: events.append(("disarm", force)) or True,
     )
 
-    calibrate_repl._cmd_arm(Session(), ["--duration", "0.25"])
+    calibrate_repl._cmd_arm(Mock(wraps=Session()), ["--duration", "0.25"])
 
     assert events == [
         ("mode", 1),
@@ -112,7 +113,7 @@ def test_arm_command_can_explicitly_bypass_prearm_checks(monkeypatch):
         lambda _session, force=False: events.append(("disarm", force)) or True,
     )
 
-    calibrate_repl._cmd_arm(Session(), ["--duration", "0.25", "--force"])
+    calibrate_repl._cmd_arm(Mock(wraps=Session()), ["--duration", "0.25", "--force"])
 
     assert events == [
         ("mode", 1),
@@ -129,7 +130,7 @@ def test_disarm_command_falls_back_to_force(monkeypatch):
         lambda _session, force=False: events.append(force) or force,
     )
 
-    calibrate_repl._cmd_disarm(object())
+    calibrate_repl._cmd_disarm(Mock(wraps=object()))
 
     assert events == [False, True]
 
@@ -176,7 +177,7 @@ def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(monkeypatch):
     monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
     session = Session()
 
-    report = verify_safe_off(session)
+    report = verify_safe_off(Mock(wraps=session))
 
     assert report.ok
     assert report.motor_output_raw == 1000
@@ -240,7 +241,7 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
 
     monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
 
-    assert _disarm(Session()) is True
+    assert _disarm(Mock(wraps=Session())) is True
     assert events == [
         "disarm-command",
         ("set-param", "RAWES_MODE", 0),
@@ -272,7 +273,7 @@ def test_arm_rejection_prints_named_result_and_fc_reason(monkeypatch, capsys):
 
     monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
 
-    assert calibrate_hw._arm(Session()) is False
+    assert calibrate_hw._arm(Mock(wraps=Session(), generation=7)) is False
     output = capsys.readouterr().out
     assert "Arm rejected: MAV_RESULT_FAILED" in output
     assert "[FC] Arm: Motor Interlock Enabled" in output
@@ -318,7 +319,7 @@ def test_print_status_decodes_typed_heartbeat_ekf_and_sensor_flags(capsys):
                 () if message is None else (message,), after, _CLOCK,
             )
 
-    calibrate_hw._print_status(Session())
+    calibrate_hw._print_status(Mock(wraps=Session()))
 
     output = capsys.readouterr().out
     assert "Armed      : YES" in output
@@ -339,7 +340,7 @@ def test_wait_for_disarmed_uses_linkhub_vehicle_snapshot(monkeypatch, capsys):
         lambda *_args, **_kwargs: pytest.fail("journal polling should not be needed"),
     )
 
-    assert calibrate_run._wait_for_disarmed(Session(), timeout_s=0.2) is True
+    assert calibrate_run._wait_for_disarmed(Mock(wraps=Session()), timeout_s=0.2) is True
     assert "Vehicle already disarmed" in capsys.readouterr().out
 
 
@@ -399,7 +400,7 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
 
     monkeypatch.setattr(calibrate_hw, "decode_message", lambda message: message)
 
-    assert _disarm(Session(), force=True) is True
+    assert _disarm(Mock(wraps=Session()), force=True) is True
     assert events == [
         ("set-param", "RAWES_MODE", 0),
         ("set-param", "H_YAW_TRIM", 0.0),
@@ -440,7 +441,7 @@ def test_safety_shutdown_skips_disarm_when_already_disarmed(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("disarm should not be used"),
     )
 
-    calibrate_run._safety_shutdown(Session())
+    calibrate_run._safety_shutdown(Mock(wraps=Session()))
 
     assert events == [
         ("set-param", "RAWES_MODE", 0),
@@ -476,7 +477,7 @@ def test_safety_shutdown_force_disarms_when_normal_disarm_fails(monkeypatch):
         ),
     )
 
-    calibrate_run._safety_shutdown(Session())
+    calibrate_run._safety_shutdown(Mock(wraps=Session()))
 
     assert events == [(5.0, True)]
 
@@ -494,12 +495,6 @@ def test_hr3_manual_mixer_matches_physical_servo_positions():
 
 
 def test_swash_info_uses_current_collective_params_and_hr3_diagram(capsys):
-    class ServoOutput:
-        servo1_raw = 1245
-        servo2_raw = 1062
-        servo3_raw = 1000
-        servo9_raw = 1000
-
     class Session:
         _target_system = 1
         _target_component = 1
@@ -538,10 +533,13 @@ def test_swash_info_uses_current_collective_params_and_hr3_diagram(capsys):
             return "v1:0"
 
         def read_messages(self, *_args, **_kwargs):
-            return MessageBatch((ServoOutput(),), "v1:1", _CLOCK)
+            return MessageBatch(
+                (ServoOutputRaw(servo1_raw=1245, servo2_raw=1062, servo3_raw=1000, servo9_raw=1000),),
+                "v1:1", _CLOCK,
+            )
 
     session = Session()
-    _print_swash_layout(session)
+    _print_swash_layout(Mock(wraps=session))
     output = capsys.readouterr().out
 
     assert "H_COL_MID" not in session.requested_params
@@ -586,7 +584,7 @@ def test_fit_swash_range_converges_from_measured_extrema(monkeypatch):
     )
     session = Session()
 
-    _fit_swash_range(session, 1257, 1777, 1000, iterations=3, margin=3)
+    _fit_swash_range(Mock(wraps=session), 1257, 1777, 1000, iterations=3, margin=3)
 
     assert session.params == {
         "SERVO1_TRIM": 1517.0,

@@ -154,7 +154,7 @@ def _resample(t_ms: np.ndarray, y: np.ndarray):
 def dominant_freq(t_ms: np.ndarray, y: np.ndarray, fmin=0.2):
     """FFT dominant frequency [Hz] of the AC part, ignoring freqs < fmin."""
     fs, yr = _resample(t_ms, y)
-    if fs is None or len(yr) < 8:
+    if fs is None or yr is None or len(yr) < 8:
         return None, None
     yr = yr - np.mean(yr)
     win = np.hanning(len(yr))
@@ -185,7 +185,7 @@ def phase_lag_ms(t_a, a, t_b, b, period_s=None):
     +/- period/2 so a periodic signal does not alias onto a distant cycle."""
     fs_a, ar = _resample(t_a, a)
     fs_b, br = _resample(t_b, b)
-    if fs_a is None or fs_b is None:
+    if fs_a is None or fs_b is None or ar is None or br is None:
         return None
     n = min(len(ar), len(br))
     ar = ar[:n] - np.mean(ar[:n])
@@ -247,7 +247,7 @@ def correction_analysis(t_srv_ms, pwm, t_att_ms, rate):
     """
     u = (pwm - SERVO4_MIN_US) / (SERVO4_MAX_US - SERVO4_MIN_US)
     dt, grid, u_g, r_g = _common_grid(t_srv_ms, u, t_att_ms, rate)
-    if grid is None:
+    if grid is None or dt is None or u_g is None or r_g is None:
         print("  (not enough overlapping samples for correction analysis)")
         return
 

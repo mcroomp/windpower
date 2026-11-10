@@ -9,7 +9,7 @@ import math
 import numpy as np
 
 from simulation.controller import TensionPI, compute_bz_tether, position_feedback_bz_eq
-from tests.unit._aero_probe import load_rotor
+from tests.common.aero_probe import load_rotor
 
 
 _ROTOR = load_rotor("beaupoil_2026")

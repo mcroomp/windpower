@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Ruff (modernization + simplification)
+    name: Ruff + Pyright
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,10 +30,13 @@ jobs:
           node-version-file: .node-version
 
       - name: Install dependencies
-        run: uv sync --locked --dev
+        run: uv sync --locked --dev --extra simulation
 
       - name: Run Ruff
         run: uv run --no-sync ruff check .
+
+      - name: Run Pyright
+        run: uv run --no-sync python -m pyright --project pyrightconfig.json --pythonpath .venv/bin/python --warnings
 
   unit-and-simtests:
     name: Unit + Simtests

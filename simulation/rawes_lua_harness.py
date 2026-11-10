@@ -137,9 +137,9 @@ class RawesLua:
     _TICK_MS = 10
 
     def __init__(self, **params):
-        self._lua = lua54.LuaRuntime()
+        self._lua = lua54.LuaRuntime(unpack_returned_tuples=False)
         self._lua.execute(_MOCK_LUA)
-        self._mock = self._lua.globals()._mock
+        self._mock = self._lua.globals()["_mock"]
 
         # Apply params before loading rawes.lua so the startup GCS message
         # (which reads RAWES_MODE at module load time) shows the right mode.
@@ -147,8 +147,8 @@ class RawesLua:
             self._mock.params[_PARAM_ALIAS.get(k, k)] = float(v)
 
         self._lua.execute(_LOAD_RAWES.format(body=_RAWES_WITH_SURFACE))
-        self._update_fn = self._lua.globals()._rawes_update
-        self._fns       = self._lua.globals()._rawes_fns
+        self._update_fn = self._lua.globals()["_rawes_update"]
+        self._fns       = self._lua.globals()["_rawes_fns"]
         self._t_ms      = 0
         self.ch_out     = _ChOut(self._mock)
 
@@ -340,7 +340,10 @@ class RawesLua:
         Uses a Lua-side accessor to preserve colon-call semantics (v:x() not v.x()).
         """
         _get = self._lua.eval("function(v) return v:x(), v:y(), v:z() end")
-        x, y, z = _get(v)
+        assert callable(_get)
+        coordinates = _get(v)
+        assert isinstance(coordinates, tuple) and len(coordinates) == 3
+        x, y, z = coordinates
         return [float(x), float(y), float(z)]
 
     # ── Outputs ───────────────────────────────────────────────────────────

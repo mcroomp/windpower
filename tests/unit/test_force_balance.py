@@ -10,7 +10,8 @@ import numpy as np
 
 from simulation.dynamics import RigidBodyDynamics
 from simulation.frames import build_orb_frame
-from tests.unit._aero_probe import load_rotor, make_probe, probe_steady
+from simulation.rotor_physics import require_mass_kg
+from tests.common.aero_probe import load_rotor, make_probe, probe_steady
 
 
 G         = 9.81
@@ -21,7 +22,7 @@ ELEV_DEG  = 30.0
 
 _ROTOR = load_rotor("beaupoil_2026")
 _AERO  = make_probe(_ROTOR)
-_MASS  = float(_ROTOR.inertia.mass_kg)
+_MASS  = require_mass_kg(_ROTOR)
 
 
 def _R_tilt(elevation_deg: float) -> np.ndarray:

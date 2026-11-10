@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from simulation.rotor_physics import require_mass_kg
 
 
 from dynbem import create_aero, RotorInputs, step_omega
@@ -96,7 +97,7 @@ def simulate_point(
     conv_window_s : window duration [s] to check for convergence
     """
     rotor     = load_default_rotor()
-    mass      = float(rotor.inertia.mass_kg)
+    mass      = require_mass_kg(rotor)
     I_ode     = float(rotor.autorotation.I_ode_kgm2 or 10.0)
     omega_min = float(rotor.autorotation.omega_min_rad_s or 0.5)
     weight    = mass * gravity

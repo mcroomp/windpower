@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import io
 import os
 import shutil
 import subprocess
@@ -18,8 +19,9 @@ import threading
 import time
 
 # Force UTF-8 output so Docker's Unicode progress chars don't crash on Windows
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+for stream in (sys.stdout, sys.stderr):
+    if isinstance(stream, io.TextIOWrapper):
+        stream.reconfigure(encoding='utf-8', errors='replace')
 
 IMAGE = "rawes-sim"
 SIM_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,6 +72,7 @@ def stream_with_monitor(cmd):
     t = threading.Thread(target=monitor, daemon=True)
     t.start()
 
+    assert proc.stdout is not None
     for line in proc.stdout:
         print(line, end="", flush=True)
         last_output_time[0] = time.time()

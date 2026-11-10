@@ -6,6 +6,8 @@ scipy
 pytest
 pytest-timeout
 ruff
+pyright
+neuralfoil
 pyyaml
 numba
 lupa

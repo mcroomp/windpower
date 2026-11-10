@@ -8,6 +8,7 @@ flight stack control is GUIDED-only.
 import math
 
 import numpy as np
+from numpy.typing import ArrayLike
 from simulation.frames import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
 from simulation.swashplate import SwashplateServoModel
 from dynbem     import RotorInputs
@@ -718,8 +719,8 @@ def col_min_for_altitude_rad(
 # ---------------------------------------------------------------------------
 
 def compute_bz_tether(
-    pos:    np.ndarray,
-    anchor: np.ndarray,
+    pos:    ArrayLike,
+    anchor: ArrayLike,
 ) -> np.ndarray | None:
     """
     Equilibrium body_z (FRD: hub axis pointing DOWN through the disk).

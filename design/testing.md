@@ -69,19 +69,24 @@ exceptions preserve optional-dependency skips, ArduPilot gain names, and file
 handles whose ownership spans multiple calls.
 
 `setup.cmd` and the default `setup.sh` setup/build flow fail before UI/LinkHub
-builds if Ruff fails. CI's lint job gates both Python tests and the stack image
+builds if Ruff or Pyright fails. CI's lint job gates both Python tests and the stack image
 build. Docker `build` and `build-lite` commands lint a read-only mount of the
-repository with the image's Python/Ruff before reporting success, including
-cache-hit builds. `tests/conftest.py` also runs Ruff with the test interpreter before every
+repository with the image's Python, Ruff, and Pyright before reporting success, including
+cache-hit builds. `tests/conftest.py` also runs both checks with the test interpreter before every
 pytest session (including collection-only invocations and Docker stack workers).
-Lint errors or a missing Ruff installation stop the session explicitly.
+Lint/type errors, warnings, or missing tools stop the session explicitly.
 
-For standalone type diagnostics, install the simulation extra and run
-`uv run pyright`. The basic-mode configuration in `pyrightconfig.json` currently
-reports existing errors and is not yet a build/test gate. Simulation dependencies
+For standalone type diagnostics, install development dependencies and the simulation
+extra (`uv sync --dev --extra simulation`), then run `uv run pyright --warnings`.
+The basic-mode configuration in `pyrightconfig.json` gates builds, CI, and tests;
+it has no baseline error allowance. Gates pass the active interpreter explicitly
+so Docker checks never resolve packages from a mounted Windows virtual environment.
+Simulation dependencies
 include NeuralFoil for the SG6042 polar analysis.
 Pyright uses the same system Node.js 24.x as npm builds; install/select the
 major in `.node-version` before invoking it, rather than installing `pyright[nodejs]`.
+Shared helpers used across test tiers belong in `tests/common/`; stack workers
+do not synchronize `tests/unit/`.
 
 ## Markers and timeouts
 

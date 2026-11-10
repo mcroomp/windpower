@@ -86,7 +86,7 @@ def render(
     viz = RAWESVisualizer(frames)
 
     pl = pv.Plotter(off_screen=True, window_size=[width, height])
-    pl.set_background("#1a1a2e")
+    pv.Plotter.set_background(pl, "#1a1a2e")
 
     ext = out_path.suffix.lower()
     if ext == ".mp4":

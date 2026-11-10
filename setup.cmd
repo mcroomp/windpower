@@ -30,6 +30,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo [INFO] Checking Python with Pyright ...
+call uv run --no-sync --project "%REPO%" python -m pyright --project "%REPO%\pyrightconfig.json" --pythonpath "%REPO%\.venv\Scripts\python.exe" --warnings
+if errorlevel 1 (
+    echo ERROR: Pyright checks failed.
+    exit /b 1
+)
+
 call :ensure_msvc
 if errorlevel 1 exit /b 1
 call :ensure_tool cargo Rustlang.Rustup

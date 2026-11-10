@@ -75,6 +75,9 @@ _setup_venv() {
     uv sync --project "$REPO_DIR" --python 3.14.10 --managed-python --locked --dev --extra simulation
     echo "[INFO] Checking Python with Ruff ..."
     uv run --no-sync --project "$REPO_DIR" ruff check "$REPO_DIR"
+    echo "[INFO] Checking Python with Pyright ..."
+    uv run --no-sync --project "$REPO_DIR" python -m pyright \
+        --project "$REPO_DIR/pyrightconfig.json" --pythonpath "$PYTHON" --warnings
 
     (
         cd "$REPO_DIR/linkhub-ui"
@@ -97,6 +100,13 @@ _lint_image() {
         --workdir /work \
         --entrypoint /rawes/.venv/bin/python \
         "$1" -m ruff check --no-cache .
+    echo "[INFO] Checking Python with Pyright in $1 ..."
+    docker run --rm \
+        --volume "$REPO_DIR:/work:ro" \
+        --workdir /work \
+        --entrypoint /rawes/.venv/bin/python \
+        "$1" -m pyright --project /work/pyrightconfig.json \
+            --pythonpath /rawes/.venv/bin/python --warnings
 }
 
 _setup_build() {

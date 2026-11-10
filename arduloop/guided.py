@@ -846,7 +846,7 @@ class GuidedAttitudeController:
                 self._rate_command_rads[2],
                 accel_y,
                 dt,
-                gp.ATC_INPUT_TC_YAW,
+                gp.ATC_INPUT_TC if gp.ATC_INPUT_TC_YAW is None else gp.ATC_INPUT_TC_YAW,
             )
 
             att_error, _thrust_angle, thrust_error_angle, self._attitude_target = (
@@ -961,7 +961,7 @@ class GuidedAttitudeController:
             self._ang_accel_target[2],
             max_y,
             accel_y,
-            gp.ATC_INPUT_TC_YAW,
+            gp.ATC_INPUT_TC if gp.ATC_INPUT_TC_YAW is None else gp.ATC_INPUT_TC_YAW,
             dt,
         )
 

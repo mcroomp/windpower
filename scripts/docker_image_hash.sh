@@ -6,6 +6,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 {
     for path in \
         scripts/docker_image_hash.sh \
+        .node-version \
         simulation/Dockerfile \
         simulation/requirements.txt \
         simulation/requirements-docker.txt \

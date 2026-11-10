@@ -44,6 +44,7 @@ from pathlib import Path
 from collections import defaultdict
 
 import numpy as np
+from simulation.rotor_physics import require_mass_kg
 
 import simulation
 from dynbem import RotorInputs, create_aero
@@ -54,7 +55,7 @@ from simulation.ic import load_ic
 
 _ROTOR = load_default_rotor()
 _AERO = create_aero(_ROTOR, model="quasi_static")
-MASS = float(_ROTOR.inertia.mass_kg)
+MASS = require_mass_kg(_ROTOR)
 G = 9.81
 MG = MASS * G
 WIND = np.array([0.0, 10.0, 0.0])

@@ -457,6 +457,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
             f"STATUSTEXT: {all_statustext}"
         )
 
+        assert ctx.mediator_log is not None
         assert_no_mediator_criticals(ctx.mediator_log)
 
         stable_s = metrics.max_stable_s if metrics is not None else 0.0

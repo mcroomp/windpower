@@ -16,7 +16,7 @@ def plot_flight_report(
     out_path,                 # Path or str
     telemetry_path=None,      # Path or None — mediator per-step CSV
     tether_length_m: float = 200.0,
-    anchor_ned: tuple = None, # (N, E, D) anchor position in LOCAL_NED from home.
+    anchor_ned: tuple | None = None, # (N, E, D) anchor position in LOCAL_NED from home.
                               # When provided, space-time panel shows horizontal
                               # distance from anchor vs altitude above anchor.
 ) -> None:

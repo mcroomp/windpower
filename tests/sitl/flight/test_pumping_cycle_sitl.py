@@ -335,6 +335,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
             f"Net energy {net_energy:.1f} J <= 0"
         )
 
+        assert ctx.mediator_log is not None
         assert_no_mediator_criticals(ctx.mediator_log)
 
         log.info(

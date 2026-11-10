@@ -103,6 +103,8 @@ class TestRollSignChainLinks:
             )
         
         # Compare cyclic relative to trim; absolute tilt can remain positive if trim is positive.
+        assert _IC.trim_tilt_lat is not None
+        assert tilt_lat_out is not None
         delta_tilt_lat = tilt_lat_out - _IC.trim_tilt_lat
         assert delta_tilt_lat < 0, (
             f"Targeting negative roll rate with positive body roll should "

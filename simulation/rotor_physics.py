@@ -2,6 +2,14 @@
 from __future__ import annotations
 
 
+def require_mass_kg(rotor) -> float:
+    """Return configured hub mass or fail explicitly for incomplete definitions."""
+    mass = rotor.inertia.mass_kg
+    if mass is None:
+        raise ValueError(f"rotor.inertia.mass_kg is required for {rotor.name}")
+    return float(mass)
+
+
 def resolve_i_spin_kgm2(rotor) -> float:
     """Return rotor spin-axis inertia, deriving it when YAML sets null.
 

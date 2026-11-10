@@ -400,7 +400,7 @@ class SwashplateServoModel:
         col_rad = collective_out_to_rad(col_out, self._col_min, self._col_max)
         return float(col_rad), float(tlon), float(tlat)
 
-    def reset(self, collective_rad: float = None, tilt_lon: float = 0.0,
+    def reset(self, collective_rad: float | None = None, tilt_lon: float = 0.0,
               tilt_lat: float = 0.0) -> None:
         if collective_rad is None:
             collective_rad = self._col_min

@@ -9,6 +9,7 @@ If it diverges mid-ramp, there is a genuine physics stability limit.
 import math
 
 import numpy as np
+from simulation.rotor_physics import require_mass_kg
 import pytest
 
 
@@ -46,7 +47,7 @@ def _run_continuation(el=EL, t_start=T_START, t_max=T_MAX,
     rotor     = load_default_rotor()
     aero      = create_aero(rotor, model="quasi_static")
     rotor_state = aero.initial_rotor_state()
-    mass      = float(rotor.inertia.mass_kg)
+    mass      = require_mass_kg(rotor)
     I_ode     = float(rotor.autorotation.I_ode_kgm2 or 10.0)
     omega_min = float(rotor.autorotation.omega_min_rad_s or 0.5)
     gravity = 9.81

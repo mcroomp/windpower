@@ -220,8 +220,10 @@ def test_cyclic_expires_independently_while_collective_is_refreshed():
     sim.send_message(NamedValueFloat(name="RAWES_PIT", value=0.5))
     send_collective(sim, 0.7)
     sim.tick()
-    assert sim.ch_out[1] > 1500
-    assert sim.ch_out[2] > 1500
+    servo1, servo2 = sim.ch_out[1], sim.ch_out[2]
+    assert servo1 is not None and servo2 is not None
+    assert servo1 > 1500
+    assert servo2 > 1500
     for _ in range(3):
         send_collective(sim, 0.7)
         sim.run(1)

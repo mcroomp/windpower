@@ -118,7 +118,7 @@ def check() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0] if __doc__ else None)
     parser.add_argument("--tag", help="ArduPilot tag (default: ARDUPILOT_TAG in simulation/Dockerfile)")
     parser.add_argument("--check", action="store_true", help="verify the vendored files against GitHub")
     args = parser.parse_args()

@@ -51,7 +51,7 @@ class TestInstantiation:
         assert math.isclose(m.tilt_lat, 0.0, abs_tol=1e-9)
 
     def test_from_rotor_constructs(self):
-        from tests.unit._aero_probe import load_rotor
+        from tests.common.aero_probe import load_rotor
         rotor = load_rotor("beaupoil_2026")
         m = SwashplateServoModel.from_rotor(rotor)
         assert isinstance(m, SwashplateServoModel)

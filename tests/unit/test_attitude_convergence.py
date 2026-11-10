@@ -23,8 +23,8 @@ from simulation.controller import HeliCyclicController, compute_rate_cmd
 from simulation.dynamics import RigidBodyDynamics
 from simulation.frames import build_orb_frame
 from simulation.param_defaults import coll_rad_to_thrust
-from simulation.rotor_physics import resolve_i_spin_kgm2
-from tests.unit._aero_probe import load_rotor, make_probe
+from simulation.rotor_physics import require_mass_kg, resolve_i_spin_kgm2
+from tests.common.aero_probe import load_rotor, make_probe
 
 pytestmark = pytest.mark.expensive
 
@@ -37,7 +37,7 @@ pytestmark = pytest.mark.expensive
 
 _ROTOR  = load_rotor("beaupoil_2026")
 _AERO   = make_probe(_ROTOR)
-_MASS   = float(_ROTOR.inertia.mass_kg)
+_MASS   = require_mass_kg(_ROTOR)
 _I_BODY = list(_ROTOR.inertia.I_body_kgm2)
 _I_SPIN = resolve_i_spin_kgm2(_ROTOR)
 

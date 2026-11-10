@@ -144,6 +144,7 @@ def test_demo_keyboard_controls_move_cyclic_and_collective_positions():
     assert cyclic_lr > 0.0
     assert cyclic_ud < 0.0
     assert collective_ud > 0.0
+    assert data.target_thrust is not None
     assert data.target_thrust > 0.5
 
 

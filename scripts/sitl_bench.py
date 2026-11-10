@@ -130,14 +130,13 @@ def main() -> None:
     # Prime EEPROM: boot once with heli model to flush SCR_ENABLE=1, then kill.
     # _prime_sitl_eeprom wipes eeprom.bin before the prime boot, then kills SITL.
     print("[sitl_bench] Priming EEPROM (wipe + prime boot) ...")
-    _prime_sitl_eeprom(sim_vehicle, add_param_file=boot_parm)
+    _prime_sitl_eeprom(sim_vehicle)
     print("[sitl_bench] EEPROM primed.")
 
     # Launch SITL (--model JSON, no eeprom wipe — eeprom is already primed)
     sitl_log = tmp / "sitl.log"
     print("[sitl_bench] Launching SITL (--model JSON) ...")
-    sitl_proc = _launch_sitl(sim_vehicle, sitl_log,
-                             add_param_file=boot_parm, wipe_eeprom=False)
+    sitl_proc = _launch_sitl(sim_vehicle, sitl_log, add_param_file=boot_parm)
 
     # Launch mediator_torque (omega_rotor=0, startup hold = 24 h)
     mediator_log = tmp / "mediator.log"

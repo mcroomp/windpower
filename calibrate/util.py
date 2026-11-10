@@ -8,18 +8,12 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
-# msvcrt is Windows stdlib -- used for non-blocking ESC/key reads.
-# Falls back to a stub on non-Windows so the rest of the module still imports.
-try:
+if sys.platform == "win32":
     import msvcrt
-except ImportError:
-    class _MsvcrtStub:
-        def kbhit(self):    return False
-        def getch(self):    return b""
-    msvcrt = _MsvcrtStub()  # type: ignore[assignment]
 
 from .constants import _LOG_DIR
 import contextlib
@@ -161,20 +155,18 @@ class _RunLog:
 
 
 # ---------------------------------------------------------------------------
-# Key polling (Windows msvcrt; stub on other platforms)
+# Key polling (Windows msvcrt; no keyboard input on other platforms)
 # ---------------------------------------------------------------------------
 
 def _esc_check() -> bool:
     """Non-blocking ESC-key check.  Returns True if ESC was pressed."""
-    seen = False
-    while msvcrt.kbhit():
-        if msvcrt.getch() == b"\x1b":
-            seen = True
-    return seen
+    return b"\x1b" in _poll_keys()
 
 
 def _poll_keys() -> list[bytes]:
     """Non-blocking: drain and return all pending keypresses (one byte each)."""
+    if sys.platform != "win32":
+        return []
     keys = []
     while msvcrt.kbhit():
         keys.append(msvcrt.getch())

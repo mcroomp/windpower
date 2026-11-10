@@ -83,8 +83,8 @@ finally:
 try:
     import pyvista as pv
 
-    pv.set_jupyter_backend(None)
     pv.set_plot_theme("document")
+    pv.global_theme.notebook = False
 except ImportError:
     print("PyVista not found.  Install with:  pip install pyvista")
     sys.exit(1)
@@ -92,7 +92,7 @@ except ImportError:
 # Suppress VTK/PyVista debug and warning messages
 if _HAS_VTK:
     with contextlib.suppress(Exception):
-        vtkLogger.SetStdErrType(0)  # Disable VTK stderr
+        vtkLogger.SetStderrVerbosity(vtkLogger.VERBOSITY_OFF)
 
 # Ensure viz3d package is importable when run as a script
 _HERE = Path(__file__).resolve().parent
@@ -115,8 +115,7 @@ except NotImplementedError:
             f"No default rotor and fallback not found: {_ROTOR_YAML}"
         )
     _ROTOR = _rd.load(str(_ROTOR_YAML))
-# Geometry attributes may be top-level or nested under .blade depending on version
-_BLADE = getattr(_ROTOR, "blade", _ROTOR)
+_BLADE = _ROTOR.blade
 N_BLADES = _BLADE.n_blades
 R_ROOT = _BLADE.root_cutout_m
 R_TIP = _BLADE.radius_m
@@ -726,8 +725,8 @@ class RAWESVisualizer:
         self._pos_history = np.array([_to_viz(f.pos_ned) for f in frames])
         self._spin_angles = self._integrate_spin()
         self._energy = self._integrate_energy()
-        self._inset_ren: object | None = None  # vtkRenderer, set up lazily
-        self._plotter: object | None = None  # active plotter for camera sync
+        self._inset_ren: vtkRenderer | None = None
+        self._plotter: pv.Plotter | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -741,7 +740,7 @@ class RAWESVisualizer:
         unreliable PyVista timer and delivers consistent frame rates.
         """
         plotter = pv.Plotter(title="RAWES 3D — interactive playback")
-        plotter.set_background("#1a1a2e")
+        pv.Plotter.set_background(plotter, "#1a1a2e")
         self._plotter = plotter
         self._add_static_scene(plotter)
         self._add_dynamic_actors(plotter, 0)
@@ -786,11 +785,11 @@ class RAWESVisualizer:
             _reanchor()
             _update_status()
 
-        plotter.add_key_event("space", toggle_play)
-        plotter.add_key_event("Right", lambda: _go(idx[0] + 1))
-        plotter.add_key_event("Left", lambda: _go(idx[0] - 1))
-        plotter.add_key_event("equal", faster)
-        plotter.add_key_event("minus", slower)
+        pv.Plotter.add_key_event(plotter, "space", toggle_play)
+        pv.Plotter.add_key_event(plotter, "Right", lambda: _go(idx[0] + 1))
+        pv.Plotter.add_key_event(plotter, "Left", lambda: _go(idx[0] - 1))
+        pv.Plotter.add_key_event(plotter, "equal", faster)
+        pv.Plotter.add_key_event(plotter, "minus", slower)
 
         _fps_actor = plotter.add_text(
             "FPS --", position=(10, 40), font_size=8, color="#aaaaaa"
@@ -883,7 +882,7 @@ class RAWESVisualizer:
         Mouse      — orbit / pan / zoom (standard PyVista)
         """
         pl = pv.Plotter(title="RAWES scrubber")
-        pl.set_background("#1a1a2e")
+        pv.Plotter.set_background(pl, "#1a1a2e")
         self._plotter = pl
         self._add_static_scene(pl)
         self._add_dynamic_actors(pl, 0)
@@ -908,8 +907,8 @@ class RAWESVisualizer:
             _go(int(round(value)))
 
         # Wide slider spanning almost the full window width
-        pl.add_slider_widget(
-            _slider_cb,
+        pv.Plotter.add_slider_widget(
+            pl, _slider_cb,
             rng=[0, self._n - 1],
             value=0,
             title="Frame",
@@ -918,12 +917,12 @@ class RAWESVisualizer:
             style="modern",
         )
 
-        pl.add_key_event("space", lambda: playing.__setitem__(0, not playing[0]))
-        pl.add_key_event("Right", lambda: _go(idx[0] + 1))
-        pl.add_key_event("Left", lambda: _go(idx[0] - 1))
-        pl.add_key_event("equal", lambda: speed.__setitem__(0, min(speed[0] * 2, 16.0)))
-        pl.add_key_event(
-            "minus", lambda: speed.__setitem__(0, max(speed[0] / 2, 0.0625))
+        pv.Plotter.add_key_event(pl, "space", lambda: playing.__setitem__(0, not playing[0]))
+        pv.Plotter.add_key_event(pl, "Right", lambda: _go(idx[0] + 1))
+        pv.Plotter.add_key_event(pl, "Left", lambda: _go(idx[0] - 1))
+        pv.Plotter.add_key_event(pl, "equal", lambda: speed.__setitem__(0, min(speed[0] * 2, 16.0)))
+        pv.Plotter.add_key_event(
+            pl, "minus", lambda: speed.__setitem__(0, max(speed[0] / 2, 0.0625))
         )
 
         base_ms = int(1000 / self._fps)
@@ -932,7 +931,7 @@ class RAWESVisualizer:
             if playing[0]:
                 _go((idx[0] + 1) % self._n)
 
-        pl.add_timer_event(max_steps=10**9, duration=base_ms, callback=_timer_cb)
+        pv.Plotter.add_timer_event(pl, max_steps=10**9, duration=base_ms, callback=_timer_cb)
 
         fit_camera(pl, self._pos_history)
         pl.show()
@@ -962,7 +961,7 @@ class RAWESVisualizer:
 
         ext = Path(path).suffix.lower()
         plotter = pv.Plotter(off_screen=True, title="RAWES 3D export")
-        plotter.set_background("#1a1a2e")
+        pv.Plotter.set_background(plotter, "#1a1a2e")
         self._plotter = plotter
         self._add_static_scene(plotter)
         self._add_dynamic_actors(plotter, 0)
@@ -972,7 +971,7 @@ class RAWESVisualizer:
         if ext == ".gif":
             plotter.open_gif(path, fps=export_fps)
         elif ext in (".mp4", ".avi"):
-            plotter.open_movie(path, framerate=export_fps)
+            plotter.open_movie(path, framerate=int(export_fps))
         else:
             raise ValueError(f"Unsupported export format: {ext}")
 
@@ -1181,22 +1180,24 @@ class RAWESVisualizer:
         )
 
         # ── Arrows — canonical unit +Z mesh; direction via user_matrix ────────
-        _arrow_kw = dict(tip_length=0.25, tip_radius=0.08, shaft_radius=0.03)
         self._mesh_body_z = pv.Arrow(
-            start=[0, 0, 0], direction=[0, 0, 1], scale=1.0, **_arrow_kw
+            start=[0, 0, 0], direction=[0, 0, 1], scale=1.0,
+            tip_length=0.25, tip_radius=0.08, shaft_radius=0.03,
         )
         self._actor_body_z = plotter.add_mesh(self._mesh_body_z, color=COL_BODY_Z)
         self._actor_body_z.user_matrix = _dir_mat4(pos_viz, bz_viz * 4.0)
 
         self._mesh_body_zeq = pv.Arrow(
-            start=[0, 0, 0], direction=[0, 0, 1], scale=1.0, **_arrow_kw
+            start=[0, 0, 0], direction=[0, 0, 1], scale=1.0,
+            tip_length=0.25, tip_radius=0.08, shaft_radius=0.03,
         )
         self._actor_body_zeq = plotter.add_mesh(self._mesh_body_zeq, color=COL_BODY_ZEQ)
         bzeq_viz = _to_viz(f.body_z_eq) if f.body_z_eq is not None else bz_viz
         self._actor_body_zeq.user_matrix = _dir_mat4(pos_viz, bzeq_viz * 4.0)
 
         self._mesh_wind = pv.Arrow(
-            start=[0, 0, 0], direction=[0, 0, 1], scale=1.0, **_arrow_kw
+            start=[0, 0, 0], direction=[0, 0, 1], scale=1.0,
+            tip_length=0.25, tip_radius=0.08, shaft_radius=0.03,
         )
         self._actor_wind = plotter.add_mesh(self._mesh_wind, color=COL_WIND)
         wind_viz = _to_viz(f.wind_ned)
@@ -1243,7 +1244,7 @@ class RAWESVisualizer:
         # Rotor + blades: spin × hub transform
         Tsa = T @ _rz4(sa)
         self._actor_disk.user_matrix = Tsa
-        if self._individual_blades:
+        if isinstance(self._actor_blades, list):
             for actor in self._actor_blades:
                 actor.user_matrix = Tsa
         else:
@@ -1374,8 +1375,8 @@ class RAWESVisualizer:
             else:
                 self._update_dynamic(plotter, i)
 
-        plotter.add_slider_widget(
-            cb,
+        pv.Plotter.add_slider_widget(
+            plotter, cb,
             rng=[0, self._n - 1],
             value=0,
             title="Frame",
@@ -1403,6 +1404,7 @@ class RAWESVisualizer:
         ren.SetBackground(0.05, 0.05, 0.12)
         ren.SetLayer(1)
         ren.SetInteractive(0)  # camera driven by _sync_inset_camera, not mouse
+        assert plotter.ren_win is not None
         plotter.ren_win.SetNumberOfLayers(2)
         plotter.ren_win.AddRenderer(ren)
         cam = ren.GetActiveCamera()
@@ -1576,6 +1578,7 @@ class RAWESVisualizer:
         c = pv.Color(color).float_rgb
         actor.GetProperty().SetColor(*c)
         actor.GetProperty().SetOpacity(opacity)
+        assert self._inset_ren is not None
         self._inset_ren.AddActor(actor)
         return actor
 

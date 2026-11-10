@@ -107,8 +107,8 @@ def load_csv(path: Path) -> Trace:
     cur = np.array([_to_float(r["current_a"]) for r in rows])
     power = np.array([_to_float(r["power_w"]) for r in rows])
     # Optional columns -- only present in newer captures with Lua NAMED_VALUE_FLOAT.
-    has_yi = "yaw_i_lua" in reader.fieldnames
-    has_yo = "yaw_out_unclamp_lua" in reader.fieldnames
+    has_yi = reader.fieldnames is not None and "yaw_i_lua" in reader.fieldnames
+    has_yo = reader.fieldnames is not None and "yaw_out_unclamp_lua" in reader.fieldnames
     yaw_i_arr = np.array([_to_float(r["yaw_i_lua"]) for r in rows]) if has_yi else None
     yaw_o_arr = (
         np.array([_to_float(r["yaw_out_unclamp_lua"]) for r in rows])
@@ -408,8 +408,8 @@ def section_runaway(tr: Trace, servo_max: int) -> list[str]:
     # find first contiguous saturation run >= 0.2 s
     out = ["", "RUNAWAY CHECK"]
     edges = np.diff(sat.astype(int))
-    starts = list(np.where(edges == 1)[0] + 1)
-    ends = list(np.where(edges == -1)[0] + 1)
+    starts = [int(value) for value in np.where(edges == 1)[0] + 1]
+    ends = [int(value) for value in np.where(edges == -1)[0] + 1]
     if sat[0]:
         starts.insert(0, 0)
     if sat[-1]:
@@ -540,7 +540,7 @@ def recommendations(
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1] if __doc__ else None)
     ap.add_argument(
         "csv",
         nargs="?",

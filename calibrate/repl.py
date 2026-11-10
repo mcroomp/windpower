@@ -31,6 +31,7 @@ from .hw import (
 )
 from .linkhub import ensure_linkhub
 from .messages import read_one
+from linkhub_client.messages import Heartbeat
 from .params import (
     _config_target_params,
     _fetch_dataflash_log,
@@ -661,7 +662,7 @@ def _run_servo_mode(
         "HEARTBEAT",
         wait=2.0,
     )
-    if heartbeat is None:
+    if not isinstance(heartbeat, Heartbeat):
         print("  [FAIL] no heartbeat; servo mode aborted")
         return None
     if MavModeFlag.SAFETY_ARMED in heartbeat.base_mode:
@@ -837,7 +838,7 @@ def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
         "HEARTBEAT",
         wait=2.0,
     )
-    if heartbeat is None:
+    if not isinstance(heartbeat, Heartbeat):
         print("  [FAIL] no heartbeat; swash sweep aborted")
         return
     if MavModeFlag.SAFETY_ARMED in heartbeat.base_mode:
@@ -1331,7 +1332,7 @@ def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
         if name in current
         and abs(float(current[name]["value"]) - float(target[name])) >= 1e-4
     ]
-    updated: dict[str, dict[str, object]] = {}
+    updated = {}
     if apply and differences:
         try:
             session.set_params(differences, timeout=15.0)

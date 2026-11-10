@@ -151,7 +151,7 @@ def main():
     fig.legend(handles=patches, loc="lower center", ncol=len(PHASE_COLORS),
                fontsize=8, framealpha=0.8)
 
-    plt.tight_layout(rect=[0, 0.04, 1, 0.97])
+    plt.tight_layout(rect=(0, 0.04, 1, 0.97))
     plt.show()
 
 

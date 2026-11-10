@@ -25,6 +25,7 @@ import json
 import math
 from pathlib import Path
 from collections.abc import Iterable
+from typing import SupportsFloat, SupportsIndex
 
 
 DEFAULT_SIMTEST_DIR = Path("simulation/logs/test_lua_pumping_unified")
@@ -75,6 +76,8 @@ PARAM_PREFIX_FOCUS = (
 
 def _f(v: object, default: float = float("nan")) -> float:
     if v is None:
+        return default
+    if not isinstance(v, (str, bytes, bytearray, SupportsFloat, SupportsIndex)):
         return default
     try:
         return float(v)

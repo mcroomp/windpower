@@ -1,8 +1,7 @@
-"""Test helpers for one-shot aero probes against the new state-based API.
+"""Shared test helpers for one-shot aero probes against DynBEM's state API.
 
-The new aero (e:/repos/aero) exposes compute_forces(RotorInputs, RotorState)
-and integrates omega + inflow internally.  These helpers wrap the call so
-unit tests that only care about steady-state forces stay readable.
+DynBEM integrates omega and inflow internally. These helpers wrap its step call
+so tests that only care about steady-state forces stay readable.
 
 Use ``probe_steady`` for quasi-steady probes.  Quasi-static aero returns
 immediately; dynamic-inflow models can still be passed explicitly and are

@@ -51,12 +51,12 @@ class RigidBodyDynamics:
         I_body,                       # (3,) principal moments [kg·m²]
         pos0,                         # (3,) initial position ENU [m]
         vel0,                         # (3,) initial velocity [m/s]
-        R0:               np.ndarray  = None,
+        R0:               np.ndarray | None = None,
         omega0                        = None,  # (3,) initial orbital omega world [rad/s]
         g:                float       = 9.81,
         reorth_interval:  int         = 200,
         I_spin:           float       = 0.0,   # spin-axis inertia for gyroscopic coupling [kg·m²]
-        z_floor:          float       = None,  # maximum NED Z (altitude floor) [m]; None = no floor
+        z_floor:          float | None = None,  # maximum NED Z (altitude floor) [m]; None = no floor
     ):
         self.mass    = float(mass)
         self.g       = float(g)

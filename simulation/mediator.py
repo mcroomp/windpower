@@ -192,7 +192,10 @@ def run_mediator(args, trajectory=None):
                      decel_s=round(float(cfg["kinematic_decel_s"]), 1),
                      heading_deg=round(math.degrees(_ic_yaw), 1),
                      launch_pos=[round(v, 3) for v in _startup.launch_pos])
-        _dyn_vel0 = _startup.state_at(0.0)[1]
+        _initial_state = _startup.state_at(0.0)
+        if _initial_state is None:
+            raise RuntimeError("Kinematic startup has no initial state")
+        _dyn_vel0 = _initial_state[1]
     else:
         _startup = KinematicStartup(
             target_pos = _pos0_arr,
@@ -221,7 +224,8 @@ def run_mediator(args, trajectory=None):
     rotor  = _rd.load(_rotor_spec)
     log.info("Rotor: %s (N=%d, R=%.2fm)",
              rotor.name, rotor.blade.n_blades, rotor.blade.radius_m)
-    issues = rotor.validate()
+    # dynbem attaches validate dynamically to its Python rotor class.
+    issues = getattr(rotor, "validate")()
     for issue in issues:
         if issue.level == "ERROR":
             log.error("Rotor validation: %s", issue)

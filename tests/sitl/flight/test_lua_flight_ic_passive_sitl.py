@@ -140,6 +140,7 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
     )
 
     try:
+        assert ctx.telemetry_log is not None
         if not ctx.telemetry_log.exists():
             pytest.fail("Missing telemetry.csv for IC-passive analysis")
 
@@ -194,6 +195,7 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
                 + str(all_statustext[-20:])
             )
 
+        assert ctx.mediator_log is not None
         assert_no_mediator_criticals(ctx.mediator_log)
     finally:
         crash_info = get_arducopter_crash_info(ctx)

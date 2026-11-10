@@ -76,7 +76,7 @@ class VirtualComms:
         # deque of (t_injected, raw_hub_alt_m)
         self._down_buf: deque[tuple[float, float]] = deque()
         # deque of (t_sent, TensionCommand)
-        self._up_buf:   deque[tuple[float, object]] = deque()
+        self._up_buf:   deque[tuple[float, TensionCommand]] = deque()
 
     def inject(self, t_sim: float, hub_alt_m: float) -> None:
         """Feed current physics truth into the downlink buffer (call every 400 Hz step)."""
@@ -112,4 +112,3 @@ class VirtualComms:
             _, cmd = self._up_buf.popleft()
             return cmd
         return None
-

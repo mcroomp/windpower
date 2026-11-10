@@ -49,6 +49,7 @@ gyro_sigma = accel_sigma = 0.0 — noiseless for determinism.
 """
 
 import math
+from typing import TypedDict
 
 import numpy as np
 import pytest
@@ -59,6 +60,7 @@ from simulation.controller import (AltitudeHoldController, compute_rate_cmd,
                           damp_bz_eq_lateral, HeliCyclicController)
 from simulation.sensor import PhysicalSensor
 from simulation.simtest_log import BadEventLog
+from simulation.rotor_physics import require_mass_kg
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 
@@ -86,7 +88,13 @@ WIND.flags.writeable = False
 GYRO_MATCH_TOL_RAD_S = 1e-6
 
 
-def _run(t_sim: float = T_SIM):
+class _RunResult(TypedDict):
+    events: BadEventLog
+    history: list[dict]
+    sensor_log: list[dict]
+
+
+def _run(t_sim: float = T_SIM) -> _RunResult:
     """
     Run 60 s of flight with truth-state control.  PhysicalSensor runs in shadow.
 
@@ -138,7 +146,7 @@ def _run(t_sim: float = T_SIM):
         )
 
         prev_vel   = hub_state["vel"].copy()
-        body_z_eq  = alt_ctrl.update(hub_state["pos"], target_alt, runner.tension_now, float(_ROTOR_S.inertia.mass_kg), DT)
+        body_z_eq  = alt_ctrl.update(hub_state["pos"], target_alt, runner.tension_now, require_mass_kg(_ROTOR_S), DT)
         body_z_eq  = damp_bz_eq_lateral(
             body_z_eq, hub_state["pos"], hub_state["vel"], ANCHOR,
             runner.tension_now, KD_LAT,
@@ -180,7 +188,7 @@ def _run(t_sim: float = T_SIM):
         "pos":        runner.hub_state["pos"].copy(),
         "omega_spin": runner.omega_spin,
     })
-    return dict(events=events, history=history, sensor_log=sensor_log)
+    return {"events": events, "history": history, "sensor_log": sensor_log}
 
 
 # ---------------------------------------------------------------------------

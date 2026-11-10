@@ -24,6 +24,7 @@ from simulation.physics_core import HubObservation
 from groundstation.pumping_planner import TensionCommand
 from simulation.param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range
 from simulation.telemetry_csv import TelRow, write_csv
+from simulation.winch import WinchController, GovernedWinchController
 
 
 def _load_rawes_pumping_constants() -> dict[str, float]:
@@ -112,7 +113,7 @@ class _MockArdupilotBase:
         # telemetry (winch_speed_ms, ...) is centralized the same way as the
         # backend-specific _telemetry_overrides() instead of every test
         # needing to thread it through its own tel_fn.
-        self.winch = None
+        self.winch: WinchController | GovernedWinchController | None = None
         self._telemetry: list = []
         self._log_step = 0
         self._guided_ctrl: GuidedAttitudeController | None = None

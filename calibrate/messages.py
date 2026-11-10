@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 from linkhub_client import LinkHubClient
-from linkhub_client.messages import RawMessage
+from linkhub_client.messages import Message, RawMessage
 
 
 def read_one(
@@ -13,7 +13,7 @@ def read_one(
     *,
     wait: float,
     expected_generation: str | None = None,
-) -> tuple[RawMessage | None, str]:
+) -> tuple[Message | RawMessage | None, str]:
     """Read the next matching message within `wait` seconds.
 
     Returns `(message, cursor)`, or `(None, cursor)` once `wait` has elapsed

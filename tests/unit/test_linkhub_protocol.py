@@ -34,6 +34,7 @@ from linkhub_client.messages import (
     decode_message,
     encode_enum,
     RawMessage,
+    Statustext,
 )
 
 _CLOCK_DICT = {
@@ -286,7 +287,8 @@ def test_read_messages_leaves_out_heartbeats_from_non_autopilot_components(monke
 
     batch = client.read_messages("v1:0", "HEARTBEAT", direction="rx")
 
-    assert [message.autopilot for message in batch.messages] == [
+    assert all(isinstance(message, Heartbeat) for message in batch.messages)
+    assert [message.autopilot for message in batch.messages if isinstance(message, Heartbeat)] == [
         MavAutopilot.ARDUPILOTMEGA
     ]
     assert batch.next_cursor == "v1:3"
@@ -325,7 +327,8 @@ def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
         limit=10,
     )
 
-    assert [message.text for message in batch.messages] == ["ready"]
+    assert all(isinstance(message, Statustext) for message in batch.messages)
+    assert [message.text for message in batch.messages if isinstance(message, Statustext)] == ["ready"]
     assert batch.next_cursor == "v1:15"
     assert batch.next_clock == SimClock(
         epoch=1,
@@ -402,7 +405,9 @@ def test_client_decodes_generated_enum_types_and_preserves_unknown_values(
             landed_state=MavLandedState("MAV_LANDED_STATE_FUTURE"),
         ),
     )
-    assert batch.messages[1].landed_state.name == "MAV_LANDED_STATE_FUTURE"
+    state = batch.messages[1]
+    assert isinstance(state, ExtendedSysState)
+    assert state.landed_state.name == "MAV_LANDED_STATE_FUTURE"
 
 
 def test_decode_message_projects_bitmask_and_enumeration_fields() -> None:

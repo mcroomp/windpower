@@ -41,8 +41,8 @@ REPO = HERE.parents[2]
 rotor = rd.load("naca_tr_552_c")
 aero  = create_aero(rotor, model="rotor")
 
-RHO   = rotor.rho_kg_m3
-R     = rotor.radius_m
+RHO   = 1.225  # kg/m^3, NACA sea-level wind-tunnel condition
+R     = rotor.blade.radius_m
 D     = 2.0 * R                      # 3.05 m diameter
 RPM   = 99.6
 OMEGA = RPM * 2.0 * math.pi / 60.0  # 10.43 rad/s
@@ -217,7 +217,7 @@ for i, pitch in enumerate(PITCHES):
 
 ax_bem.legend(title="Pitch setting", fontsize=7, title_fontsize=8,
               loc='upper right', ncol=2)
-ax_bem.annotate(f"CL_alpha={rotor.CL_alpha_per_rad:.1f}/rad\nCL0={rotor.CL0:.2f}\nCD0={rotor.CD0:.3f}",
+ax_bem.annotate(f"CL_alpha={rotor.airfoil.CL_alpha_per_rad:.1f}/rad\nCL0={rotor.airfoil.CL0:.2f}\nCD0={rotor.airfoil.CD0:.3f}",
                 xy=(0.55, 0.26), fontsize=7.5, color='#333333',
                 bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', ec='gray', alpha=0.85))
 

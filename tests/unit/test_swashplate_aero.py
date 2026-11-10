@@ -23,7 +23,7 @@ from simulation.swashplate import (
     collective_out_to_rad,
     collective_rad_to_out,
 )
-from tests.unit._aero_probe import make_probe, probe_steady
+from tests.common.aero_probe import make_probe, probe_steady
 
 pytestmark = pytest.mark.expensive
 

@@ -27,7 +27,7 @@ from simulation.winch import WinchController
 from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
-from tests.common.mock_ardupilot import MockArdupilot
+from tests.common.mock_ardupilot import MockArdupilot, _PythonBackend
 from groundstation.landing_planner import LandingGroundController
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
@@ -75,7 +75,7 @@ T_FLARE_MAX = 30.0  # s   max time in flare before timeout
 # ---------------------------------------------------------------------------
 
 
-def _run_landing(log) -> tuple[dict, object]:
+def _run_landing(log) -> tuple[dict, _PythonBackend]:
     runner = PhysicsRunner(_ROTOR, _IC, WIND)
 
     ground = LandingGroundController(
@@ -95,7 +95,7 @@ def _run_landing(log) -> tuple[dict, object]:
     ap = MockArdupilot.for_landing(
         ic_body_z=_IC.R0[:, 2],
         slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
-        warm_thrust=_IC.eq_thrust,
+        warm_coll_rad=COL_REEL_IN_RAD,
         kp_outer=2.5,
         wind=WIND,
         dt=DT,

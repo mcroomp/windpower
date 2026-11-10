@@ -34,6 +34,7 @@ def test_sitl_interface_recv_servos_normalizes_binary_payload():
 
         expected = np.zeros(16, dtype=np.float64)
         expected[:4] = np.array([-1.0, 0.0, 1.0, -0.5])
+        assert servos is not None
         np.testing.assert_allclose(servos, expected)
         np.testing.assert_allclose(interface.last_servos(), expected)
         assert interface.dt() == pytest.approx(1 / 400)

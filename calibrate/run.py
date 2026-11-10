@@ -4,6 +4,7 @@ calibrate/run.py -- Observation loop engine, run command.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import math
 import time
 from dataclasses import dataclass
@@ -194,7 +195,8 @@ def _quat_normalize(
     length = math.sqrt(sum(value * value for value in q))
     if length <= 1e-9:
         raise ValueError("Quaternion length is zero")
-    return tuple(value / length for value in q)
+    w, x, y, z = q
+    return w / length, x / length, y / length, z / length
 
 
 def _quat_multiply(
@@ -244,7 +246,7 @@ def _quat_to_euler_deg(
         2.0 * (w * z + x * y),
         1.0 - 2.0 * (y * y + z * z),
     )
-    return tuple(map(math.degrees, (roll, pitch, yaw)))
+    return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
 def _passive_target_messages(
@@ -352,7 +354,7 @@ def _ensure_guided_thrust_option(session: LinkHubClient) -> bool:
 
 def _send_lua_command(
     session: LinkHubClient,
-    command: int,
+    command: MavCmd,
     params: list[float],
     label: str,
 ) -> bool:
@@ -1034,7 +1036,8 @@ def _run_observation(
             f"    servo pwm  {state['s1']} / {state['s2']} / {state['s3']}"
         )
 
-    passive_reset_handler = None
+    passive_reset_handler: Callable[[tuple[float, float, float, float]], None] | None = None
+    passive_control_handler: Callable[[str, int], None] | None = None
     if mode_name == "none":
         passive_control_handler = None
         # In none mode (Lua idle) the yaw PID is inert, so the live keys tune the
@@ -1152,7 +1155,7 @@ def _run_observation(
 
         _show_passive_target()
 
-        def passive_control_handler(axis: str, direction: int) -> None:
+        def _passive_control(axis: str, direction: int) -> None:
             nonlocal protocol_sequence, protocol_pending_sequence
             nonlocal protocol_pending_until, protocol_last_target_q
             protocol_sequence += 1
@@ -1172,7 +1175,7 @@ def _run_observation(
                 )
             _show_passive_target()
 
-        def passive_reset_handler(
+        def _passive_reset(
             actual_q: tuple[float, float, float, float],
         ) -> None:
             nonlocal protocol_sequence, protocol_pending_sequence
@@ -1193,6 +1196,9 @@ def _run_observation(
                     f"{wire_name}={value:+.1f} (onboard atomic capture)"
                 )
             _show_passive_target()
+
+        passive_control_handler = _passive_control
+        passive_reset_handler = _passive_reset
 
         def key_handler(k: bytes) -> None:
             if rotor_motor is not None:
@@ -1651,6 +1657,9 @@ def _run_observation(
         ]
 
     live_view = None
+    def _update_live_view(st, t_rel: float) -> bool:
+        return True
+
     if mode_name == "passive" and not protocol_debug:
         if passive_control_handler is None or passive_reset_handler is None:
             raise RuntimeError("passive control handlers were not initialized")
@@ -1661,7 +1670,7 @@ def _run_observation(
             passive_reset_handler,
         )
 
-        def _update_live_view(st, t_rel: float) -> bool:
+        def _update_passive_live_view(st, t_rel: float) -> bool:
             actual_q = state["att_q"] or (1.0, 0.0, 0.0, 0.0)
             _, _, _, _, qerr_deg, _ = _quat_error(state["att_q"], state["att_target_q"])
             _, _, rotor_rpm = _rpm_triplet(state["erpm"])
@@ -1684,10 +1693,7 @@ def _run_observation(
                     quaternion_error_deg=qerr_deg,
                 )
             )
-    else:
-
-        def _update_live_view(_st, _t_rel: float) -> bool:
-            return True
+        _update_live_view = _update_passive_live_view
 
     if protocol_debug:
         print("  Protocol debug: text-only, no 3D renderer.")
@@ -1717,6 +1723,7 @@ def _run_observation(
             actual_q = state["att_q"]
             if actual_q is None:
                 return
+            assert passive_reset_handler is not None
             passive_reset_handler(actual_q)
         elif kind in ("roll", "pitch", "attitude"):
             protocol_sequence += 1

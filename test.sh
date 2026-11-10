@@ -59,7 +59,7 @@ _sync_code() {
         --exclude="tests/unit" \
         --exclude=".venv" \
         --exclude="*.egg-info" \
-        -cf - pyproject.toml simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate linkhub_client \
+        -cf - pyproject.toml pyrightconfig.json simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate linkhub_client \
     | docker exec -i "$_c" tar -xf - -C /rawes/
     # dynbem (the Rust-backed aero core) is installed from a pinned PyPI wheel,
     # not synced from the sibling ../aero source workspace -- that source tree

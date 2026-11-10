@@ -9,10 +9,18 @@ import pytest
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     root = Path(__file__).resolve().parents[1]
-    result = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", str(root)],
-        cwd=root,
-        check=False,
+    checks = (
+        ("Ruff", ["ruff", "check", str(root)]),
+        ("Pyright", [
+            "pyright", "--project", str(root / "pyrightconfig.json"),
+            "--pythonpath", sys.executable, "--warnings",
+        ]),
     )
-    if result.returncode:
-        raise pytest.UsageError("Ruff failed; fix the reported lint errors before running tests.")
+    for name, args in checks:
+        result = subprocess.run(
+            [sys.executable, "-m", *args],
+            cwd=root,
+            check=False,
+        )
+        if result.returncode:
+            raise pytest.UsageError(f"{name} failed; fix the reported errors before running tests.")

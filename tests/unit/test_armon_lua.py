@@ -106,7 +106,9 @@ class TestArmonDeadlineRefresh:
         sim.run(0.1)
         _send_arm(sim, 1_000.0)
         sim.tick()
-        assert _armon_deadline_ms(sim) > first_deadline
+        refreshed_deadline = _armon_deadline_ms(sim)
+        assert first_deadline is not None and refreshed_deadline is not None
+        assert refreshed_deadline > first_deadline
         sim.run(0.2)
         assert sim.armed is True
 

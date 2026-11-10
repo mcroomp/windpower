@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 
 
-from tests.unit._aero_probe import load_rotor, make_probe, probe_steady
+from tests.common.aero_probe import load_rotor, make_probe, probe_steady
 
 _ROTOR = load_rotor("beaupoil_2026")
 _AERO  = make_probe(_ROTOR)

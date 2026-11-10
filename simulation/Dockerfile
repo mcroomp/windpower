@@ -2,6 +2,8 @@
 
 ARG ARDUPILOT_RUNTIME_IMAGE=rawes-sim-ardupilot-base:Copter-4.7.1-v1
 
+FROM node:24-bookworm-slim AS node
+
 FROM ubuntu:24.04 AS base
 
 # =============================================================================
@@ -47,6 +49,9 @@ RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && echo UTC > /etc/timezone \
 # =============================================================================
 FROM base AS pyenv
 
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY .node-version /tmp/.node-version
+RUN node -e "if (process.versions.node.split('.')[0] !== require('fs').readFileSync('/tmp/.node-version', 'utf8').trim()) process.exit(1)"
 COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 ENV VENV_DIR=/rawes/.venv
 ENV UV_PYTHON_INSTALL_DIR=/opt/python

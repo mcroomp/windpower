@@ -17,7 +17,7 @@ from simulation.controller import HeliCyclicController, compute_rate_cmd, comput
 from simulation.frames import build_orb_frame
 from simulation.param_defaults import coll_rad_to_thrust
 from simulation.rotor_physics import resolve_i_spin_kgm2
-from tests.unit._aero_probe import load_rotor
+from tests.common.aero_probe import load_rotor
 
 pytestmark = pytest.mark.expensive
 
@@ -112,7 +112,7 @@ def _run_attitude_only_at_fixed_equilibrium(
     ])
     R0 = R_eq @ R_pert
 
-    from tests.unit._aero_probe import make_probe
+    from tests.common.aero_probe import make_probe
     aero_model = make_probe(_ROTOR)
     state = aero_model.initial_rotor_state()
 
@@ -279,7 +279,7 @@ def _run_with_constant_tether_force(
         damp_bz_eq_lateral, position_feedback_bz_eq,
     )
     from simulation.dynamics import RigidBodyDynamics
-    from tests.unit._aero_probe import make_probe
+    from tests.common.aero_probe import make_probe
 
     el = math.radians(elevation_deg)
     pos_design = 100.0 * np.array([0.0, math.cos(el), -math.sin(el)])

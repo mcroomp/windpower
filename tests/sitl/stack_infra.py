@@ -61,6 +61,7 @@ from tests.sitl.stack_utils import (
 from linkhub_client.mav_constants import GUIDED, GUIDED_NOGPS
 from linkhub_client.messages import (
     Attitude,
+    Heartbeat,
     AttitudeTargetTypemask,
     decode_message,
     EkfStatusFlags,
@@ -1020,7 +1021,7 @@ def _arm_sequence(
     _hb, _ = _read_one(
         gcs, gcs.current_cursor(), "HEARTBEAT", wait=0.5,
     )
-    if _hb is not None:
+    if isinstance(_hb, Heartbeat):
         _actual = int(_hb.custom_mode)
     if _actual is None:
         log.info("[arm] %s confirmed by set_mode(); no immediate heartbeat for re-check.", _mode_name)
@@ -1063,7 +1064,7 @@ def _arm_sequence(
             target_system=gcs._target_system,
             target_component=gcs._target_component,
             type_mask=mask,
-            q=q,
+            q=tuple(q),
             body_roll_rate=0.0,
             body_pitch_rate=0.0,
             body_yaw_rate=0.0,
@@ -2288,7 +2289,7 @@ def _torque_stack(
                 _att, message_cursor = _read_one(
                     gcs, message_cursor, "ATTITUDE", wait=2.0,
                 )
-                if _att is not None and all(
+                if isinstance(_att, Attitude) and all(
                     math.isfinite(v) for v in (_att.roll, _att.pitch, _att.yaw)
                 ):
                     _pre_arm_roll = float(_att.roll)

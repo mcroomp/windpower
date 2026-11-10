@@ -183,7 +183,10 @@ def _terminate_process(proc: subprocess.Popen) -> None:
         return
     import signal
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        if sys.platform == "win32":
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
     except (ProcessLookupError, AttributeError):
         proc.terminate()
     try:
@@ -192,7 +195,10 @@ def _terminate_process(proc: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         pass
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        if sys.platform == "win32":
+            proc.kill()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, AttributeError):
         proc.kill()
     proc.wait(timeout=5.0)
@@ -207,6 +213,8 @@ def _kill_by_port(port: int) -> None:
     remaining process via fuser (preferred) or /proc/net/tcp fallback and
     sends SIGKILL.
     """
+    if sys.platform == "win32":
+        raise RuntimeError("Port-based process cleanup requires Linux/Docker")
     import signal as _signal
 
     # Try fuser first (fast, available when psmisc is installed in Docker image)

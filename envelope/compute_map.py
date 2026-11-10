@@ -21,6 +21,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+from simulation.rotor_physics import require_mass_kg
 
 
 
@@ -47,7 +48,7 @@ def _ramp_full_column(args: tuple) -> list:
     rotor     = load_default_rotor()
     aero      = create_aero(rotor, model="quasi_static")
     rotor_state = aero.initial_rotor_state()
-    mass      = float(rotor.inertia.mass_kg)
+    mass      = require_mass_kg(rotor)
     I_ode     = float(rotor.autorotation.I_ode_kgm2 or 10.0)
     omega_min = float(rotor.autorotation.omega_min_rad_s or 0.5)
     weight  = mass * 9.81
@@ -349,10 +350,12 @@ if __name__ == "__main__":
             tension_list = {float(k): list(map(float, v)) for k, v in tension_list_cfg.items()}  # type: ignore[union-attr]
             tension_list_min = min(min(v) for v in tension_list.values())
             tension_list_max = max(max(v) for v in tension_list.values())
-        else:
+        elif isinstance(tension_list_cfg, list):
             tension_list = list(map(float, tension_list_cfg))
             tension_list_min = tension_list[0]
             tension_list_max = tension_list[-1]
+        else:
+            raise TypeError("tension_list must be a list or a per-speed mapping")
 
         t_end        = float(cfg["t_end"])                   # type: ignore[arg-type]
         dt           = float(cfg["dt"])                      # type: ignore[arg-type]

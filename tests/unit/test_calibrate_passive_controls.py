@@ -1,3 +1,4 @@
+from unittest.mock import Mock
 import math
 import time
 
@@ -72,7 +73,7 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
     monkeypatch.setattr(calibrate_run, "_PASSIVE_RUNUP_MARGIN_S", 0.0)
     monkeypatch.setattr(calibrate_run, "decode_message", lambda message: message)
 
-    assert _wait_for_passive_runup(Session()) is True
+    assert _wait_for_passive_runup(Mock(wraps=Session())) is True
     assert events
 
     class LandClearSession:
@@ -95,7 +96,7 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
                 _CLOCK,
             )
 
-    assert _wait_for_passive_land_clear(LandClearSession()) is True
+    assert _wait_for_passive_land_clear(Mock(wraps=LandClearSession())) is True
 
 
 def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
@@ -146,10 +147,11 @@ def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
 
     session = Session()
     assert _wait_for_passive_ekf_settle(
-        session,
+        Mock(wraps=session),
         timeout_s=0.1,
         settle_s=0.0,
     ) is True
+    assert session.receive_types is not None
     assert "ATTITUDE" in session.receive_types
     assert not any(isinstance(message, SetAttitudeTarget) for message in session.sent)
 
@@ -201,7 +203,7 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
     monkeypatch.setattr(calibrate_run, "decode_message", lambda message: message)
 
     assert _wait_for_passive_ekf_settle(
-        Session(),
+        Mock(wraps=Session()),
         timeout_s=0.5,
         settle_s=0.1,
     ) is False
@@ -220,7 +222,7 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
                 (session, args, kwargs)
             ),
         )
-        typed_session = object()
+        typed_session = Mock()
         calibrate_run.run_passive(
             typed_session,
             calibrate_run.PassiveRunOptions(
@@ -249,9 +251,9 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
         def get_param(self, name):
             return self.params[name]
 
-    assert calibrate_run._ensure_passive_tail_setup(TailSession(3.0, 36.0))
-    assert not calibrate_run._ensure_passive_tail_setup(TailSession(3.0, 0.0))
-    assert not calibrate_run._ensure_passive_tail_setup(TailSession(0.0, 36.0))
+    assert calibrate_run._ensure_passive_tail_setup(Mock(wraps=TailSession(3.0, 36.0)))
+    assert not calibrate_run._ensure_passive_tail_setup(Mock(wraps=TailSession(3.0, 0.0)))
+    assert not calibrate_run._ensure_passive_tail_setup(Mock(wraps=TailSession(0.0, 36.0)))
 
     class Session:
         _target_system = 1
@@ -351,7 +353,7 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
     )
 
     calibrate_run._cmd_run(
-        Session(),
+        Mock(wraps=Session()),
         [
             "passive",
             "--duration", "1",
@@ -567,6 +569,7 @@ def test_passive_lua_applies_incremental_target_updates_and_preserves_yaw():
     sim.send_message(NamedValueFloat(name="RAWES_POFF", value=math.radians(-5.0)))
     sim.send_message(NamedValueFloat(name="RAWES_YOFF", value=math.radians(120.0)))
     sim.run(0.1)
+    assert sim.guided_target is not None
     assert sim.guided_target["roll_deg"] == pytest.approx(20.0)
     sim.send_message(NamedValueFloat(name="RAWES_THR", value=0.45))
     sim.run(0.1)
@@ -685,11 +688,13 @@ def test_passive_anchor_is_captured_in_lua_and_offsets_are_relative():
     sim.run(0.1)
 
     assert sim.fns.passive_anchor_q() is not None
+    assert sim.guided_target is not None
     assert sim.guided_target["yaw_deg"] == pytest.approx(30.0)
 
     sim.send_message(NamedValueFloat(name="RAWES_YOFF", value=math.radians(20.0)))
     sim.run(0.1)
 
+    assert sim.guided_target is not None
     assert sim.guided_target["yaw_deg"] == pytest.approx(50.0)
 
 
@@ -755,11 +760,13 @@ def test_guided_entry_hold_persists_until_enter_passive_captures_anchor():
     sim.R = _hold_attitude_r(-130.0, -82.0, -50.0)
     sim._lua.execute("_mock.guided_target = nil")
     sim.run(1.1)
+    assert sim.guided_target is not None
     assert sim.guided_target["roll_deg"] == pytest.approx(-134.0, abs=1e-4)
 
     sim.set_param("RAWES_MODE", 3)
     sim._lua.execute("_mock.guided_target = nil")
     sim.run(0.2)
+    assert sim.guided_target is not None
     assert sim.guided_target["roll_deg"] == pytest.approx(-134.0, abs=1e-4)
 
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params(0.0))
@@ -769,12 +776,15 @@ def test_guided_entry_hold_persists_until_enter_passive_captures_anchor():
         MavResult.ACCEPTED, MavResult.ACCEPTED,
     ]
     assert sim.fns.passive_anchor_q() is not None
+    assert sim.guided_target is not None
     assert sim.guided_target["roll_deg"] == pytest.approx(-130.0, abs=1e-4)
     assert sim.guided_target["yaw_deg"] == pytest.approx(-50.0, abs=1e-4)
 
 
-def _guided_target_calls(sim):
-    return sim._lua.eval("_mock.guided_target_calls or 0")
+def _guided_target_calls(sim) -> int:
+    value = sim._lua.eval("_mock.guided_target_calls or 0")
+    assert isinstance(value, (int, float))
+    return int(value)
 
 
 def test_static_holds_call_scheduler_locked_binding_only_on_change_or_keepalive():
@@ -859,4 +869,5 @@ def test_enter_passive_requires_passive_mode_and_retry_does_not_recapture():
     sim.send_command(CMD_ENTER_PASSIVE, enter_passive_params(), confirmation=1)
     sim.run(0.1)
     assert sim.command_acks[2]["result"] == MavResult.ACCEPTED
+    assert sim.guided_target is not None
     assert sim.guided_target["yaw_deg"] == pytest.approx(30.0, abs=1e-4)

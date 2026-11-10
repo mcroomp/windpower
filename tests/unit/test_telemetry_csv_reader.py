@@ -154,7 +154,7 @@ def test_enrichment_maps_diagnostic_array_keys_by_validity_mask(tmp_path) -> Non
     mavlink = tmp_path / "mavlink.jsonl"
     output = tmp_path / "telemetry.csv"
     _write_physics_csv(physics)
-    keys = list(DIAG_KEYS)
+    keys: list[str] = list(DIAG_KEYS)
     data = [0.0] * 58
     for key, value in (("YFF_U", 0.25), ("OL_TEN", 12.5), ("OL_AP", 0.0)):
         index = keys.index(key)
