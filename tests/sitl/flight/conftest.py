@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 
 from tests.sitl.stack_infra import *  # noqa: F401,F403  — re-export everything for test imports
-from tests.sitl.stack_infra import (
-    _acro_stack,
+from tests.sitl.stack_infra import _acro_stack
+from tests.sitl.stack_utils import (
     HOME_LAT_DEG,
     HOME_LON_DEG,
     HOME_ALT_M,

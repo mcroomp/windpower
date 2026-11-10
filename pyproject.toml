@@ -23,6 +23,7 @@ simulation = [
     "imageio-ffmpeg",
     "lupa",
     "matplotlib",
+    "neuralfoil",
     "numba",
     "numpy",
     "pandas",
@@ -32,6 +33,7 @@ simulation = [
 
 [dependency-groups]
 dev = [
+    "pyright[nodejs]",
     "pytest",
     "pytest-timeout",
     "ruff",

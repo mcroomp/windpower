@@ -76,6 +76,11 @@ cache-hit builds. `tests/conftest.py` also runs Ruff with the test interpreter b
 pytest session (including collection-only invocations and Docker stack workers).
 Lint errors or a missing Ruff installation stop the session explicitly.
 
+For standalone type diagnostics, install the simulation extra and run
+`uv run pyright`. The basic-mode configuration in `pyrightconfig.json` currently
+reports existing errors and is not yet a build/test gate. Simulation dependencies
+include NeuralFoil for the SG6042 polar analysis.
+
 ## Markers and timeouts
 
 `pyproject.toml` currently defines:

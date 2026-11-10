@@ -18,7 +18,6 @@ Exported names (imported by conftest.py via ``from stack_infra import *``):
     _TORQUE_STARTUP_HOLD_S
     _STARTUP_TIMEOUT, _ARM_TIMEOUT, _MODE_TIMEOUT, _STARTUP_DAMP_S
     _static_stack
-    HOME_LAT_DEG, HOME_LON_DEG, HOME_ALT_M
 """
 import contextlib
 import dataclasses

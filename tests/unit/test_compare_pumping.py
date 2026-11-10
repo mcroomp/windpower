@@ -5,7 +5,7 @@ from simulation.telemetry_columns import COLUMNS
 
 
 def test_comparison_columns_are_canonical():
-    assert KEY_COLS
+    assert len(KEY_COLS) > 0
     assert set(KEY_COLS) <= set(COLUMNS)
 
 
