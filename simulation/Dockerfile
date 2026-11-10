@@ -56,10 +56,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 ENV VENV_DIR=/rawes/.venv
 ENV UV_PYTHON_INSTALL_DIR=/opt/python
 
-COPY simulation/requirements.txt simulation/requirements-docker.txt /tmp/
+WORKDIR /rawes
+COPY pyproject.toml uv.lock .python-version ./
+COPY linkhub_client/pyproject.toml ./linkhub_client/pyproject.toml
 RUN uv python install 3.14.10 \
-    && uv venv --python 3.14.10 "$VENV_DIR" \
-    && uv pip install --python "$VENV_DIR/bin/python" -r /tmp/requirements-docker.txt --quiet
+    && uv sync --locked --python 3.14.10 --managed-python \
+        --dev --extra simulation --extra sitl --no-install-local
 
 # Activate venv for all subsequent RUN commands and the final shell
 ENV PATH="$VENV_DIR/bin:/usr/local/bin:$PATH"

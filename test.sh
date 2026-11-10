@@ -59,84 +59,10 @@ _sync_code() {
         --exclude="tests/unit" \
         --exclude=".venv" \
         --exclude="*.egg-info" \
-        -cf - pyproject.toml pyrightconfig.json simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate linkhub_client \
+        -cf - pyproject.toml uv.lock .python-version pyrightconfig.json simulation groundstation arduloop envelope analysis viz3d scripts tests calibrate linkhub_client \
     | docker exec -i "$_c" tar -xf - -C /rawes/
-    # dynbem (the Rust-backed aero core) is installed from a pinned PyPI wheel,
-    # not synced from the sibling ../aero source workspace -- that source tree
-    # is not needed at runtime (all rawes code imports only `dynbem`, never
-    # bare `aero`/`dynbem_rs`) and its pyproject.toml previously clobbered
-    # rawes's own /rawes/pyproject.toml (pytest timeout/marker config) when
-    # both were synced to the same container path.
-    docker exec "$_c" bash -lc 'python - <<"PY"
-import importlib.metadata as m
-import pathlib
-import re
-import subprocess
-import sys
-
-req_path = pathlib.Path("/rawes/simulation/requirements.txt")
-if not req_path.exists():
-    print(f"[ERROR] requirements file not found: {req_path}", file=sys.stderr)
-    raise SystemExit(2)
-
-required = None
-for raw in req_path.read_text(encoding="utf-8").splitlines():
-    line = raw.split("#", 1)[0].strip()
-    if not line:
-        continue
-    m_req = re.match(r"^dynbem\s*==\s*([A-Za-z0-9_.+-]+)$", line)
-    if m_req:
-        required = m_req.group(1)
-        break
-
-if required is None:
-    print("[ERROR] dynbem exact pin (dynbem==<version>) missing in requirements.txt; aborting sync.", file=sys.stderr)
-    raise SystemExit(2)
-
-try:
-    version = m.version("dynbem")
-except m.PackageNotFoundError:
-    version = None
-
-try:
-    import dynbem
-    api_ok = hasattr(dynbem, "step_omega")
-except ImportError:
-    api_ok = False
-
-if version != required or not api_ok:
-    try:
-        # Install dynbem from PyPI (wheel-only) to avoid local Rust builds in container.
-        subprocess.check_call([
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "-q",
-            "--upgrade",
-            "--force-reinstall",
-            "--only-binary=:all:",
-            "--index-url",
-            "https://packagefeedproxy.microsoft.io/pypi/simple/",
-            f"dynbem=={required}",
-        ])
-    except subprocess.CalledProcessError as exc:
-        print(f"[ERROR] dynbem=={required} PyPI wheel install failed; aborting sync.", file=sys.stderr)
-        raise SystemExit(exc.returncode or 2)
-
-# Hard guard: abort if dynbem is still missing or wrong version.
-try:
-    installed = m.version("dynbem")
-    import dynbem
-    installed_api_ok = hasattr(dynbem, "step_omega")
-except m.PackageNotFoundError:
-    installed = None
-    installed_api_ok = False
-
-if installed != required or not installed_api_ok:
-    print(f"[ERROR] dynbem validation failed after install (required={required!r}, found={installed!r}, step_omega={installed_api_ok}); aborting sync.", file=sys.stderr)
-    raise SystemExit(2)
-PY'
+    docker exec "$_c" uv sync --project /rawes --locked --python /rawes/.venv/bin/python \
+        --dev --extra simulation --extra sitl
     echo "[INFO] Code sync complete."
 }
 
@@ -358,7 +284,7 @@ _run_stack() {
         _log "[t${j}] starting: $_label ($_c)"
         (
             docker run -d --cap-add=SYS_PTRACE --name "$_c" "$IMAGE" sleep infinity >/dev/null 2>&1
-            _sync_code "$_c" >/dev/null 2>&1
+            _sync_code "$_c"
             docker exec "$_c" bash -c "rm -rf /rawes/simulation/logs && mkdir -p /rawes/simulation/logs"
             _test_rc=0
             docker exec \

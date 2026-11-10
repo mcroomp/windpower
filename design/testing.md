@@ -30,6 +30,11 @@ its own prerequisites.
 
 From the repo root:
 
+Python dependencies are declared only in `pyproject.toml` and resolved in `uv.lock`.
+Use `uv add` (with the appropriate `--dev` or `--optional` selection) to change
+dependencies, and commit both files. Setup, CI, and Docker consume the lockfile
+with `uv sync --locked`; there are no separate requirements files.
+
 ```powershell
 uv sync --dev
 uv sync --dev --extra simulation   # required for physics-heavy simtests
@@ -48,6 +53,11 @@ uv run python -m pytest tests\unit tests\simtests -q
 
 Do **not** run `tests/sitl/` with host-side `pytest`; use
 [sitl_testing.md](sitl_testing.md).
+
+The streaming wrapper is also available as
+`uv run python simulation/run_tests.py --filter summary tests/unit -q`.
+It launches pytest through the project uv environment without synchronizing;
+run `uv sync --dev --extra simulation` explicitly after dependency changes.
 
 ## Python linting
 

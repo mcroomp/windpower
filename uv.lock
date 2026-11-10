@@ -426,6 +426,12 @@ wheels = [
 ]
 
 [[package]]
+name = "empy"
+version = "3.3.4"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/empy/3.3.4/empy-3.3.4.tar.gz", hash = "sha256:73ac49785b601479df4ea18a7c79bc1304a8a7c34c02b9472cf1206ae88f01b3", size = 62857, upload-time = "2026-10-01T09:33:42Z" }
+
+[[package]]
 name = "fastcrc"
 version = "0.5.0"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -1138,6 +1144,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pexpect"
+version = "4.9.0"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+dependencies = [
+    { name = "ptyprocess" },
+]
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/pexpect/4.9/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2026-08-12T20:21:54Z" }
+wheels = [
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/pexpect/4.9/pexpect-4.9.0-py2.py3-none-any.whl", hash = "sha256:7236d1e080e4936be2dc3e326cec0af72acf9212a7e1d060210e70a47e253523", size = 63772, upload-time = "2026-07-24T07:08:02Z" },
+]
+
+[[package]]
 name = "pillow"
 version = "12.3.0"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -1217,6 +1235,15 @@ dependencies = [
 sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/pooch/1.9/pooch-1.9.0.tar.gz", hash = "sha256:de46729579b9857ffd3e741987a2f6d5e0e03219892c167c6578c0091fb511ed", size = 61788, upload-time = "2026-08-08T00:10:08Z" }
 wheels = [
     { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/pooch/1.9/pooch-1.9.0-py3-none-any.whl", hash = "sha256:f265597baa9f760d25ceb29d0beb8186c243d6607b0f60b83ecf14078dbc703b", size = 67175, upload-time = "2026-07-24T13:31:49Z" },
+]
+
+[[package]]
+name = "ptyprocess"
+version = "0.7.0"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/ptyprocess/0.7/ptyprocess-0.7.0.tar.gz", hash = "sha256:5c5d0a3b48ceee0b48485e0c26037c0acd7d29765ca3fbb5cb3831d347423220", size = 70762, upload-time = "2026-08-10T09:27:10Z" }
+wheels = [
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/ptyprocess/0.7/ptyprocess-0.7.0-py2.py3-none-any.whl", hash = "sha256:4b41f3967fce3af57cc7e94b888626c18bf37a083e3651ca8feeb66d492fef35", size = 13993, upload-time = "2026-07-24T09:37:52Z" },
 ]
 
 [[package]]
@@ -1529,6 +1556,10 @@ simulation = [
     { name = "pyvista" },
     { name = "scipy" },
 ]
+sitl = [
+    { name = "empy" },
+    { name = "pexpect" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1541,6 +1572,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dynbem", marker = "extra == 'simulation'", specifier = "==0.8.0" },
+    { name = "empy", marker = "extra == 'sitl'", specifier = "==3.3.4" },
     { name = "imageio", marker = "extra == 'simulation'" },
     { name = "imageio-ffmpeg", marker = "extra == 'simulation'" },
     { name = "linkhub-client", editable = "linkhub_client" },
@@ -1551,13 +1583,14 @@ requires-dist = [
     { name = "numba", marker = "extra == 'simulation'" },
     { name = "numpy", marker = "extra == 'simulation'" },
     { name = "pandas", marker = "extra == 'simulation'" },
+    { name = "pexpect", marker = "extra == 'sitl'" },
     { name = "pymavlink" },
     { name = "pyserial" },
     { name = "pyvista", marker = "extra == 'simulation'" },
     { name = "pyyaml" },
     { name = "scipy", marker = "extra == 'simulation'" },
 ]
-provides-extras = ["simulation"]
+provides-extras = ["simulation", "sitl"]
 
 [package.metadata.requires-dev]
 dev = [

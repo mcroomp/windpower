@@ -38,7 +38,7 @@ import contextlib
 try:
     import serial
 except ImportError:
-    print("ERROR: pyserial not installed -- run: pip install pyserial")
+    print("ERROR: pyserial not installed -- run from the repository root: uv sync --dev")
     sys.exit(1)
 
 

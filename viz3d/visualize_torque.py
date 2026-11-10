@@ -116,7 +116,7 @@ def _row_to_frame(r) -> TorqueTelemetryFrame:
 try:
     import pyvista as pv
 except ImportError:
-    print("PyVista not found.  Install with:  pip install pyvista")
+    print("PyVista not found. Run: uv sync --dev --extra simulation")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
