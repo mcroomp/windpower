@@ -19,7 +19,6 @@ These tests verify the kinematic formula and trajectory properties only.
 No aerodynamics, wind, or tether forces are involved.
 """
 
-import sys
 import os
 import math
 
@@ -29,10 +28,11 @@ import pytest
 # ---------------------------------------------------------------------------
 # Import from mediator
 # ---------------------------------------------------------------------------
-_SIM_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
-
 from simulation.mediator import compute_launch_position
 import simulation.config as _mcfg
+
+_SIM_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
+
 DEFAULT_POS0 = _mcfg.DEFAULTS["pos0"]
 DEFAULT_VEL0 = _mcfg.DEFAULTS["vel0"]
 

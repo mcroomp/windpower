@@ -106,7 +106,7 @@ class GovernedWinchNode:
     """
 
     def __init__(self, winch: GovernedWinchController,
-                 anemometer: "Anemometer | None" = None):
+                 anemometer: Anemometer | None = None):
         self._winch      = winch
         self._anemometer = anemometer
         self._tension_n: float      = 0.0

@@ -57,7 +57,7 @@ class _RecordingSession(_Session):
 
 def test_watch_attitude_handles_already_decoded_attitude(monkeypatch):
     clock = iter([0.0, 0.1, 0.2, 16.0])
-    monkeypatch.setattr("calibrate.watch.time.monotonic", clock.__next__)
+    monkeypatch.setattr("calibrate.run.time.monotonic", clock.__next__)
     monkeypatch.setattr("calibrate.run.decode_message", lambda message: message)
     log = _Log()
 
@@ -69,7 +69,7 @@ def test_watch_attitude_handles_already_decoded_attitude(monkeypatch):
 
 def test_observation_loop_requests_yaw_pid_tuning_at_4_hz_by_default(monkeypatch):
     clock = iter([0.0, 0.1, 0.2, 16.0])
-    monkeypatch.setattr("calibrate.watch.time.monotonic", clock.__next__)
+    monkeypatch.setattr("calibrate.run.time.monotonic", clock.__next__)
     monkeypatch.setattr("calibrate.run.decode_message", lambda message: message)
     session = _RecordingSession()
 

@@ -19,7 +19,6 @@ This module is a standalone analysis tool — not part of the simulation runtime
 
 import math
 import numpy as np
-from typing import Optional
 
 
 class StripThrust:
@@ -171,7 +170,7 @@ class StripThrust:
         }
 
 
-def from_rotor(rotor, n_strips: int = 20) -> "StripThrust":
+def from_rotor(rotor, n_strips: int = 20) -> StripThrust:
     """Build a StripThrust from a RotorDefinition."""
     return StripThrust(
         n_blades      = rotor.n_blades,

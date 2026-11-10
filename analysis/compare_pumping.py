@@ -20,6 +20,17 @@ _SIM = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 
 _LOG = _SIM / "logs"
 
+KEY_COLS = (
+    "tether_tension",
+    "collective_rad",
+    "thrust_from_alt_ctrl",
+    "alt_pid_integral",
+    "omega_rotor",
+    "pos_z",
+    "tether_rest_length",
+    "winch_speed_ms",
+)
+
 
 def _load(path: Path) -> list[dict]:
     rows = []

@@ -66,13 +66,13 @@ class BadEventLog:
         return False
 
     # ----------------------------------------------------------------- query
-    def of_kind(self, kind: str, phase: "str | None" = None) -> list[dict]:
+    def of_kind(self, kind: str, phase: str | None = None) -> list[dict]:
         evs = [e for e in self._events if e["kind"] == kind]
         if phase is not None:
             evs = [e for e in evs if e["phase"] == phase]
         return evs
 
-    def count(self, kind: str, phase: "str | None" = None) -> int:
+    def count(self, kind: str, phase: str | None = None) -> int:
         return len(self.of_kind(kind, phase))
 
     def __bool__(self) -> bool:

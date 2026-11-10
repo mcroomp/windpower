@@ -9,21 +9,19 @@ steady-flight controller test.
 Frame: NED + FRD throughout.  Anchor at origin.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.expensive
-
-
 from simulation.controller import HeliCyclicController, compute_rate_cmd, compute_bz_tether
 from simulation.frames import build_orb_frame
-from simulation.physics_core import PhysicsCore
 from simulation.param_defaults import coll_rad_to_thrust
 from simulation.rotor_physics import resolve_i_spin_kgm2
 from tests.unit._aero_probe import load_rotor
+
+pytestmark = pytest.mark.expensive
+
+
 
 
 _ROTOR     = load_rotor("beaupoil_2026")
@@ -99,7 +97,6 @@ def _run_attitude_only_at_fixed_equilibrium(
     the angle to the fixed body_z_eq decays to < 1° within t_total.
     """
     from dynbem       import RotorInputs, solve_trim_cyclic
-    from simulation.controller import HeliCyclicController, compute_rate_cmd
 
     el          = math.radians(elevation_deg)
     pos_fixed   = 100.0 * np.array([0.0, math.cos(el), -math.sin(el)])
@@ -115,7 +112,6 @@ def _run_attitude_only_at_fixed_equilibrium(
     ])
     R0 = R_eq @ R_pert
 
-    aero  = _ROTOR  # alias for legibility
     from tests.unit._aero_probe import make_probe
     aero_model = make_probe(_ROTOR)
     state = aero_model.initial_rotor_state()
@@ -279,8 +275,7 @@ def _run_with_constant_tether_force(
     """
     from dynbem       import RotorInputs, solve_trim_cyclic
     from simulation.controller import (
-        HeliCyclicController, AltitudeHoldController,
-        compute_rate_cmd, compute_bz_tether,
+        AltitudeHoldController,
         damp_bz_eq_lateral, position_feedback_bz_eq,
     )
     from simulation.dynamics import RigidBodyDynamics

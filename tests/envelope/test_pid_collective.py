@@ -1,9 +1,6 @@
 """
 test_pid_collective.py -- Verify the collective PI converges to v_target.
 """
-import math
-import sys
-from pathlib import Path
 
 import pytest
 

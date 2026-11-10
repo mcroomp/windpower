@@ -8,21 +8,28 @@ set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;%ProgramFiles%\WinGet\Links;%Pro
 
 call :ensure_tool uv astral-sh.uv
 if errorlevel 1 exit /b 1
-echo [INFO] Installing uv-managed Python 3.12 ...
-call uv python install 3.12
+call :ensure_node
+if errorlevel 1 exit /b 1
+echo [INFO] Installing uv-managed Python 3.14.10 ...
+call uv python install 3.14.10
 if errorlevel 1 (
-    echo ERROR: uv could not install Python 3.12.
+    echo ERROR: uv could not install Python 3.14.10.
     exit /b 1
 )
 echo [INFO] Synchronizing the project environment ...
-call uv sync --project "%REPO%" --python 3.12 --managed-python --locked --dev --extra simulation
+call uv sync --project "%REPO%" --python 3.14.10 --managed-python --locked --dev --extra simulation
 if errorlevel 1 (
     echo ERROR: uv sync failed.
     exit /b 1
 )
 
-call :ensure_tool npm OpenJS.NodeJS.LTS
-if errorlevel 1 exit /b 1
+echo [INFO] Checking Python with Ruff ...
+call uv run --no-sync --project "%REPO%" ruff check "%REPO%"
+if errorlevel 1 (
+    echo ERROR: Ruff checks failed.
+    exit /b 1
+)
+
 call :ensure_msvc
 if errorlevel 1 exit /b 1
 call :ensure_tool cargo Rustlang.Rustup
@@ -74,6 +81,39 @@ where %~1 >nul 2>nul
 if not errorlevel 1 exit /b 0
 echo ERROR: %~1 is not available after installation. Open a new terminal
 echo        and run setup.cmd again.
+exit /b 1
+
+:ensure_node
+set "NODE_MAJOR="
+set /p NODE_MAJOR=<"%REPO%\.node-version"
+if not defined NODE_MAJOR (
+    echo ERROR: .node-version must specify the supported Node.js major.
+    exit /b 1
+)
+where node >nul 2>nul
+if not errorlevel 1 goto :verify_node
+where winget >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: WinGet is required to install Node.js. Install or update App Installer.
+    exit /b 1
+)
+set "NODE_INSTALL_VERSION="
+for /f "delims=" %%V in ('winget show --id OpenJS.NodeJS.LTS --exact --source winget --versions --accept-source-agreements ^| findstr /r "^%NODE_MAJOR%\.[0-9][0-9]*\.[0-9]"') do if not defined NODE_INSTALL_VERSION set "NODE_INSTALL_VERSION=%%V"
+if not defined NODE_INSTALL_VERSION (
+    echo ERROR: WinGet did not list a Node.js %NODE_MAJOR%.x release.
+    exit /b 1
+)
+call :install_package OpenJS.NodeJS.LTS --version %NODE_INSTALL_VERSION%
+if errorlevel 1 exit /b 1
+:verify_node
+call node -e "if (process.versions.node.split('.')[0] !== process.argv[1]) process.exit(1)" "%NODE_MAJOR%"
+if errorlevel 1 (
+    echo ERROR: Node.js %NODE_MAJOR%.x is required. Select that version on PATH and rerun setup.cmd.
+    exit /b 1
+)
+where npm >nul 2>nul
+if not errorlevel 1 exit /b 0
+echo ERROR: npm is missing from the shared Node.js installation.
 exit /b 1
 
 :install_package

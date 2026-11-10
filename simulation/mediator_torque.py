@@ -54,9 +54,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
-import sys
 from collections import deque
-from pathlib import Path
 
 import numpy as np
 
@@ -267,7 +265,7 @@ def run(
     profile: str = "constant",
     tail_channel: int = _CH_YAW_DEFAULT,
     log_level: str = "INFO",
-    events_log_path: "str | None" = None,
+    events_log_path: str | None = None,
     startup_yaw_rate: float = 0.0,
     motor_delay_ms: float = 0.0,
 ) -> None:

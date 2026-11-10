@@ -4,11 +4,8 @@ Physical setup for all tests: 30 deg tether elevation, 10 m/s East wind,
 stationary hub, omega=28 rad/s.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
-import pytest
 
 
 from simulation.dynamics import RigidBodyDynamics

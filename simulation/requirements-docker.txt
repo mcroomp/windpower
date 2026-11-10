@@ -5,6 +5,7 @@ matplotlib
 scipy
 pytest
 pytest-timeout
+ruff
 pyyaml
 numba
 lupa

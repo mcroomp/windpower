@@ -15,17 +15,15 @@ through the rotor disk for a level hover.
 """
 import pytest
 
+import math
+import numpy as np
+from simulation.dynamics import RigidBodyDynamics
+
 pytestmark = pytest.mark.expensive
 
-import math
-import sys
-from pathlib import Path
-
-import numpy as np
-import pytest
 
 
-from simulation.dynamics import RigidBodyDynamics
+
 
 
 # ── shared constants ────────────────────────────────────────────────────────

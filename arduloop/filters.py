@@ -77,7 +77,6 @@ def _notch_coeffs(center_hz: float, bandwidth_hz: float, sample_hz: float,
     # Limit centre below Nyquist
     center_hz = min(center_hz, 0.45 * sample_hz)
     omega = 2.0 * math.pi * center_hz / sample_hz
-    octaves = bandwidth_hz / center_hz   # fractional bandwidth
     # Convert attenuation dB to amplitude factor A (≥1 → deeper notch)
     A = 10.0 ** (attenuation_db / 40.0)
     Q = center_hz / max(bandwidth_hz, 1e-9)

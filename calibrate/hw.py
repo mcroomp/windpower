@@ -17,31 +17,12 @@ from linkhub_client.messages import (
     MavParamType,
     MavResult,
     MavSysStatusSensor,
-    ParamSet,
     ServoOutputRaw,
 )
 
-from .constants import (
-    LinkHubClient,
-    LinkHubGenerationChanged,
-    CommandAck,
-    EscTelemetry,
-    PidTuning,
-    RcChannels,
-    CommandLong,
-    decode_message,
-    Heartbeat,
-    Statustext,
-    GB4008_KV, GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO,
-    SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
-    SWASH_SERVOS,
-    MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
-    _ESC_TELEM_MSGS,
-    PWM_MIN, PWM_MAX, PWM_NEUTRAL,
-    _AZ_S1, _AZ_S2, _AZ_S3,
-    _COPTER_MODES, _LUA_MODES,
-    _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES, _MOTOR_PATH_PARAM_NAMES,
-)
+from linkhub_client.client import LinkHubClient, LinkHubGenerationChanged
+from linkhub_client.messages import EscTelemetry, CommandLong, decode_message, Heartbeat, Statustext
+from .constants import GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO, SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR, MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL, _ESC_TELEM_MSGS, PWM_MIN, PWM_MAX, PWM_NEUTRAL, _AZ_S1, _AZ_S2, _AZ_S3, _COPTER_MODES, _LUA_MODES, _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES, _MOTOR_PATH_PARAM_NAMES
 from .messages import read_one
 
 # ---------------------------------------------------------------------------
@@ -54,7 +35,7 @@ _motor_pole_pairs = GB4008_POLE_PAIRS
 # ESC telemetry helpers
 # ---------------------------------------------------------------------------
 
-def _esc_telem_msg_for_channel(channel: int) -> "tuple[str, int]":
+def _esc_telem_msg_for_channel(channel: int) -> tuple[str, int]:
     """(msg_name, msg_id) of the ESC_TELEMETRY block covering 1-based `channel`."""
     base = ((channel - 1) // 4) * 4 + 1
     for name, (mid, b) in _ESC_TELEM_MSGS.items():
@@ -63,7 +44,7 @@ def _esc_telem_msg_for_channel(channel: int) -> "tuple[str, int]":
     raise ValueError(f"no ESC_TELEMETRY message for output channel {channel}")
 
 
-def _esc_erpm(msg, channel: int) -> "float | None":
+def _esc_erpm(msg, channel: int) -> float | None:
     """eRPM for 1-based output `channel` from an ESC_TELEMETRY_* msg, else None."""
     if isinstance(msg, EscTelemetry):
         base = msg.first_channel
@@ -82,7 +63,7 @@ def _esc_erpm(msg, channel: int) -> "float | None":
     return rpm[idx]
 
 
-def _rpm_triplet(erpm: "float | None") -> tuple:
+def _rpm_triplet(erpm: float | None) -> tuple:
     """eRPM -> (erpm, mech_rpm, rotor_rpm).  (None, None, None) if erpm is None.
     Uses the live SERVO_BLH_POLES-derived pole-pair count (_motor_pole_pairs)."""
     if erpm is None:
@@ -853,7 +834,7 @@ def _set_heli_servo_mode(session: LinkHubClient, value: float) -> bool:
 
 def _release_servo_functions(
     session: LinkHubClient, outputs: tuple[int, ...]
-) -> "dict[int, float] | None":
+) -> dict[int, float] | None:
     """Set outputs to disabled and return their original functions."""
     saved_functions: dict[int, float] = {}
     changed = False

@@ -40,7 +40,6 @@ import argparse
 import math
 import sys
 from pathlib import Path
-from typing import Optional
 
 import simulation as _simulation_pkg
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
@@ -69,7 +68,7 @@ def _is_kinematic_row(r: TelRow) -> bool:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _find_kin_exit_t(rows: list[TelRow]) -> Optional[float]:
+def _find_kin_exit_t(rows: list[TelRow]) -> float | None:
     """Return t_sim of first row where startup phase transitions to free-flight."""
     prev = None
     for r in rows:
@@ -91,16 +90,16 @@ def _bucket(rows: list[TelRow], t_ref: float, window_s: float = 5.0) -> dict[int
     return buckets
 
 
-def _mean(vals: list[float]) -> Optional[float]:
+def _mean(vals: list[float]) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
-def _mean_finite(vals: list[float]) -> Optional[float]:
+def _mean_finite(vals: list[float]) -> float | None:
     good = [v for v in vals if math.isfinite(v)]
     return (sum(good) / len(good)) if good else None
 
 
-def _sgn(v: Optional[float], eps: float = 1e-6) -> int:
+def _sgn(v: float | None, eps: float = 1e-6) -> int:
     if v is None or not math.isfinite(v):
         return 0
     if v > eps:
@@ -133,7 +132,7 @@ def _stats(rows: list[TelRow]) -> dict:
     }
 
 
-def _diff_flag(a: Optional[float], b: Optional[float],
+def _diff_flag(a: float | None, b: float | None,
                warn: float, fmt: str = ".2f") -> str:
     """Return diff string, flagged with * if above threshold."""
     if a is None or b is None:
@@ -301,7 +300,7 @@ def _rows_in_rel_window(rows: list[TelRow], t_kin: float, t0: float, t1: float) 
     return [r for r in rows if (not _is_kinematic_row(r)) and t0 <= (r.t_sim - t_kin) < t1]
 
 
-def _mean_attr(rows: list[TelRow], attr: str) -> Optional[float]:
+def _mean_attr(rows: list[TelRow], attr: str) -> float | None:
     vals = [getattr(r, attr) for r in rows]
     return _mean_finite(vals)
 
@@ -336,7 +335,7 @@ def _dominant_pid_term(rows: list[TelRow], axis: str) -> str:
     return scored[0][0]
 
 
-def _axis_err_cmd(rows: list[TelRow], axis: str) -> tuple[Optional[float], Optional[float]]:
+def _axis_err_cmd(rows: list[TelRow], axis: str) -> tuple[float | None, float | None]:
     if axis == "roll":
         e = _mean_finite([r.roll_sp_rads - r.omega_x for r in rows])
         p = _mean_attr(rows, "rate_roll_p_contrib")
@@ -364,7 +363,7 @@ def _print_first_divergence_reactions(
     rows_a: list[TelRow], rows_b: list[TelRow],
     label_a: str, label_b: str,
     t_kin_a: float, t_kin_b: float,
-    first_diverge: Optional[float],
+    first_diverge: float | None,
     reaction_pre_s: float,
     reaction_horizon_s: float,
 ) -> None:
@@ -386,18 +385,18 @@ def _print_first_divergence_reactions(
     print(f"  Window: pre=[{pre0:.2f},{t0:.2f})  post=[{t0:.2f},{post1:.2f})")
     print(f"  Samples: {label_a} pre={len(a_pre)} post={len(a_post)}; {label_b} pre={len(b_pre)} post={len(b_post)}")
 
-    def _safe_delta(post: Optional[float], pre: Optional[float]) -> Optional[float]:
+    def _safe_delta(post: float | None, pre: float | None) -> float | None:
         if post is None or pre is None:
             return None
         return post - pre
 
-    def _fmt(v: Optional[float], fmt: str = "+.3f") -> str:
+    def _fmt(v: float | None, fmt: str = "+.3f") -> str:
         if v is None or not math.isfinite(v):
             return "  n/a"
         return format(v, fmt)
 
     # Command-level reactions likely linked to tension divergence.
-    def _cyc_mag(rows: list[TelRow]) -> Optional[float]:
+    def _cyc_mag(rows: list[TelRow]) -> float | None:
         vals = [math.hypot(r.roll_sp_rads, r.pitch_sp_rads) for r in rows]
         return _mean_finite(vals)
 

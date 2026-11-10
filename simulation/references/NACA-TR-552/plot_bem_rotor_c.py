@@ -20,18 +20,20 @@ Shaft angle convention (alpha_s from horizontal):
     At mu=0.10, alpha_s≈58 (steeply tilted); at mu=0.90, alpha_s≈13 (nearly edge-on).
 """
 
-import sys, math, csv
+import math
 from pathlib import Path
 import numpy as np
 import matplotlib
+from dynbem import rotor_definition as rd
+from dynbem import create_aero
+from matplotlib.lines import Line2D
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 HERE = Path(__file__).parent
 REPO = HERE.parents[2]
 
-from dynbem import rotor_definition as rd
-from dynbem import create_aero
 
 # ---------------------------------------------------------------------------
 # Rotor and model setup
@@ -247,7 +249,6 @@ for i, pitch in enumerate(PITCHES):
                      color=c, lw=2.0, marker='o', ms=4, ls='-', zorder=4)
 
 # Legend proxies
-from matplotlib.lines import Line2D
 handles = [Line2D([0],[0], color='gray', lw=2, ls='--', label='BEM prediction'),
            Line2D([0],[0], color='gray', lw=2, ls='-', marker='o', ms=4, label='NACA TR-552')]
 ax_both.legend(handles=handles, fontsize=8, loc='upper right')

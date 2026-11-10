@@ -25,8 +25,6 @@ Phases tested (all instantaneous force balance, no dynamics loop):
     Hub in fast descent (3 m/s); tether goes slack; increase collective +0.05 rad.
     Does the flare produce sufficient net upward force to arrest the descent?
 """
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest

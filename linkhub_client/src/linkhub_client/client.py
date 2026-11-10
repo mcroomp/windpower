@@ -29,6 +29,7 @@ from .messages import (
     parse_flags,
 )
 from .records import DiagnosticEvent, DiagnosticRecord, SimClock, TelemetryRecord
+import contextlib
 
 
 class LinkHubError(RuntimeError):
@@ -604,10 +605,8 @@ class LinkHubClient:
                 "GET", f"/v1/mavlink/transfers/{transfer_id}/content", timeout=60.0
             )
         except BaseException:
-            try:
+            with contextlib.suppress(LinkHubError):
                 self.cancel_transfer(transfer_id)
-            except LinkHubError:
-                pass
             raise
         partial_path = destination_path.with_name(destination_path.name + ".part")
         partial_path.write_bytes(content)
@@ -641,10 +640,8 @@ class LinkHubClient:
                     f"{len(content)} bytes"
                 )
         except BaseException:
-            try:
+            with contextlib.suppress(LinkHubError):
                 self.cancel_transfer(transfer_id)
-            except LinkHubError:
-                pass
             raise
         self.cancel_transfer(transfer_id)
         return written

@@ -1,6 +1,4 @@
 """Unit tests for MockArdupilot's pumping Python altitude-PID collective mode."""
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest

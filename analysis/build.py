@@ -117,14 +117,14 @@ def main():
             "-p", "5762:5762",
             IMAGE,
         ]
-        print(f"\n[INFO]  Starting container ...", flush=True)
+        print("\n[INFO]  Starting container ...", flush=True)
         print(f"[CMD]   {' '.join(run_cmd)}\n", flush=True)
         subprocess.run(run_cmd)
     elif not args.no_build:
-        print(f"\n[INFO]  To start a shell in the container:")
+        print("\n[INFO]  To start a shell in the container:")
         print(f"        docker run --rm -it -p 5760:5760 -p 5761:5761 -p 5762:5762 -v \"{SIM_DIR}:/rawes/simulation\" {IMAGE}")
-        print(f"\n[INFO]  Or use this script:")
-        print(f"        python simulation/build.py --no-build --run\n")
+        print("\n[INFO]  Or use this script:")
+        print("        python simulation/build.py --no-build --run\n")
 
 
 if __name__ == "__main__":

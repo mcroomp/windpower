@@ -11,8 +11,6 @@ Tests are in four groups:
 All tests are pure math -- no SITL, no physics, no network.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,7 +20,6 @@ from scipy.spatial.transform import Rotation
 from arduloop.guided import (
     GuidedAttitudeController,
     GuidedAttitudeParams,
-    _THRUST_ERROR_ANGLE,
     _attitude_command_model,
     _sqrt_controller,
     _thrust_vector_rotation_angles,
@@ -139,7 +136,6 @@ class TestAttitudeCommandModel:
         # With accel_max=0 the shaper falls back to linear P (no jerk limiting).
         # Result should match sqrt_controller(err, 1/tc, 0, dt) integrated.
         v, _ = _attitude_command_model(0.1, 0.0, 0.0, 0.0, 0.0, self._tc, self._dt)
-        expected = _sqrt_controller(0.1, 1.0 / self._tc, 0.0, self._dt) * self._dt
         # With accel_max=0, AP substitutes 1800 deg/s^2, so this is NOT pure linear P.
         # Just verify the result is finite and in the right direction.
         assert math.isfinite(v)
@@ -453,7 +449,6 @@ class TestGuidedAttitudeController:
         dt = 0.0025
         prev_err = None
         for step in range(300):
-            t = step * dt
             err, _, _ = _thrust_vector_rotation_angles(ctrl._q_commanded, rot.as_quat())
             err_mag = float(np.linalg.norm(err))
             if prev_err is not None:

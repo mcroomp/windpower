@@ -8,7 +8,7 @@ This module turns them into ``WireEnum`` members and ``frozenset``s of members.
 from __future__ import annotations
 
 from dataclasses import MISSING, dataclass, fields
-from typing import Any, TypeVar
+from typing import Any
 
 from .generated_protocol import (
     ENUM_FIELDS,
@@ -60,10 +60,7 @@ from .generated_protocol import (
     parse_flags,
 )
 
-_E = TypeVar("_E", bound=WireEnum)
-
-
-def decode_enum(enum_type: type[_E], value: Any) -> _E:
+def decode_enum[E: WireEnum](enum_type: type[E], value: Any) -> E:
     """Decode a wire enumeration: ``{"type": NAME}`` (or a bare name)."""
     if isinstance(value, dict):
         value = value["type"]

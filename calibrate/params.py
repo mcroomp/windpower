@@ -7,15 +7,8 @@ from pathlib import Path
 
 from groundstation.parameter_files import load_parameter_files
 
-from .constants import (
-    LinkHubClient,
-    SCRIPTS_DIR,
-    _LOG_DIR,
-    _AP_BASE_PARM_PATH,
-    _CALIBRATION_PARAM_PREFIXES,
-    _RAWES_COMMON_PARM_PATH,
-    _RAWES_HARDWARE_PARM_PATH,
-)
+from linkhub_client.client import LinkHubClient
+from .constants import SCRIPTS_DIR, _LOG_DIR, _AP_BASE_PARM_PATH, _CALIBRATION_PARAM_PREFIXES, _RAWES_COMMON_PARM_PATH, _RAWES_HARDWARE_PARM_PATH
 from .hw import _restart_scripting
 
 

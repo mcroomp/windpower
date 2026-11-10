@@ -7,8 +7,6 @@ purely a transient initialization problem (warm-start fixes it).
 If it diverges mid-ramp, there is a genuine physics stability limit.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest

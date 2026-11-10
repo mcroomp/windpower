@@ -15,7 +15,7 @@ import re
 import yaml
 from functools import lru_cache
 from pathlib import Path
-from typing import Sequence
+from collections.abc import Sequence
 from arduloop.params import RateAxisParams
 from groundstation.parameter_files import load_parameter_files
 

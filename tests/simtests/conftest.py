@@ -5,8 +5,6 @@ Simtests are full time-domain physics simulations (seconds to minutes of compute
 Run with:  pytest tests/simtests -m simtest
 Skip slow: pytest tests/simtests -m "not simtest"
 """
-import sys
-from pathlib import Path
 
 import pytest
 

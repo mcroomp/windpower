@@ -90,7 +90,7 @@ class TetherResult:
         return float(np.linalg.norm(self.force_on_anchor_ned))
 
     @classmethod
-    def unloaded(cls, inputs: TetherInputs) -> "TetherResult":
+    def unloaded(cls, inputs: TetherInputs) -> TetherResult:
         length = float(np.linalg.norm(inputs.attachment_pos_ned - inputs.anchor_pos_ned))
         return cls(
             np.zeros(3), np.zeros(3),

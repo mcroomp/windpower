@@ -98,11 +98,11 @@ class VirtualComms:
             raw_alt += float(self._rng.normal(0.0, self._alt_noise))
         return HubTelemetry(hub_alt_m=raw_alt)
 
-    def send_command(self, t_sim: float, cmd: "TensionCommand") -> None:
+    def send_command(self, t_sim: float, cmd: TensionCommand) -> None:
         """Queue a TensionCommand for delivery to the AP after one-way latency."""
         self._up_buf.append((float(t_sim), cmd))
 
-    def poll_ap_command(self, t_now: float) -> "TensionCommand | None":
+    def poll_ap_command(self, t_now: float) -> TensionCommand | None:
         """
         Return the oldest queued command whose latency has elapsed, or None.
         Call at 10 Hz in the test loop; forward result to ap.receive_command().

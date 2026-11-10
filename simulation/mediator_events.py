@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+import contextlib
 
 
 class MediatorEventLog:
@@ -50,16 +51,16 @@ class MediatorEventLog:
     existing file at the path without opening.
     """
 
-    def __init__(self, path: "Path | str | None") -> None:
-        self._path: "Path | None" = Path(path) if path is not None else None
+    def __init__(self, path: Path | str | None) -> None:
+        self._path: Path | None = Path(path) if path is not None else None
         self._fh = None
 
     # ── Writer side ──────────────────────────────────────────────────────────
 
-    def open(self) -> "MediatorEventLog":
+    def open(self) -> MediatorEventLog:
         """Open the file for writing.  Returns self for use as context manager."""
         if self._path is not None:
-            self._fh = open(self._path, "w", encoding="utf-8", buffering=1)
+            self._fh = open(self._path, "w", encoding="utf-8", buffering=1)  # noqa: SIM115 - closed by __exit__ or close()
         return self
 
     def close(self) -> None:
@@ -68,7 +69,7 @@ class MediatorEventLog:
             self._fh.close()
             self._fh = None
 
-    def __enter__(self) -> "MediatorEventLog":
+    def __enter__(self) -> MediatorEventLog:
         return self.open()
 
     def __exit__(self, *_: Any) -> None:
@@ -85,7 +86,7 @@ class MediatorEventLog:
     # ── Reader side ──────────────────────────────────────────────────────────
 
     @property
-    def path(self) -> "Path | None":
+    def path(self) -> Path | None:
         return self._path
 
     def read_all(self) -> list[dict]:
@@ -97,10 +98,8 @@ class MediatorEventLog:
             line = line.strip()
             if not line:
                 continue
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
         return out
 
     def has_event(self, event: str) -> bool:
@@ -111,7 +110,7 @@ class MediatorEventLog:
         """Return all events with the given name, in order."""
         return [e for e in self.read_all() if e.get("event") == event]
 
-    def last_event(self, event: str) -> "dict | None":
+    def last_event(self, event: str) -> dict | None:
         """Return the last event with the given name, or None."""
         events = self.get_events(event)
         return events[-1] if events else None

@@ -10,11 +10,8 @@ Autorotation (in-plane wind)
   Disk horizontal, 10 m/s East wind across the disk (not through it).
   Rotor must produce an upward force.
 """
-import sys
-from pathlib import Path
 
 import numpy as np
-import pytest
 
 
 from simulation.frames import build_orb_frame

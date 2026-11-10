@@ -179,11 +179,6 @@ def main() -> None:
         [r["rpy_pitch"] for r in rows],
         [r["rpy_yaw"] for r in rows],
     ])
-    pos = np.column_stack([
-        [r["pos_x"] for r in rows],
-        [r["pos_y"] for r in rows],
-        [r["pos_z"] for r in rows],
-    ])
 
     # ------------------------------------------------------------------ #
     # Recompute expected sensor values from R, accel, omega               #

@@ -9,8 +9,6 @@ The key insight: servo positions must move in physically meaningful directions f
 cyclic commands, not just round-trip correctly.
 """
 import math
-import sys
-from pathlib import Path
 
 import pytest
 

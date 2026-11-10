@@ -7,7 +7,6 @@ channels used for attitude/rate response comparisons in analysis scripts.
 from __future__ import annotations
 
 import csv
-import math
 from dataclasses import dataclass
 from pathlib import Path
 

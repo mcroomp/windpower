@@ -26,7 +26,6 @@ Example (mediator):
 
 import json
 import copy
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Load warmup-settled initial conditions via the shared IC loader (ic.py) so
@@ -207,7 +206,7 @@ def defaults() -> dict:
     return copy.deepcopy(DEFAULTS)
 
 
-def load(path: "str | None") -> dict:
+def load(path: str | None) -> dict:
     """
     Load a mediator config from a JSON file, filling missing keys from DEFAULTS.
 
@@ -270,7 +269,6 @@ def make_trajectory(cfg: dict, wind_ned):
     Note: body_z_eq0 is no longer a parameter — guidance runs inside
     Mode_RAWES (mediator), not in the trajectory planner.
     """
-    import sys, os
     from simulation.planner import HoldPlanner
 
     return HoldPlanner()

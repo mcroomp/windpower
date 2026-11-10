@@ -4,8 +4,6 @@ Run: .venv/Scripts/python.exe -m pytest tests/envelope/test_compute_map.py -v
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest

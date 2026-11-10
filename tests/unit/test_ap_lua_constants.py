@@ -5,8 +5,6 @@ rawes.lua module-level constants.
 Any change to gains or limits must be made in both Python and Lua. A failure here
 means the Python simtest and the Lua flight controller would use different values.
 """
-import sys
-from pathlib import Path
 
 import pytest
 

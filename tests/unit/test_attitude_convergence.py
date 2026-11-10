@@ -16,16 +16,8 @@ makes ``test_create_ic`` settle (or not).
 """
 import pytest
 
-pytestmark = pytest.mark.expensive
-
 import math
-import sys
-from pathlib import Path
-
 import numpy as np
-import pytest
-
-
 from dynbem        import RotorInputs
 from simulation.controller import HeliCyclicController, compute_rate_cmd
 from simulation.dynamics import RigidBodyDynamics
@@ -33,6 +25,12 @@ from simulation.frames import build_orb_frame
 from simulation.param_defaults import coll_rad_to_thrust
 from simulation.rotor_physics import resolve_i_spin_kgm2
 from tests.unit._aero_probe import load_rotor, make_probe
+
+pytestmark = pytest.mark.expensive
+
+
+
+
 
 
 # ── Setup ───────────────────────────────────────────────────────────────────

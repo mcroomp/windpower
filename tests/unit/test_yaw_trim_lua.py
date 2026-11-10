@@ -10,7 +10,6 @@ The fixed point is  trim = u_eq = omega_rotor / YFF_A  (independent of dt or TAU
 """
 from __future__ import annotations
 
-import math
 
 from simulation.rawes_lua_harness import RawesLua
 
@@ -48,7 +47,6 @@ class TestTrimTarget:
     def test_low_pass_slows_convergence(self):
         """With small dt the trim moves only a fraction (alpha) per step."""
         sim = _sim()
-        a   = float(sim.fns.YFF_A)
         tau = float(sim.fns.YFF_TAU)
         u, psi_dot = 0.4, 0.0
         alpha = _DT / (tau + _DT)

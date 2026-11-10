@@ -7,7 +7,8 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 from analysis.linkhub_journal import iter_messages
 from groundstation.rawes_diag import diag_values

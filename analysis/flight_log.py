@@ -10,20 +10,19 @@ from __future__ import annotations
 import json
 import math
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import simulation as _simulation_pkg
-_SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
-
 from simulation.telemetry_csv import read_csv
 from groundstation.mavlink_log import iter_messages as _iter_mavlink  # noqa: F401 (re-exported for callers)
 from groundstation.ekf_flags import (
     MAV_MODE_ARMED, ARDU_MODES,
     decode_flags, flag_diff, has_warn,
 )
+
+_SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
+
 
 
 # ---------------------------------------------------------------------------
@@ -63,48 +62,48 @@ class Bucket:
     heading_gap_deg_max: float = 0.0
     omega_rotor_mean: float = 0.0
     # Actual attitude (from ATTITUDE MAVLink)
-    att_roll_deg: Optional[float] = None
-    att_pitch_deg: Optional[float] = None
-    att_yaw_deg: Optional[float] = None
-    att_rollspeed_peak: Optional[float] = None   # deg/s
-    att_pitchspeed_peak: Optional[float] = None  # deg/s
-    att_yawspeed_peak: Optional[float] = None    # deg/s
+    att_roll_deg: float | None = None
+    att_pitch_deg: float | None = None
+    att_yaw_deg: float | None = None
+    att_rollspeed_peak: float | None = None   # deg/s
+    att_pitchspeed_peak: float | None = None  # deg/s
+    att_yawspeed_peak: float | None = None    # deg/s
     # Target attitude (from ATTITUDE_TARGET MAVLink)
-    tgt_roll_deg: Optional[float] = None
-    tgt_pitch_deg: Optional[float] = None
-    tgt_thrust: Optional[float] = None
-    att_err_deg: Optional[float] = None  # mean geodesic angle between target and actual
+    tgt_roll_deg: float | None = None
+    tgt_pitch_deg: float | None = None
+    tgt_thrust: float | None = None
+    att_err_deg: float | None = None  # mean geodesic angle between target and actual
     # EKF health (from EKF_STATUS_REPORT)
-    ekf_flags: Optional[int] = None
-    ekf_pos_var_peak: Optional[float] = None
-    ekf_vel_var_peak: Optional[float] = None
+    ekf_flags: int | None = None
+    ekf_pos_var_peak: float | None = None
+    ekf_vel_var_peak: float | None = None
     # Dataflash ATT: actual vs desired attitude (from dataflash.BIN ATT log)
-    df_roll_deg: Optional[float] = None
-    df_pitch_deg: Optional[float] = None
-    df_yaw_deg: Optional[float] = None
-    df_des_roll_deg: Optional[float] = None
-    df_des_pitch_deg: Optional[float] = None
-    df_des_yaw_deg: Optional[float] = None
-    df_roll_err_deg: Optional[float] = None   # actual - desired (signed)
-    df_pitch_err_deg: Optional[float] = None
+    df_roll_deg: float | None = None
+    df_pitch_deg: float | None = None
+    df_yaw_deg: float | None = None
+    df_des_roll_deg: float | None = None
+    df_des_pitch_deg: float | None = None
+    df_des_yaw_deg: float | None = None
+    df_roll_err_deg: float | None = None   # actual - desired (signed)
+    df_pitch_err_deg: float | None = None
     # Dataflash SWSH: swashplate servo mix outputs
-    df_swsh_col: Optional[float] = None    # collective (%)
-    df_swsh_pcyc: Optional[float] = None   # pitch cyclic (%)
-    df_swsh_rcyc: Optional[float] = None   # roll cyclic (%)
+    df_swsh_col: float | None = None    # collective (%)
+    df_swsh_pcyc: float | None = None   # pitch cyclic (%)
+    df_swsh_rcyc: float | None = None   # roll cyclic (%)
     # Dataflash PIDR: roll rate PID breakdown (mean per bucket)
-    df_pidr_tar: Optional[float] = None    # target roll rate (deg/s)
-    df_pidr_act: Optional[float] = None    # actual roll rate (deg/s)
-    df_pidr_p:   Optional[float] = None    # P term
-    df_pidr_ff:  Optional[float] = None    # FF term
-    df_pidr_i:   Optional[float] = None    # I term
-    df_pidr_d:   Optional[float] = None    # D term
+    df_pidr_tar: float | None = None    # target roll rate (deg/s)
+    df_pidr_act: float | None = None    # actual roll rate (deg/s)
+    df_pidr_p:   float | None = None    # P term
+    df_pidr_ff:  float | None = None    # FF term
+    df_pidr_i:   float | None = None    # I term
+    df_pidr_d:   float | None = None    # D term
     # Dataflash PIDP: pitch rate PID breakdown (mean per bucket)
-    df_pidp_tar: Optional[float] = None    # target pitch rate (deg/s)
-    df_pidp_act: Optional[float] = None    # actual pitch rate (deg/s)
-    df_pidp_p:   Optional[float] = None    # P term
-    df_pidp_ff:  Optional[float] = None    # FF term
-    df_pidp_i:   Optional[float] = None    # I term
-    df_pidp_d:   Optional[float] = None    # D term
+    df_pidp_tar: float | None = None    # target pitch rate (deg/s)
+    df_pidp_act: float | None = None    # actual pitch rate (deg/s)
+    df_pidp_p:   float | None = None    # P term
+    df_pidp_ff:  float | None = None    # FF term
+    df_pidp_i:   float | None = None    # I term
+    df_pidp_d:   float | None = None    # D term
     # Events occurring in this window
     events: list = field(default_factory=list)
 
@@ -115,14 +114,14 @@ class FlightLog:
     log_dir: Path
     tel_rows: list = field(default_factory=list)  # list[TelRow]
     # Run metadata
-    run_id_mediator: Optional[int] = None
-    run_id_pytest: Optional[int] = None
-    sensor_mode: Optional[str] = None
-    damp_T: Optional[float] = None
-    k_ang: Optional[float] = None
-    kin_launch_pos: Optional[tuple] = None  # (x, y, z) NED [m]
-    kin_vel: Optional[tuple] = None         # (vx, vy, vz) [m/s]
-    sitl_crash_error: Optional[str] = None
+    run_id_mediator: int | None = None
+    run_id_pytest: int | None = None
+    sensor_mode: str | None = None
+    damp_T: float | None = None
+    k_ang: float | None = None
+    kin_launch_pos: tuple | None = None  # (x, y, z) NED [m]
+    kin_vel: tuple | None = None         # (vx, vy, vz) [m/s]
+    sitl_crash_error: str | None = None
     sitl_crash_stack: list = field(default_factory=list)
     # All events sorted by t_sim
     events: list = field(default_factory=list)  # list[FlightEvent]
@@ -139,7 +138,7 @@ class FlightLog:
     _df_mode_rows: list = field(default_factory=list, repr=False)  # MODE: {t_s, mode, mode_name, reason}
 
     @classmethod
-    def load(cls, log_dir: "Path | str") -> "FlightLog":
+    def load(cls, log_dir: Path | str) -> FlightLog:
         """Load all log files from log_dir into a unified FlightLog."""
         fl = cls(log_dir=Path(log_dir))
         fl._load_telemetry()
@@ -176,9 +175,9 @@ class FlightLog:
         # SITL is lockstep: time_boot_ms IS the sim time. Use it directly.
         # Wall-clock anchoring introduces growing drift (observed ~2-4 s over 80 s)
         # because the GCS log wall clock is not coupled to the SITL lockstep clock.
-        prev_ekf: Optional[int] = None
-        prev_arm: Optional[bool] = None
-        prev_mode: Optional[int] = None
+        prev_ekf: int | None = None
+        prev_arm: bool | None = None
+        prev_mode: int | None = None
 
         for d in records:
             mt = d.get("mavpackettype", "")

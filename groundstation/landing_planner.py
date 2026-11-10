@@ -203,7 +203,8 @@ class LandingGroundController:
         elif self._phase == "get_vertical":
             if t_in >= self._t_vertical or t_in >= self._t_vertical_max:
                 self._phase = "descent"
-        elif self._phase == "descent":
-            if rest_length <= self._min_tether + 0.1 or t_in >= self._t_desc_max:
-                self._phase = "flare"
+        elif self._phase == "descent" and (
+            rest_length <= self._min_tether + 0.1 or t_in >= self._t_desc_max
+        ):
+            self._phase = "flare"
         # flare: terminal phase

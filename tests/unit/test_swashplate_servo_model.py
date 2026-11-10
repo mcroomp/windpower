@@ -12,14 +12,11 @@ Covers:
   - from_rotor() constructor
 """
 import math
-import sys
-from pathlib import Path
 
 import pytest
 
 
 from simulation.swashplate import SwashplateServoModel, collective_rad_to_out
-from dynbem import rotor_definition as rd
 from simulation.param_defaults import load_collective_phys_range as _lr
 
 _COL_MIN, _COL_MAX = _lr()

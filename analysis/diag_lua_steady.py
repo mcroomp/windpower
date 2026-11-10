@@ -12,12 +12,12 @@ Usage:
 import argparse
 import csv
 import math
-import os
 import re
 import sys
 from pathlib import Path
 
 import simulation
+import contextlib
 
 # ── CLI ───────────────────────────────────────────────────────────────────────────────
 ap = argparse.ArgumentParser()
@@ -78,7 +78,7 @@ if EKF_CSV.exists():
     with open(EKF_CSV, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
-            try:
+            with contextlib.suppress(ValueError, KeyError):
                 ekf_rows.append({
                     "t_ms":  int(row["time_boot_ms"]),
                     "roll":  float(row["att_roll"]),
@@ -91,8 +91,6 @@ if EKF_CSV.exists():
                     "vel_e": float(row["vel_e"]),
                     "vel_d": float(row["vel_d"]),
                 })
-            except (ValueError, KeyError):
-                pass
     print(f"  {len(ekf_rows)} EKF rows")
 else:
     print(f"  WARNING: {EKF_CSV} not found -- EKF comparison skipped")
@@ -226,9 +224,8 @@ for r in sampled:
         flags.append(f"ALT={alt:.1f}m")
     if col < -0.25:
         flags.append(f"COL_NEG={col:.3f}")
-    if abs(s3 - 1500) > 400 and phase == "free":
-        if col < -0.20:
-            flags.append(f"S3_LOW={s3:.0f}")
+    if abs(s3 - 1500) > 400 and phase == "free" and col < -0.20:
+        flags.append(f"S3_LOW={s3:.0f}")
 
     flag_str = "  ".join(flags)
     if marker:

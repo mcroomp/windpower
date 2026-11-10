@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -79,7 +79,7 @@ def rawes_sitl_heli_params(loop_rate_hz: float) -> HeliParams:
     return HeliParams.from_ap_dict(load_ap_params(), loop_rate_hz=loop_rate_hz)
 
 
-def _feed_obs(sim, obs, accel_body: "np.ndarray | None" = None) -> None:
+def _feed_obs(sim, obs, accel_body: np.ndarray | None = None) -> None:
     """Write HubObservation-like state into a RawesLua mock."""
     sim.R = obs.R
     sim.pos_ned = obs.pos.tolist()
@@ -98,14 +98,14 @@ _YAW_MOTOR_FUNC = 36
 class _MockArdupilotBase:
     """Common adapter utilities shared by lua/python backends."""
 
-    def __init__(self, *, wind: "np.ndarray", dt: float, initial_thrust: float = 0.263) -> None:
+    def __init__(self, *, wind: np.ndarray, dt: float, initial_thrust: float = 0.263) -> None:
         self._last_thrust = float(initial_thrust)
         self.roll_sp = 0.0
         self.pitch_sp = 0.0
         self._col_min, self._col_max = load_collective_phys_range()
         self._wind = wind
         self._tel_every = _tel_every_from_env(dt)
-        self.tel_fn: "Callable[..., dict] | None" = None
+        self.tel_fn: Callable[..., dict] | None = None
         # Optional winch object (WinchController/GovernedWinchController/...)
         # attached by the test.  When set, its log_fields() is merged into
         # every log() call automatically -- see log() below -- so winch
@@ -115,7 +115,7 @@ class _MockArdupilotBase:
         self.winch = None
         self._telemetry: list = []
         self._log_step = 0
-        self._guided_ctrl: "GuidedAttitudeController | None" = None
+        self._guided_ctrl: GuidedAttitudeController | None = None
         # Anti-rotation feedforward trim. Default: Python port of rawes.lua's
         # yaw_trim_step/run_yaw_trim (see controller.YawTrimObserver), used by
         # the pure-Python backend which has no real Lua VM to run the actual
@@ -123,11 +123,11 @@ class _MockArdupilotBase:
         # the REAL rawes.lua run_yaw_trim() instead of this Python duplicate.
         self._yaw_trim = YawTrimObserver()
 
-    def enable_guided(self, heli_params: "HeliParams | None" = None) -> None:
+    def enable_guided(self, heli_params: HeliParams | None = None) -> None:
         hp = heli_params or HeliParams.from_ap_dict(load_ap_params())
         self._guided_ctrl = GuidedAttitudeController(hp)
 
-    def step_physics(self, runner, dt: float, *, rest_length: "float | None" = None) -> dict:
+    def step_physics(self, runner, dt: float, *, rest_length: float | None = None) -> dict:
         if self._guided_ctrl is None:
             raise RuntimeError("Call enable_guided() before step_physics()")
         obs = runner.observe()
@@ -294,7 +294,7 @@ class _MockArdupilotBase:
 
 
 class _LuaBackend(_MockArdupilotBase):
-    def __init__(self, sim, *, initial_thrust: float = 0.263, wind: "np.ndarray", dt: float) -> None:
+    def __init__(self, sim, *, initial_thrust: float = 0.263, wind: np.ndarray, dt: float) -> None:
         super().__init__(wind=wind, dt=dt, initial_thrust=initial_thrust)
         self._sim = sim
         hz = round(1.0 / dt)
@@ -359,7 +359,7 @@ class _LuaBackend(_MockArdupilotBase):
         self._sim.set_srv_out(_YAW_MOTOR_FUNC, pwm)
         return u_applied
 
-    def tick(self, t_sim: float, runner, *, inject=None, accel_ned: "np.ndarray | None" = None) -> None:
+    def tick(self, t_sim: float, runner, *, inject=None, accel_ned: np.ndarray | None = None) -> None:
         self._sim._mock.millis_val = int(t_sim * 1000)
         obs = runner.observe()
         accel_body = obs.R.T @ np.asarray(accel_ned, dtype=float) if accel_ned is not None else None
@@ -401,14 +401,14 @@ class _LuaBackend(_MockArdupilotBase):
                 sim_time=t_sim,
             )
 
-    def step(self, runner, dt: float, *, rest_length: "float | None" = None) -> dict:
+    def step(self, runner, dt: float, *, rest_length: float | None = None) -> dict:
         if not self._ctrl._target_set:
             obs = runner.observe()
             self._ctrl.set_target_rotation(obs.R, sim_time=runner.t_sim)
         return self.step_physics(runner, dt, rest_length=rest_length)
 
 
-def _blend_bz(bz_now: "np.ndarray", bz_goal: "np.ndarray", alpha: float) -> "np.ndarray":
+def _blend_bz(bz_now: np.ndarray, bz_goal: np.ndarray, alpha: float) -> np.ndarray:
     """Normalised linear blend from bz_now toward bz_goal. Mirrors rawes.lua blend_bz()."""
     a = max(0.0, min(1.0, alpha))
     v = (1.0 - a) * np.asarray(bz_now, dtype=float) + a * np.asarray(bz_goal, dtype=float)
@@ -491,7 +491,7 @@ class _PumpingPythonMode:
         self._pos_ned        = np.asarray(ic_pos, dtype=float)
 
         # Mirror rawes.lua: _capture_ms (None = not-yet-captured → recovery_alpha stays 1.0)
-        self._capture_t: "float | None" = None
+        self._capture_t: float | None = None
 
         self._bz_goal        = None
         self._last_roll_sp   = 0.0
@@ -554,8 +554,8 @@ class _PumpingPythonMode:
         obs      : HubObservation,
         dt       : float,
         *,
-        accel_ned: "np.ndarray | None" = None,  # noqa: ARG002
-    ) -> "tuple[float, float, float]":
+        accel_ned: np.ndarray | None = None,  # noqa: ARG002
+    ) -> tuple[float, float, float]:
         self._pos_ned  = obs.pos
         self._cmd_age += dt
         self._t_sim   += dt
@@ -713,8 +713,8 @@ class _LandingPythonMode:
         obs: HubObservation,
         dt:  float,
         *,
-        accel_ned: "np.ndarray | None" = None,  # noqa: ARG002
-    ) -> "tuple[float, float, float]":
+        accel_ned: np.ndarray | None = None,  # noqa: ARG002
+    ) -> tuple[float, float, float]:
         R      = obs.R
         bz_now = R[:, 2]
         self._bz_current = slerp_body_z(self._bz_current, self._bz_target, self._slew, dt)
@@ -760,7 +760,7 @@ class _LandingPythonMode:
 class _PythonBackend(_MockArdupilotBase):
     AP_HZ: float = 50.0
 
-    def __init__(self, mode, *, wind: "np.ndarray", dt: float) -> None:
+    def __init__(self, mode, *, wind: np.ndarray, dt: float) -> None:
         super().__init__(wind=wind, dt=dt, initial_thrust=float(mode._thrust_held))
         self._mode = mode
         self._t_last = None
@@ -785,8 +785,8 @@ class _PythonBackend(_MockArdupilotBase):
         obs: HubObservation,
         dt: float,
         *,
-        accel_ned: "np.ndarray | None" = None,
-    ) -> "tuple[float, float, float]":
+        accel_ned: np.ndarray | None = None,
+    ) -> tuple[float, float, float]:
         thrust, roll_sp, pitch_sp = self._mode.step(obs, dt, accel_ned=accel_ned)
         self._last_thrust = float(thrust)
         self.roll_sp = roll_sp
@@ -803,7 +803,7 @@ class _PythonBackend(_MockArdupilotBase):
         # to remember to splat **ap.log_fields() themselves.
         return self.log_fields()
 
-    def tick(self, t_sim: float, runner, *, inject=None, accel_ned: "np.ndarray | None" = None) -> None:
+    def tick(self, t_sim: float, runner, *, inject=None, accel_ned: np.ndarray | None = None) -> None:
         dt = 1.0 / self.AP_HZ if self._t_last is None else t_sim - self._t_last
         self._t_last = t_sim
 
@@ -855,11 +855,11 @@ class MockArdupilot:
     }
 
     @classmethod
-    def for_lua(cls, sim, *, initial_thrust: float = 0.263, wind: "np.ndarray", dt: float):
+    def for_lua(cls, sim, *, initial_thrust: float = 0.263, wind: np.ndarray, dt: float):
         return _LuaBackend(sim, initial_thrust=initial_thrust, wind=wind, dt=dt)
 
     @classmethod
-    def for_python(cls, *, mode: str, wind: "np.ndarray", dt: float, **kwargs):
+    def for_python(cls, *, mode: str, wind: np.ndarray, dt: float, **kwargs):
         if mode in ("pumping", "tension"):
             backend_mode = _PumpingPythonMode(**kwargs)
         elif mode == "landing":
@@ -885,7 +885,7 @@ class MockArdupilot:
         slew_rate_rad_s: float,
         warm_thrust: float,
         tension_ic: float,
-        wind: "np.ndarray",
+        wind: np.ndarray,
         dt: float,
         **kwargs,
     ):
@@ -908,7 +908,7 @@ class MockArdupilot:
         ic_body_z: np.ndarray,
         slew_rate_rad_s: float,
         warm_coll_rad: float,
-        wind: "np.ndarray",
+        wind: np.ndarray,
         dt: float,
         kp_vz: float = _LandingPythonMode.KP_VZ,
         ki_vz: float = _LandingPythonMode.KI_VZ,

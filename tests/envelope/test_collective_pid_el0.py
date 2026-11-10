@@ -29,10 +29,7 @@ So:
   v_target = +0.5  (reel-in  / toward anchor):    PI should lower collective (reduce thrust)
 """
 import math
-import sys
-from pathlib import Path
 
-import numpy as np
 
 
 from envelope.point_mass import simulate_point

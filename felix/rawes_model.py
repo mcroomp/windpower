@@ -106,7 +106,6 @@ def rawes_rhs(t, x, beta, v_wind):
     beta   : blade pitch angles array shape (3,)  [rad]
     v_wind : global wind velocity                  [m/s]
     """
-    p        = x[0:3]
     v        = x[3:6]
     R        = x[6:15].reshape(3, 3)
     omega_R  = x[15:18]

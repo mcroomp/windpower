@@ -18,14 +18,10 @@ Phase sequence from steady_state_starting.json IC:
 
 Each phase is checked at exit before the test continues to the next assertion.
 """
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
 
 from simulation.winch import WinchController
 from simulation.simtest_log import BadEventLog
@@ -35,122 +31,130 @@ from tests.common.mock_ardupilot import MockArdupilot
 from groundstation.landing_planner import LandingGroundController
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
-_IC    = load_ic()
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
+
+
+_IC = load_ic()
 _ROTOR = load_default_rotor()
 
 # ── Simulation constants ───────────────────────────────────────────────────────
-DT         = 1.0 / 400.0
+DT = 1.0 / 400.0
 DT_PLANNER = 1.0 / 10.0
-WIND       = np.array([0.0, 10.0, 0.0])
+WIND = np.array([0.0, 10.0, 0.0])
 WIND.flags.writeable = False
 BREAK_LOAD_N = 620.0
 
 # ── Landing parameters ─────────────────────────────────────────────────────────
-TARGET_LENGTH_M  = 50.0    # m  reel_in target tether length
-COL_REEL_IN_RAD  = -0.23   # VZ PI seed during reel_in and get_vertical
-COL_DESCENT_RAD  =  0.02   # VZ PI seed during descent (~1.3 deg, autorotation equilibrium at 1 m/s axial inflow)
-COL_FLARE_DELTA  = 0.05    # collective bump above col_descent at flare entry [rad]
+TARGET_LENGTH_M = 50.0  # m  reel_in target tether length
+COL_REEL_IN_RAD = -0.23  # VZ PI seed during reel_in and get_vertical
+COL_DESCENT_RAD = 0.02  # VZ PI seed during descent (~1.3 deg, autorotation equilibrium at 1 m/s axial inflow)
+COL_FLARE_DELTA = 0.05  # collective bump above col_descent at flare entry [rad]
 
 # Winch reel-in: set target well above expected tension so kp*(target-T) > 0 → full speed
-TENSION_REEL_IN = 500.0    # N   forces full-speed reel-in (kp*(500-325)=0.875 → cap v_max_in)
+TENSION_REEL_IN = (
+    500.0  # N   forces full-speed reel-in (kp*(500-325)=0.875 → cap v_max_in)
+)
 # Descent: kp*(tension_descent - natural_T) ≈ v_land
 # Horizontal disk natural tension ≈ 0 N (only gravity); kp=0.005 → 200 N → ~1 m/s
-TENSION_DESCENT = 200.0    # N
+TENSION_DESCENT = 200.0  # N
 
-V_LAND       = 1.0    # m/s NED descent rate during descent
-MIN_TETHER_M = 5.0    # m   descent → flare transition
+V_LAND = 1.0  # m/s NED descent rate during descent
+MIN_TETHER_M = 5.0  # m   descent → flare transition
 
 # ── Pass/fail thresholds ───────────────────────────────────────────────────────
-REEL_IN_TOL_M        = 2.0    # m   acceptable overshoot past TARGET_LENGTH_M
-GET_VERTICAL_TOL_DEG = 5.0    # deg  xi must reach 90 - tol
-DESCENT_ALT_MAX_M    = 10.0   # m   hub must be below this at descent exit
-FLOOR_ALT_M          = 1.0    # m   flare touchdown threshold
-ANCHOR_LAND_RADIUS_M = 20.0   # m
-T_FLARE_MAX          = 30.0   # s   max time in flare before timeout
+REEL_IN_TOL_M = 2.0  # m   acceptable overshoot past TARGET_LENGTH_M
+GET_VERTICAL_TOL_DEG = 5.0  # deg  xi must reach 90 - tol
+DESCENT_ALT_MAX_M = 10.0  # m   hub must be below this at descent exit
+FLOOR_ALT_M = 1.0  # m   flare touchdown threshold
+ANCHOR_LAND_RADIUS_M = 20.0  # m
+T_FLARE_MAX = 30.0  # s   max time in flare before timeout
 
 
 # ---------------------------------------------------------------------------
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_landing(log) -> "tuple[dict, object]":
+
+def _run_landing(log) -> tuple[dict, object]:
     runner = PhysicsRunner(_ROTOR, _IC, WIND)
 
     ground = LandingGroundController(
-        initial_body_z   = _IC.R0[:, 2],
-        target_length_m  = TARGET_LENGTH_M,
-        slew_rate_rad_s  = BODY_Z_SLEW_RATE_RAD_S,
-        col_reel_in_rad  = COL_REEL_IN_RAD,
-        col_vertical_rad = COL_REEL_IN_RAD,
-        col_descent_rad  = COL_DESCENT_RAD,
-        col_flare_delta  = COL_FLARE_DELTA,
-        tension_reel_in  = TENSION_REEL_IN,
-        tension_descent  = TENSION_DESCENT,
-        v_land           = V_LAND,
-        min_tether_m     = MIN_TETHER_M,
+        initial_body_z=_IC.R0[:, 2],
+        target_length_m=TARGET_LENGTH_M,
+        slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
+        col_reel_in_rad=COL_REEL_IN_RAD,
+        col_vertical_rad=COL_REEL_IN_RAD,
+        col_descent_rad=COL_DESCENT_RAD,
+        col_flare_delta=COL_FLARE_DELTA,
+        tension_reel_in=TENSION_REEL_IN,
+        tension_descent=TENSION_DESCENT,
+        v_land=V_LAND,
+        min_tether_m=MIN_TETHER_M,
     )
 
     ap = MockArdupilot.for_landing(
-        ic_body_z       = _IC.R0[:, 2],
-        slew_rate_rad_s = BODY_Z_SLEW_RATE_RAD_S,
-        warm_thrust     = _IC.eq_thrust,
-        kp_outer        = 2.5,
-        wind            = WIND,
-        dt              = DT,
+        ic_body_z=_IC.R0[:, 2],
+        slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
+        warm_thrust=_IC.eq_thrust,
+        kp_outer=2.5,
+        wind=WIND,
+        dt=DT,
     )
     ap.tel_fn = lambda r, sr: {
         **ap.log_fields(),
-        "phase":          phase,
+        "phase": phase,
         "winch_speed_ms": speed_now,
     }
 
     winch = WinchController(
-        rest_length     = _IC.rest_length,
-        kp_tension      = 0.005,
-        v_max_out       = 0.40,
-        v_max_in        = 0.80,
-        accel_limit_ms2 = 0.5,
-        min_length      = MIN_TETHER_M,
+        rest_length=_IC.rest_length,
+        kp_tension=0.005,
+        v_max_out=0.40,
+        v_max_in=0.80,
+        accel_limit_ms2=0.5,
+        min_length=MIN_TETHER_M,
     )
 
-    events        = BadEventLog()
+    events = BadEventLog()
     planner_every = max(1, round(DT_PLANNER / DT))
-    ap_every      = max(1, round(1.0 / (MockArdupilot.AP_HZ * DT)))
+    ap_every = max(1, round(1.0 / (MockArdupilot.AP_HZ * DT)))
 
     # Per-phase exit snapshots: filled when the phase first transitions away
-    phase_exit: "dict[str, dict]" = {}
+    phase_exit: dict[str, dict] = {}
 
-    floor_hit      = False
-    t_flare_start  = None
-    tensions_desc  = []
+    floor_hit = False
+    t_flare_start = None
+    tensions_desc = []
     altitudes_desc = []
-    vz_at_floor    = None
-    bz_at_floor    = None
-    pos_at_floor   = None
-    phase          = "reel_in"
-    prev_phase     = "reel_in"
-    speed_now      = 0.0
+    vz_at_floor = None
+    bz_at_floor = None
+    pos_at_floor = None
+    phase = "reel_in"
+    prev_phase = "reel_in"
+    speed_now = 0.0
 
     # Prime first command
-    cmd = ground.step(0.0, 0.0, rest_length=_IC.rest_length,
-                      hub_alt_m=float(-_IC.pos[2]))
+    cmd = ground.step(
+        0.0, 0.0, rest_length=_IC.rest_length, hub_alt_m=float(-_IC.pos[2])
+    )
     ap.receive_command(cmd, DT_PLANNER)
     winch.set_target(ground.winch_target_length, ground.winch_target_tension)
 
     descent_time = _IC.rest_length / V_LAND * 3.0 + 60.0
-    max_steps    = int((120.0 + descent_time + T_FLARE_MAX) / DT) + 1
+    max_steps = int((120.0 + descent_time + T_FLARE_MAX) / DT) + 1
 
     t_sim = 0.0
     for i in range(max_steps):
         t_sim = i * DT
 
         tension_now = runner.tension_now
-        altitude    = runner.altitude
+        altitude = runner.altitude
 
         # ── Ground 10 Hz ─────────────────────────────────────────────────
         if i % planner_every == 0:
-            cmd = ground.step(t_sim, tension_now,
-                              rest_length=winch.rest_length, hub_alt_m=altitude)
+            cmd = ground.step(
+                t_sim, tension_now, rest_length=winch.rest_length, hub_alt_m=altitude
+            )
             ap.receive_command(cmd, DT_PLANNER)
             winch.set_target(ground.winch_target_length, ground.winch_target_tension)
 
@@ -164,25 +168,34 @@ def _run_landing(log) -> "tuple[dict, object]":
             ap.tick(t_sim, runner)
 
         # ── Physics 400 Hz ────────────────────────────────────────────────
-        omega_body    = runner.omega_body
+        omega_body = runner.omega_body
         omega_body[2] = 0.0
-        sr = runner.step_from_thrust(DT, ap.thrust, ap.roll_sp, ap.pitch_sp, omega_body,
-                         rest_length=winch.rest_length)
+        sr = runner.step_from_thrust(
+            DT,
+            ap.thrust,
+            ap.roll_sp,
+            ap.pitch_sp,
+            omega_body,
+            rest_length=winch.rest_length,
+        )
 
-        phase     = cmd.phase
+        phase = cmd.phase
         hub_state = runner.hub_state
 
         # ── Record phase exit snapshot ─────────────────────────────────────
         if phase != prev_phase and prev_phase not in phase_exit:
-            bz   = hub_state["R"][:, 2]
-            xi   = float(np.degrees(np.arcsin(np.clip(-bz[2], -1.0, 1.0))))
+            bz = hub_state["R"][:, 2]
+            xi = float(np.degrees(np.arcsin(np.clip(-bz[2], -1.0, 1.0))))
             phase_exit[prev_phase] = dict(
-                t            = t_sim,
-                rest_length  = winch.rest_length,
-                altitude     = altitude,
-                xi_deg       = xi,
-                timeout      = (prev_phase == "reel_in"      and winch.rest_length > TARGET_LENGTH_M + REEL_IN_TOL_M) or
-                               (prev_phase == "get_vertical" and xi < 90.0 - GET_VERTICAL_TOL_DEG),
+                t=t_sim,
+                rest_length=winch.rest_length,
+                altitude=altitude,
+                xi_deg=xi,
+                timeout=(
+                    prev_phase == "reel_in"
+                    and winch.rest_length > TARGET_LENGTH_M + REEL_IN_TOL_M
+                )
+                or (prev_phase == "get_vertical" and xi < 90.0 - GET_VERTICAL_TOL_DEG),
             )
         prev_phase = phase
 
@@ -191,10 +204,10 @@ def _run_landing(log) -> "tuple[dict, object]":
             if t_flare_start is None:
                 t_flare_start = t_sim
             if not floor_hit and altitude <= FLOOR_ALT_M:
-                floor_hit      = True
-                vz_at_floor    = float(hub_state["vel"][2])
-                bz_at_floor    = hub_state["R"][:, 2].copy()
-                pos_at_floor   = hub_state["pos"].copy()
+                floor_hit = True
+                vz_at_floor = float(hub_state["vel"][2])
+                bz_at_floor = hub_state["R"][:, 2].copy()
+                pos_at_floor = hub_state["pos"].copy()
                 break
             if (t_sim - t_flare_start) >= T_FLARE_MAX:
                 break
@@ -206,8 +219,9 @@ def _run_landing(log) -> "tuple[dict, object]":
         if runner.tether_result.slack:
             events.record("slack", t_sim, phase, altitude)
         if runner.tension_now > BREAK_LOAD_N:
-            events.record("tension_spike", t_sim, phase, altitude,
-                          tension=runner.tension_now)
+            events.record(
+                "tension_spike", t_sim, phase, altitude, tension=runner.tension_now
+            )
 
         # ── Telemetry 20 Hz ───────────────────────────────────────────────
         ap.log(runner, sr)
@@ -217,21 +231,22 @@ def _run_landing(log) -> "tuple[dict, object]":
         bz = runner.hub_state["R"][:, 2]
         xi = float(np.degrees(np.arcsin(np.clip(-bz[2], -1.0, 1.0))))
         phase_exit[phase] = dict(
-            t           = t_sim,
-            rest_length = winch.rest_length,
-            altitude    = runner.altitude,
-            xi_deg      = xi,
-            timeout     = True,
+            t=t_sim,
+            rest_length=winch.rest_length,
+            altitude=runner.altitude,
+            xi_deg=xi,
+            timeout=True,
         )
 
-    anchor_dist    = None
+    anchor_dist = None
     touchdown_tilt = None
     if pos_at_floor is not None:
         anchor_dist = float(np.linalg.norm(pos_at_floor[:2]))
     if bz_at_floor is not None:
-        bz_level       = np.array([0.0, 0.0, 1.0])   # FRD: down through disk for level hover
-        touchdown_tilt = float(np.degrees(np.arccos(
-            np.clip(np.dot(bz_at_floor, bz_level), -1.0, 1.0))))
+        bz_level = np.array([0.0, 0.0, 1.0])  # FRD: down through disk for level hover
+        touchdown_tilt = float(
+            np.degrees(np.arccos(np.clip(np.dot(bz_at_floor, bz_level), -1.0, 1.0)))
+        )
 
     parts = [
         f"alt_start={-_IC.pos[2]:.1f}m",
@@ -239,24 +254,25 @@ def _run_landing(log) -> "tuple[dict, object]":
         f"floor_hit={floor_hit}",
         f"max_desc_tension={max(tensions_desc):.0f}N" if tensions_desc else "",
     ]
-    if anchor_dist    is not None: parts.append(f"anchor_dist={anchor_dist:.1f}m")
-    if touchdown_tilt is not None: parts.append(f"tilt={touchdown_tilt:.1f}deg")
+    if anchor_dist is not None:
+        parts.append(f"anchor_dist={anchor_dist:.1f}m")
+    if touchdown_tilt is not None:
+        parts.append(f"tilt={touchdown_tilt:.1f}deg")
     parts.append(f"t_end={t_sim:.1f}s")
     parts.append(events.summary() or "no_bad_events")
-    log.write(["(telemetry: telemetry.csv)"],
-              "  ".join(p for p in parts if p))
+    log.write(["(telemetry: telemetry.csv)"], "  ".join(p for p in parts if p))
 
     return (
         dict(
-            t_end            = t_sim,
-            events           = events,
-            phase_exit       = phase_exit,
-            floor_hit        = floor_hit,
-            vz_at_floor      = vz_at_floor,
-            anchor_dist      = anchor_dist,
-            touchdown_tilt   = touchdown_tilt,
-            max_desc_tension = max(tensions_desc) if tensions_desc else None,
-            min_altitude     = min(altitudes_desc) if altitudes_desc else None,
+            t_end=t_sim,
+            events=events,
+            phase_exit=phase_exit,
+            floor_hit=floor_hit,
+            vz_at_floor=vz_at_floor,
+            anchor_dist=anchor_dist,
+            touchdown_tilt=touchdown_tilt,
+            max_desc_tension=max(tensions_desc) if tensions_desc else None,
+            min_altitude=min(altitudes_desc) if altitudes_desc else None,
         ),
         ap,
     )
@@ -265,6 +281,7 @@ def _run_landing(log) -> "tuple[dict, object]":
 # ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skip(reason="Landing tests disabled pending landing controller rework")
 def test_landing(simtest_log):

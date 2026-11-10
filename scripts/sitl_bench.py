@@ -30,13 +30,14 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Path setup — reach simulation/ and tests/sitl/ from any CWD
 # ---------------------------------------------------------------------------
+import contextlib
+
 _SCRIPTS_DIR = Path(__file__).resolve().parent          # scripts/
 _REPO_ROOT   = _SCRIPTS_DIR.parent                      # repo root
 _SIM_DIR     = _REPO_ROOT / "simulation"                # simulation/
 _SITL_DIR    = _REPO_ROOT / "tests" / "sitl"            # tests/sitl/
 
 from tests.sitl.stack_utils import (   # noqa: E402
-    ParamSetup,
     _launch_sitl,
     _prime_sitl_eeprom,
     _resolve_sim_vehicle,
@@ -174,10 +175,8 @@ def main() -> None:
     def _cleanup(signum=None, frame=None):
         print("\n[sitl_bench] Shutting down ...")
         for p in procs:
-            try:
+            with contextlib.suppress(Exception):
                 _terminate_process(p)
-            except Exception:
-                pass
         _kill_by_port(5760, "tcp")
         _kill_by_port(9002, "udp")
         sys.exit(0)

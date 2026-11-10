@@ -49,6 +49,40 @@ uv run python -m pytest tests\unit tests\simtests -q
 Do **not** run `tests/sitl/` with host-side `pytest`; use
 [sitl_testing.md](sitl_testing.md).
 
+## Python linting
+
+Python 3.14 is the minimum runtime. Local setup, CI, and simulation containers
+use Python 3.14.10; `.python-version` selects that interpreter for `uv run`.
+Development dependencies include Ruff, with configuration in `pyproject.toml`.
+The **Modernization + simplification** profile selects Ruff's default correctness
+rules (`E4`, `E7`, `E9`, `F`), pyupgrade (`UP`), and flake8-simplify (`SIM`),
+targeting Python 3.14. It does not impose a formatter gate.
+
+```powershell
+uv run ruff check .
+uv run ruff check . --fix   # safe fixes only; review changes before committing
+```
+
+Archived code, scratch files, and generated run logs are excluded. Protocol
+enum names retain their generated spelling; narrowly documented inline
+exceptions preserve optional-dependency skips, ArduPilot gain names, and file
+handles whose ownership spans multiple calls.
+
+`setup.cmd` and the default `setup.sh` setup/build flow fail before UI/LinkHub
+builds if Ruff fails. CI's lint job gates both Python tests and the stack image
+build. Docker `build` and `build-lite` commands lint a read-only mount of the
+repository with the image's Python/Ruff before reporting success, including
+cache-hit builds. `tests/conftest.py` also runs Ruff with the test interpreter before every
+pytest session (including collection-only invocations and Docker stack workers).
+Lint errors or a missing Ruff installation stop the session explicitly.
+
+For standalone type diagnostics, install the simulation extra and run
+`uv run pyright`. The basic-mode configuration in `pyrightconfig.json` currently
+reports existing errors and is not yet a build/test gate. Simulation dependencies
+include NeuralFoil for the SG6042 polar analysis.
+Pyright uses the same system Node.js 24.x as npm builds; install/select the
+major in `.node-version` before invoking it, rather than installing `pyright[nodejs]`.
+
 ## Markers and timeouts
 
 `pyproject.toml` currently defines:

@@ -35,13 +35,13 @@ import sys
 from pathlib import Path
 
 import simulation as _simulation_pkg
+from simulation.torque_model import GEAR_RATIO, RPM_SCALE, OMEGA_ROTOR_NOMINAL as OMEGA_NOM
+import contextlib
+
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 _LOGS_DIR = _SIM_DIR / "logs"
 
 # ── torque_model constants (imported from torque_model.py — single source of truth) ─
-import sys as _sys, os as _os
-_sys.path.insert(0, str(_SIM_DIR))
-from simulation.torque_model import GEAR_RATIO, RPM_SCALE, OMEGA_ROTOR_NOMINAL as OMEGA_NOM
 THROTTLE_EQ = OMEGA_NOM * GEAR_RATIO / RPM_SCALE
 
 # ── diagnosis thresholds ─────────────────────────────────────────────────────
@@ -63,10 +63,8 @@ def _load_events(log_dir: Path) -> list[dict]:
         line = line.strip()
         if not line:
             continue
-        try:
+        with contextlib.suppress(json.JSONDecodeError):
             out.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
     return out
 
 
@@ -168,10 +166,8 @@ def _load_mavlink(log_dir: Path) -> list[dict]:
         line = line.strip()
         if not line:
             continue
-        try:
+        with contextlib.suppress(json.JSONDecodeError):
             out.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
     return out
 
 
@@ -541,10 +537,11 @@ def _detect_motor_dead(hb: list[dict]) -> list[str]:
 
 def _convergence_time(hb: list[dict], target_deg_s: float = 10.0) -> float | None:
     for i, h in enumerate(hb):
-        if abs(h["psi_dot_deg_s"]) <= target_deg_s:
-            if all(abs(hb[j]["psi_dot_deg_s"]) <= target_deg_s
-                   for j in range(i, min(i + 5, len(hb)))):
-                return h["t_dyn"]
+        if abs(h["psi_dot_deg_s"]) <= target_deg_s and all(
+            abs(hb[j]["psi_dot_deg_s"]) <= target_deg_s
+            for j in range(i, min(i + 5, len(hb)))
+        ):
+            return h["t_dyn"]
     return None
 
 
@@ -571,7 +568,7 @@ def diagnose(log_dir: Path, settle_s: float = 80.0, observe_s: float = 20.0) -> 
     t_dyn_end = hb[-1]["t_dyn"]
 
     print(f"\n{'='*70}")
-    print(f"  TORQUE TEST DIAGNOSIS")
+    print("  TORQUE TEST DIAGNOSIS")
     print(f"  Log dir : {log_dir}")
     print(f"  Window  : settle={settle_s:.0f}s  observe={observe_s:.0f}s")
     print(f"  DYNAMIC : {len(hb)} heartbeats  t_dyn=[{hb[0]['t_dyn']:.1f}, {t_dyn_end:.1f}]")
@@ -605,12 +602,12 @@ def diagnose(log_dir: Path, settle_s: float = 80.0, observe_s: float = 20.0) -> 
         print(f"  Window  max |psi_dot|  : {window_max:.2f} deg/s  "
               f"(mean {window_mean:.2f})  n={len(window)}")
     else:
-        print(f"  Window  [EMPTY] — observation window never reached!")
+        print("  Window  [EMPTY] — observation window never reached!")
     print(f"  Throttle at end        : {thr_end:.4f}  (eq~{THROTTLE_EQ:.3f})")
     if conv_t is not None:
         print(f"  Converged <10 deg/s    : t_dyn={conv_t:.1f}s")
     else:
-        print(f"  Converged <10 deg/s    : never")
+        print("  Converged <10 deg/s    : never")
 
     tq = _tracking_quality(hb, settle_s, observe_s)
     print("[TRACKING QUALITY]")

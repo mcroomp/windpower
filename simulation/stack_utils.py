@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import contextlib
 
 # ---------------------------------------------------------------------------
 # Environment variable names  (shared by all stack tests)
@@ -90,7 +91,7 @@ def _resolve_sim_vehicle() -> Path | None:
 def _launch_sitl(
     sim_vehicle: Path,
     log_path: Path,
-    add_param_file: "Path | None" = None,
+    add_param_file: Path | None = None,
     wipe_eeprom: bool = True,
 ) -> subprocess.Popen:
     """
@@ -143,7 +144,7 @@ def _launch_sitl(
 
 def _prime_sitl_eeprom(
     sim_vehicle: Path,
-    add_param_file: "Path | None" = None,
+    add_param_file: Path | None = None,
     wait_s: float = 4.0,
 ) -> None:
     """
@@ -244,10 +245,8 @@ def _kill_by_port(port: int) -> None:
             try:
                 if os.readlink(fd_path) == target:
                     pid = int(fd_path.split("/")[2])
-                    try:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.kill(pid, _signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        pass
             except OSError:
                 pass
     except Exception:

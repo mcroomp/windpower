@@ -14,17 +14,11 @@ Architecture:
 This test validates smooth, tension-controlled winch cycles without tension
 spikes, slack, or floor hits.
 """
-import math
 import os
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-
-pytestmark = [pytest.mark.simtest,
-              pytest.mark.timeout(int(os.environ.get("RAWES_PUMP_TIMEOUT", "600")))]
 
 from simulation.winch import GovernedWinchController
 from simulation.simtest_log import BadEventLog
@@ -34,7 +28,10 @@ from tests.common.mock_ardupilot import MockArdupilot
 from groundstation.pumping_planner import TensionCommand
 from simulation.comms import VirtualComms
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
-from simulation.param_defaults import thrust_to_coll_rad
+
+pytestmark = [pytest.mark.simtest,
+              pytest.mark.timeout(int(os.environ.get("RAWES_PUMP_TIMEOUT", "600")))]
+
 
 _IC    = load_ic()
 _ROTOR = load_default_rotor()
@@ -77,14 +74,13 @@ T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.2
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_pumping(log, aero_model: "str | None" = None) -> dict:
+def _run_pumping(log, aero_model: str | None = None) -> dict:
     # Aero model: explicit arg wins; otherwise the RAWES_AERO env var
     # (quasi_static [default] / pitt_peters / oye / vpm) selects it.
     if aero_model is None:
         aero_model = os.environ.get("RAWES_AERO", "quasi_static")
     runner = PhysicsRunner(_ROTOR, _IC, WIND, aero_model=aero_model)
 
-    thrust_ic = _IC.eq_thrust
     ic_alt    = float(-_IC.pos[2])
 
     # ── Winch: tension-governed, jerk-limited speed ────────────────────
@@ -154,7 +150,6 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     ap_every      = max(1, round(1.0 / (MockArdupilot.AP_HZ * DT)))
     planner_every = max(1, round(DT_PLANNER / DT))
 
-    prev_alt       = ic_alt
     prev_accel_ned = None
 
     # Initial command: AP owns collective locally via altitude PID.
@@ -171,7 +166,6 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     t_sim = 0.0
     for i in range(max_steps):
         t_sim       = i * DT
-        tension_now = runner.tension_now
         altitude    = runner.altitude
         t_in_phase  = t_sim - phase_start_t
         # ── Phase transitions ─────────────────────────────────────────────
@@ -181,15 +175,14 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
                     or t_in_phase >= T_REEL_OUT_MAX):
                 phase = "reel_in"
                 phase_start_t = t_sim
-        elif phase == "reel_in":
-            if (winch.rest_length <= start_length + 0.05
-                    or t_in_phase >= T_REEL_IN_MAX):
-                cycle_idx += 1
-                if cycle_idx >= N_CYCLES:
-                    break
-                phase = "reel_out"
-                phase_start_t = t_sim
-                cycle_net_start[cycle_idx] = winch.net_energy_j
+        elif phase == "reel_in" and (winch.rest_length <= start_length + 0.05
+                or t_in_phase >= T_REEL_IN_MAX):
+            cycle_idx += 1
+            if cycle_idx >= N_CYCLES:
+                break
+            phase = "reel_out"
+            phase_start_t = t_sim
+            cycle_net_start[cycle_idx] = winch.net_energy_j
 
         phase_label = f"cycle{cycle_idx+1}_{phase}"
 
@@ -198,9 +191,7 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
 
         # ── Ground 10 Hz: update winch velocity + refresh AP command ─────
         if i % planner_every == 0 or phase != prev_phase:
-            tel = comms.receive_telemetry(t_sim)
-            if tel is not None:
-                prev_alt = tel.hub_alt_m
+            comms.receive_telemetry(t_sim)
             cruise_v = V_CRUISE_OUT if phase == "reel_out" else -V_CRUISE_IN
             winch.set_command(cruise_v, _ap_tension_target())
             cmd = TensionCommand(

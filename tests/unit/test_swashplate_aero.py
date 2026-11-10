@@ -14,16 +14,8 @@ is tilted away from pure-axial (wind-aligned) orientation:
 """
 import pytest
 
-pytestmark = pytest.mark.expensive
-
 import math
-import sys
-from pathlib import Path
-
 import numpy as np
-import pytest
-
-
 from simulation.frames import build_orb_frame
 from simulation.swashplate import (
     ardupilot_h3_120_forward,
@@ -32,6 +24,12 @@ from simulation.swashplate import (
     collective_rad_to_out,
 )
 from tests.unit._aero_probe import make_probe, probe_steady
+
+pytestmark = pytest.mark.expensive
+
+
+
+
 
 _OMEGA   = 28.0
 _WIND    = np.array([0.0, 10.0, 0.0])   # NED: 10 m/s East

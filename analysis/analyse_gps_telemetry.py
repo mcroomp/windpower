@@ -111,9 +111,6 @@ def main(log_dir):
         # GPS speed and heading from vel/cog
         gps_speed = r['vel'] / 100.0
         cog_deg   = r['cog'] / 100.0
-        cog_rad   = math.radians(cog_deg)
-        gps_vN    = gps_speed * math.cos(cog_rad)
-        gps_vE    = gps_speed * math.sin(cog_rad)
 
         # Simulation values
         sim_vN    = sim['sens_vel_n']
@@ -209,7 +206,7 @@ def main(log_dir):
     print('  POSITION DRIFT  (GPS NE vs sim NE, relative to reference t)')
     print(sep)
     print(f'  Reference point: t={ref_t:.2f}s')
-    print(f'  Note: assumes sim pos_x=East, pos_y=North')
+    print('  Note: assumes sim pos_x=East, pos_y=North')
     print()
     print(f'  {"t_sim":>8}  {"gps_N":>8}  {"gps_E":>8}  {"sim_N":>8}  {"sim_E":>8}  '
           f'{"pos_err":>8}  {"dup":>5}')

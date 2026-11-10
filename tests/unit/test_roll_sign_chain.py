@@ -6,8 +6,6 @@ This test suite narrows down which layer has the sign inversion issue.
 """
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -120,7 +118,6 @@ class TestRollSignChainLinks:
         """
         # Hovering at IC attitude
         R_hub = np.asarray(_R_HUB_HOVER, dtype=float)
-        collective_rad = _IC.coll_eq_rad
         tilt_lon = 0.0
         tilt_lat = -0.05  # left-roll disk
         
@@ -264,7 +261,7 @@ class TestEndToEndRollCorrection:
             f"mx_cmd={mx_cmd_body:.3f}, mx_trim={mx_trim_body:.3f}"
         )
         
-        print(f"✓ End-to-end OK:")
+        print("✓ End-to-end OK:")
         print(f"  roll_error={math.degrees(roll_error):.2f}deg ->") 
         print(f"  rate_sp={rate_sp:.4f} rad/s ->") 
         print(f"  tilt_lat={tilt_lat_cmd:.4f} ->") 
