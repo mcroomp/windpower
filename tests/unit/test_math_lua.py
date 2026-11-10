@@ -14,7 +14,6 @@ No SITL, no Docker.  Runs with the existing unit-test venv.
 
 import math
 import json
-import sys
 from pathlib import Path
 
 import numpy as np

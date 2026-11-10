@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -24,7 +23,6 @@ from pathlib import Path
 import numpy as np
 
 
-from envelope.point_mass import simulate_point
 
 
 # ── Tension-band sweep worker ─────────────────────────────────────────────────

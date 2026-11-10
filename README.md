@@ -191,10 +191,10 @@ On Windows, `setup.cmd` owns the complete setup:
   An existing Build Tools installation missing C++ support is updated through
   its Visual Studio installer. C++ tools and the x64 Windows SDK can require a
   large download, administrator approval, or a Windows restart.
-- Use uv to install managed Python 3.12 and sync locked development and
+- Use uv to install managed Python 3.14.10 and sync locked development and
   simulation dependencies, including editable `rawes` and `linkhub-client`.
   No existing Python, `py` launcher, or pip installation is needed.
-- Run `npm ci` and build the UI, then build the LinkHub release binary.
+- Check Python with Ruff, run `npm ci` and build the UI, then build the LinkHub release binary.
 
 Git Bash delegates to the same Windows bootstrap. If WinGet is missing, install
 or update **App Installer** from Microsoft Store first. Setup stops explicitly
@@ -220,6 +220,13 @@ Use `uv` for the local Python environment. `uv sync --dev` provisions the
 lightweight hardware environment; `uv sync --dev --extra simulation` adds the
 scientific/Lua stack. Run `uv sync` explicitly after dependency changes
 (`UV_NO_SYNC=1` is configured on this workstation).
+Python 3.14 is the minimum; `.python-version` pins the development interpreter.
+If an older uv reports no download for the pinned Python release, update uv
+using its owning package manager (on Windows, `winget upgrade --id astral-sh.uv`).
+
+Ruff runs before local builds and every pytest session, and gates CI builds and
+tests. See [Python linting](design/testing.md#python-linting) for the
+modernization + simplification profile and standalone commands.
 
 Choose the smallest tier that covers the change; full validation proceeds from
 unit tests to simtests to the real SITL stack.

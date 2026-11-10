@@ -39,7 +39,9 @@ Verified behavior from `test.sh`:
 - `test_linkhub_stress_sitl.py` runs exclusively so the transport benchmark
   measures LinkHub rather than contention from another stack.
 - Before collection the runner calls `bash setup.sh build` and probes the image
-  for Python 3.12+, `arducopter-heli`, and `linkhub`.
+  for Python 3.14+, `arducopter-heli`, and `linkhub`.
+- Runtime images install managed Python 3.14.10 and Ruff. Each pytest worker
+  runs the shared [Python lint gate](testing.md#python-linting) before collection.
 - Each selected file gets an outer wall-clock timeout through
   `RAWES_STACK_TEST_TIMEOUT_S` (default `600` seconds).
 

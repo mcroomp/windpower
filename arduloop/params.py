@@ -22,7 +22,7 @@ Or construct explicitly with all rate axes required::
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -30,7 +30,7 @@ class RateAxisParams:
     # PID gains — `ATC_RAT_xxx_P / I / D / FF / IMAX`
     # All gains are required — use ArduPilot parameter file as single source of truth.
     P:    float
-    I:    float
+    I:    float  # noqa: E741 - matches the ArduPilot rate-gain parameter suffix
     D:    float
     FF:   float
     IMAX: float
@@ -68,7 +68,7 @@ class RateAxisParams:
     NEF_attn_db:      float = 40.0
 
     @classmethod
-    def from_ap_dict(cls, params: dict[str, float], axis: str) -> "RateAxisParams":
+    def from_ap_dict(cls, params: dict[str, float], axis: str) -> RateAxisParams:
         """Build from a flat AP params dict. axis is 'RLL', 'PIT', or 'YAW'."""
         p = axis
         return cls(
@@ -136,7 +136,7 @@ class HeliParams:
     ATC_INPUT_TC: float = 0.0
 
     @classmethod
-    def from_ap_dict(cls, params: dict[str, float], **overrides) -> "HeliParams":
+    def from_ap_dict(cls, params: dict[str, float], **overrides) -> HeliParams:
         """Build from a flat AP params dict (e.g. from param_defaults.load_ap_params()).
 
         Pass ``**overrides`` to set non-AP fields like ``loop_rate_hz``.

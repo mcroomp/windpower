@@ -7,7 +7,6 @@ identify the Python guidance/collective layer before the full-loop tests.
 import math
 
 import numpy as np
-import pytest
 
 from simulation.controller import TensionPI, compute_bz_tether, position_feedback_bz_eq
 from tests.unit._aero_probe import load_rotor

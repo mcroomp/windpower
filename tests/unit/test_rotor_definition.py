@@ -5,8 +5,6 @@ autorotation sub-records).  These tests verify YAML loading, derived
 geometry properties, and validation for the rotors used by this project.
 """
 import math
-import sys
-from pathlib import Path
 
 import pytest
 

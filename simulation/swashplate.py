@@ -325,10 +325,10 @@ class SwashplateServoModel:
 
     def __init__(
         self,
-        slew_rate_deg_s: "float | None" = None,
-        travel_deg:      "float | None" = None,
-        col_min_rad:     "float | None" = None,
-        col_max_rad:     "float | None" = None,
+        slew_rate_deg_s: float | None = None,
+        travel_deg:      float | None = None,
+        col_min_rad:     float | None = None,
+        col_max_rad:     float | None = None,
         h_col_min:       float = 1000.0,
         h_col_max:       float = 2000.0,
     ):
@@ -355,7 +355,7 @@ class SwashplateServoModel:
     @classmethod
     def from_rotor(cls, rotor,
                    h_col_min: float = 1000.0,
-                   h_col_max: float = 2000.0) -> "SwashplateServoModel":
+                   h_col_max: float = 2000.0) -> SwashplateServoModel:
         if rotor.control is None:
             raise ValueError("rotor.control must be set to construct SwashplateServoModel")
         slew = rotor.control.servo_slew_rate_deg_s
@@ -373,7 +373,7 @@ class SwashplateServoModel:
         )
 
     def step(self, collective_rad_cmd: float, tilt_lon_cmd: float,
-             tilt_lat_cmd: float, dt: float) -> "tuple[float, float, float]":
+             tilt_lat_cmd: float, dt: float) -> tuple[float, float, float]:
         """
         Advance one timestep.
 

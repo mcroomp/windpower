@@ -18,15 +18,17 @@ import pytest
 from tests.sitl.stack_infra import *  # noqa: F401,F403  — re-export everything for test imports
 from tests.sitl.stack_infra import (
     _acro_stack,
-    _RAWES_DEFAULTS_PARM,
-    _install_lua_scripts,
-    _STARTING_STATE,
-    _STARTUP_DAMP_S,
     HOME_LAT_DEG,
     HOME_LON_DEG,
     HOME_ALT_M,
 )
-from linkhub_client.messages import NamedValueFloat, NamedValueInt
+from linkhub_client.messages import (
+    LocalPositionNed,
+    NamedValueFloat,
+    NamedValueInt,
+    Statustext,
+    decode_message,
+)
 from groundstation.rawes_modes import (
     CMD_ENTER_PASSIVE,
     enter_passive_params,
@@ -499,18 +501,16 @@ def _ic_trapezoid_stack(
                 try:
                     while True:
                         _winch_sock.recvfrom(256)
-                except (TimeoutError, _sock.timeout, BlockingIOError):
+                except (TimeoutError, BlockingIOError):
                     pass
 
                 # Re-issue the hold command at 10 Hz.  The GovernedWinch holds
                 # tension natively via cruise_v=0 + tension_target.
-                try:
+                with contextlib.suppress(OSError):
                     _winch_sock.sendto(_json_w.dumps({
                         "cruise_v":       0.0,
                         "tension_target": _tension_target_n,
                     }).encode(), _winch_addr)
-                except OSError:
-                    pass
                 _time_w.sleep(0.1)   # 10 Hz
 
         _winch_thread = _thr.Thread(target=_winch_regulator, daemon=True,
@@ -524,10 +524,8 @@ def _ic_trapezoid_stack(
         finally:
             _winch_stop.set()
             _winch_thread.join(timeout=2.0)
-            try:
+            with contextlib.suppress(OSError):
                 _winch_sock.close()
-            except OSError:
-                pass
 
 
 @pytest.fixture

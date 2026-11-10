@@ -147,11 +147,11 @@ def _print_summary(data: dict[str, list]) -> None:
         yaw_cmd_mean = (sum(c4)/len(c4) - 1500.0) / 500.0
         print(f"  CH4 normalized  : {yaw_cmd_mean:+.3f}  (-1=full left, 0=centre, +1=full right)")
         if abs(yaw_cmd_mean) > 0.05:
-            print(f"  [DIAGNOSIS] CH4 is NOT centred -- yaw rate setpoint is non-zero!")
-            print(f"              This is likely the root cause of SERVO4 wind-up.")
-            print(f"              In ACRO mode yaw rate cmd = CH4 deviation * ACRO_YAW_RATE.")
+            print("  [DIAGNOSIS] CH4 is NOT centred -- yaw rate setpoint is non-zero!")
+            print("              This is likely the root cause of SERVO4 wind-up.")
+            print("              In ACRO mode yaw rate cmd = CH4 deviation * ACRO_YAW_RATE.")
         else:
-            print(f"  [OK] CH4 is centred -- yaw rate setpoint is near zero.")
+            print("  [OK] CH4 is centred -- yaw rate setpoint is near zero.")
 
     if data["imu0_t"]:
         gz = data["imu0_gz"]

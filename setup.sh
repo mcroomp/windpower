@@ -62,10 +62,12 @@ _setup_venv() {
             return 1
         fi
     done
-    echo "[INFO] Installing uv-managed Python 3.12 ..."
-    uv python install 3.12
+    echo "[INFO] Installing uv-managed Python 3.14.10 ..."
+    uv python install 3.14.10
     echo "[INFO] Synchronizing the project environment ..."
-    uv sync --project "$REPO_DIR" --python 3.12 --managed-python --locked --dev --extra simulation
+    uv sync --project "$REPO_DIR" --python 3.14.10 --managed-python --locked --dev --extra simulation
+    echo "[INFO] Checking Python with Ruff ..."
+    uv run --no-sync --project "$REPO_DIR" ruff check "$REPO_DIR"
 
     (
         cd "$REPO_DIR/linkhub-ui"
@@ -81,6 +83,15 @@ _setup_venv() {
 }
 
 # --- Docker image ------------------------------------------------------
+_lint_image() {
+    echo "[INFO] Checking Python with Ruff in $1 ..."
+    docker run --rm \
+        --volume "$REPO_DIR:/work:ro" \
+        --workdir /work \
+        --entrypoint /rawes/.venv/bin/python \
+        "$1" -m ruff check --no-cache .
+}
+
 _setup_build() {
     local ardupilot_image="rawes-sim-ardupilot-base:Copter-4.7.1-v1"
     local image_hash
@@ -95,9 +106,10 @@ _setup_build() {
     if [ "${RAWES_REBUILD_ARDUPILOT:-0}" != "1" ] && [ "$existing_hash" = "$image_hash" ]; then
         echo "[INFO] rawes-sim build inputs unchanged ($image_hash) -- skipping Docker build"
         docker run --rm --entrypoint /bin/bash rawes-sim -lc \
-            '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 12), sys.version" \
+            '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 14), sys.version" \
              && test -x /ardupilot/build/sitl/bin/arducopter-heli \
              && command -v linkhub >/dev/null'
+        _lint_image rawes-sim
         return
     fi
 
@@ -137,15 +149,17 @@ _setup_build() {
         return 1
     fi
     docker run --rm --entrypoint /bin/bash rawes-sim -lc \
-        '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 12), sys.version" \
+        '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 14), sys.version" \
          && test -x /ardupilot/build/sitl/bin/arducopter-heli \
          && command -v linkhub >/dev/null'
+    _lint_image rawes-sim
     echo "[INFO] Build complete.  Run stack tests: bash test.sh -n 8"
 }
 
 _setup_build_lite() {
     echo "[INFO] Building rawes-sim (target=runtime, no ArduPilot or LinkHub) ..."
     docker build -f "$SIM_DIR/Dockerfile" "$REPO_DIR" -t rawes-sim --target runtime
+    _lint_image rawes-sim
     echo "[INFO] Build complete.  Run stack tests: bash test.sh -n 8"
 }
 

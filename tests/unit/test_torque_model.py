@@ -23,10 +23,7 @@ Tests
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 
-import pytest
 
 # simulation/ is two levels up from tests/unit/
 import simulation.torque_model as m

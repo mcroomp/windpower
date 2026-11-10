@@ -10,6 +10,8 @@ Fixtures:
   torque_armed_ddfp_ramp    — DDFP fixture with prescribed 0→10 deg/s yaw ramp (PI must cancel it).
   torque_armed_ddfp         — DDFP fixture with kinematic yaw model (closed-loop regulation).
 """
+import math
+
 import pytest
 
 from tests.sitl.stack_infra import *  # noqa: F401,F403  — re-export everything for test imports
@@ -21,7 +23,6 @@ from tests.sitl.stack_infra import (
 
 # IC (steady-state tethered-hover) orientation constants — single source of
 # truth in mediator_torque (derived from steady_state_starting.json R0).
-from simulation.mediator_torque import _IC_ROLL_RAD, _IC_PITCH_RAD, _IC_YAW_RAD  # noqa: E402
 from simulation.param_defaults import load_collective_phys_range
 
 

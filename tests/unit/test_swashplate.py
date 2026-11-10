@@ -6,8 +6,6 @@ inverses of each other and produce values that match the ArduPilot signal flow
 documented in design/ardupilot_swashplate.md.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest

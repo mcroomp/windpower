@@ -62,6 +62,7 @@ def bootstrap(tmp_path):
     write_cmd(bin_dir / "uv.template", r"""
         @echo off
         echo uv %*>>"%MOCK_LOG%"
+        if "%MOCK_FAIL%"=="ruff" if "%~5"=="ruff" exit /b 19
         if "%MOCK_FAIL%"=="%~1" exit /b 13
         exit /b 0
     """)
@@ -168,7 +169,7 @@ def test_setup_bootstraps_all_missing_tools_without_python(bootstrap):
     for package in ("astral-sh.uv", "OpenJS.NodeJS.LTS", "Rustlang.Rustup", "Microsoft.VisualStudio.2022.BuildTools"):
         assert any(f"--id {package}" in line for line in installs)
     assert any("--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" in line for line in installs)
-    assert calls.index("uv python install 3.12") < next(i for i, line in enumerate(calls) if line.startswith("uv sync "))
+    assert calls.index("uv python install 3.14.10") < next(i for i, line in enumerate(calls) if line.startswith("uv sync "))
     assert any("--managed-python --locked --dev --extra simulation" in line for line in calls)
     assert "npm ci --no-audit --no-fund" in calls
     assert "npm run build" in calls
@@ -185,12 +186,13 @@ def test_setup_reuses_tools_without_winget_and_handles_spaces(bootstrap):
     assert result.returncode == 0, result.stdout + result.stderr
     calls = commands(bootstrap)
     assert not any(line.startswith("winget ") for line in calls)
-    assert f'uv sync --project "{project}" --python 3.12 --managed-python --locked --dev --extra simulation' in calls
+    assert f'uv sync --project "{project}" --python 3.14.10 --managed-python --locked --dev --extra simulation' in calls
+    assert f'uv run --no-sync --project "{project}" ruff check "{project}"' in calls
     assert f'uv run --no-sync --project "{project}" python --version' in calls
 
 
 @WINDOWS_ONLY
-@pytest.mark.parametrize("stage", ["winget", "python", "sync", "npm-ci", "npm-run", "cargo", "run"])
+@pytest.mark.parametrize("stage", ["winget", "python", "sync", "ruff", "npm-ci", "npm-run", "cargo", "run"])
 def test_setup_stops_on_install_or_build_failure(bootstrap, stage):
     if stage != "winget":
         installed_tools(bootstrap)
@@ -199,7 +201,7 @@ def test_setup_stops_on_install_or_build_failure(bootstrap, stage):
     assert result.returncode != 0
     assert "ERROR:" in result.stdout
     assert "[INFO] Done." not in result.stdout
-    if stage in ("winget", "python", "sync"):
+    if stage in ("winget", "python", "sync", "ruff"):
         assert not any(line.startswith("npm ") or line.startswith("cargo ") for line in commands(bootstrap))
 
 
@@ -263,7 +265,7 @@ def test_launcher_delegates_setup_and_preserves_connection_arguments(bootstrap, 
         args.insert(0, "--build")
     result = run_script(bootstrap, "run_linkhub_ui.cmd", *args)
     assert result.returncode == 7
-    assert "uv python install 3.12" in commands(bootstrap)
+    assert "uv python install 3.14.10" in commands(bootstrap)
     assert "http://127.0.0.1:9123/" in result.stdout
     assert "Connection: tcp:127.0.0.1:5760  Baud: auto" in result.stdout
     assert "MOCK_SERVER" in result.stdout
@@ -311,7 +313,7 @@ def test_launcher_does_not_start_after_setup_failure(bootstrap):
 
 @WINDOWS_ONLY
 def test_git_bash_delegates_to_the_windows_bootstrap(bootstrap):
-    bash = Path(os.environ["ProgramFiles"]) / "Git" / "bin" / "bash.exe"
+    bash = Path(os.environ["PROGRAMFILES"]) / "Git" / "bin" / "bash.exe"
     if not bash.is_file():
         pytest.skip("Git Bash is not installed")
     installed_tools(bootstrap)
@@ -326,7 +328,7 @@ def test_git_bash_delegates_to_the_windows_bootstrap(bootstrap):
         timeout=20,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "uv python install 3.12" in commands(bootstrap)
+    assert "uv python install 3.14.10" in commands(bootstrap)
 
 
 def test_uv_sync_includes_the_editable_linkhub_client():

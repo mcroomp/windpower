@@ -246,7 +246,7 @@ _run_stack() {
     # actionable failure before parallel workers are launched.
     bash "$REPO_DIR/setup.sh" build
     docker run --rm --entrypoint /bin/bash "$IMAGE" -lc \
-        '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 12), sys.version" \
+        '/rawes/.venv/bin/python -c "import sys; assert sys.version_info >= (3, 14), sys.version" \
          && test -x /ardupilot/build/sitl/bin/arducopter-heli \
          && command -v linkhub >/dev/null'
 

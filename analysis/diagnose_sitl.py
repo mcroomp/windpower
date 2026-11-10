@@ -34,9 +34,9 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Optional
 
 import simulation as _simulation_pkg
+
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 _LOG_DIR = _SIM_DIR / "logs"
 _IC_PATH = _SIM_DIR / "steady_state_starting.json"
@@ -54,57 +54,87 @@ from analysis.flight_log import FlightLog  # noqa: E402
 #   attitude | horiz_vel | vert_vel | horiz_pos_rel | horiz_pos_abs | vert_pos
 _CAPTURE_READY_MASK = 0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0020
 
-_KIN_PHASE_S = 60.0     # nominal kinematic-startup duration
+_KIN_PHASE_S = 60.0  # nominal kinematic-startup duration
 
 # nav_filter_status bits (dataflash XKF4.SS).
 # Source: ardupilot/libraries/AP_NavEKF/AP_Nav_Common.h
 _NAV_STATUS_BITS: dict[int, str] = {
-    0: "attitude",        1: "horiz_vel",       2: "vert_vel",
-    3: "horiz_pos_rel",   4: "horiz_pos_abs",   5: "vert_pos",
-    6: "terrain_alt",     7: "const_pos_mode",  8: "pred_horiz_pos_rel",
-    9: "pred_horiz_pos_abs", 10: "takeoff_detected", 11: "takeoff",
-    12: "touchdown",      13: "using_gps",       14: "gps_glitching",
-    15: "gps_quality_good", 16: "initialized",   17: "rejecting_airspeed",
+    0: "attitude",
+    1: "horiz_vel",
+    2: "vert_vel",
+    3: "horiz_pos_rel",
+    4: "horiz_pos_abs",
+    5: "vert_pos",
+    6: "terrain_alt",
+    7: "const_pos_mode",
+    8: "pred_horiz_pos_rel",
+    9: "pred_horiz_pos_abs",
+    10: "takeoff_detected",
+    11: "takeoff",
+    12: "touchdown",
+    13: "using_gps",
+    14: "gps_glitching",
+    15: "gps_quality_good",
+    16: "initialized",
+    17: "rejecting_airspeed",
     18: "dead_reckoning",
 }
 
 # gps_check_status bits (dataflash XKF4.GPS) -- which pre-flight GPS check fails.
 # Source: ardupilot/libraries/AP_NavEKF/AP_Nav_Common.h
 _GPS_CHECK_BITS: dict[int, str] = {
-    0: "bad_sAcc",  1: "bad_hAcc",       2: "bad_yaw",     3: "bad_sats",
-    4: "bad_VZ",    5: "bad_horiz_drift", 6: "bad_hdop",   7: "bad_vert_vel",
-    8: "bad_fix",   9: "bad_horiz_vel",  10: "bad_vAcc",
+    0: "bad_sAcc",
+    1: "bad_hAcc",
+    2: "bad_yaw",
+    3: "bad_sats",
+    4: "bad_VZ",
+    5: "bad_horiz_drift",
+    6: "bad_hdop",
+    7: "bad_vert_vel",
+    8: "bad_fix",
+    9: "bad_horiz_vel",
+    10: "bad_vAcc",
 }
 
 # AP_GPS fix-type names (dataflash GPS.Status).
 _GPS_FIX_DF: dict[int, str] = {
-    0: "NO_GPS", 1: "NO_FIX", 2: "2D", 3: "3D",
-    4: "DGPS", 5: "RTK_FLOAT", 6: "RTK_FIXED",
+    0: "NO_GPS",
+    1: "NO_FIX",
+    2: "2D",
+    3: "3D",
+    4: "DGPS",
+    5: "RTK_FLOAT",
+    6: "RTK_FIXED",
 }
 
 # CHECK 2 pass thresholds (kinematic exit vs IC).
-_POS_TOL_M       = 3.0   # position error magnitude [m]
-_ALT_TOL_M       = 2.0   # altitude error [m]
-_TILT_TOL_DEG    = 10.0  # body_z geodesic angle error [deg]
-_RPM_TOL_RAD_S   = 2.0   # rotor speed error [rad/s]
-_TENSION_TOL_N   = 75.0  # tether tension error [N]
+_POS_TOL_M = 3.0  # position error magnitude [m]
+_ALT_TOL_M = 2.0  # altitude error [m]
+_TILT_TOL_DEG = 10.0  # body_z geodesic angle error [deg]
+_RPM_TOL_RAD_S = 2.0  # rotor speed error [rad/s]
+_TENSION_TOL_N = 75.0  # tether tension error [N]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _missing_flag_names(flags: int, mask: int) -> str:
     """Names of required flags that are NOT set in `flags`."""
-    missing = [name for bit, name in EKF_FLAGS.items()
-               if (mask & bit) and not (flags & bit)]
+    missing = [
+        name for bit, name in EKF_FLAGS.items() if (mask & bit) and not (flags & bit)
+    ]
     return ", ".join(missing) if missing else "none"
 
 
 def _warn_flag_names(flags: int) -> str:
     """Names of the set warning flags (const_pos_mode / uninitialized / glitch)."""
-    warn = [name for bit, name in EKF_FLAGS.items()
-            if (bit in (0x0080, 0x0400, 0x8000)) and (flags & bit)]
+    warn = [
+        name
+        for bit, name in EKF_FLAGS.items()
+        if (bit in (0x0080, 0x0400, 0x8000)) and (flags & bit)
+    ]
     return ", ".join(warn) if warn else "none"
 
 
@@ -140,6 +170,7 @@ def _verdict(ok: bool) -> str:
 # CHECK 1 -- EKF / GPS-capture readiness through the kinematic phase
 # ---------------------------------------------------------------------------
 
+
 def check_ekf_readiness(fl: FlightLog) -> bool:
     """Was the EKF healthy (GPS aiding) at the t=60s kinematic exit? If not, why?
 
@@ -170,21 +201,25 @@ def check_ekf_readiness(fl: FlightLog) -> bool:
     t_last = fl.tel_rows[-1].t_sim if fl.tel_rows else 0.0
     if not reached:
         print(f"  kinematic exit   : NOT REACHED  (telemetry ends at t={t_last:.1f}s)")
-        print(f"                     gate forced to t={t_gate:.1f}s for EKF health check.")
+        print(
+            f"                     gate forced to t={t_gate:.1f}s for EKF health check."
+        )
     else:
         tag = "[OK]" if t_gate >= _KIN_PHASE_S - 1.0 else "[!!] early exit"
         print(f"  kinematic exit   : t={t_gate:.1f}s  {tag}")
 
     # --- EKF_STATUS_REPORT (MAVLink) at the gate -----------------------------
     prior = [r for r in fl._ekf_rows if r["t_sim"] <= t_gate + 0.5]
-    mav_ready: Optional[bool] = None
+    mav_ready: bool | None = None
     if prior:
         f_gate = prior[-1]["flags"]
         mav_ready = _is_ready(f_gate)
         tag = "capture-ready [OK]" if mav_ready else "NOT ready [!!]"
         print(f"  EKF flags @gate  : 0x{f_gate:04x} [{decode_flags(f_gate)}]  {tag}")
         if not mav_ready:
-            print(f"    missing        : {_missing_flag_names(f_gate, _CAPTURE_READY_MASK)}")
+            print(
+                f"    missing        : {_missing_flag_names(f_gate, _CAPTURE_READY_MASK)}"
+            )
             print(f"    warning        : {_warn_flag_names(f_gate)}")
     else:
         print("  EKF flags @gate  : no EKF_STATUS_REPORT in mavlink.jsonl")
@@ -193,19 +228,20 @@ def check_ekf_readiness(fl: FlightLog) -> bool:
     df_ok = _diagnose_ekf_blocker(fl.log_dir, t_gate)
 
     # Verdict: prefer the dataflash answer; fall back to MAVLink flags.
-    if df_ok is None:
-        ok = bool(reached and mav_ready)
-    else:
-        ok = bool(reached and df_ok)
+    ok = bool(reached and mav_ready) if df_ok is None else bool(reached and df_ok)
 
-    print(f"\n  CHECK 1 verdict  : {_verdict(ok)}  "
-          + ("EKF healthy and GPS-aiding at the 60s gate."
-             if ok else
-             "EKF NOT healthy at the 60s gate -- GPS capture impossible. Fix this first."))
+    print(
+        f"\n  CHECK 1 verdict  : {_verdict(ok)}  "
+        + (
+            "EKF healthy and GPS-aiding at the 60s gate."
+            if ok
+            else "EKF NOT healthy at the 60s gate -- GPS capture impossible. Fix this first."
+        )
+    )
     return ok
 
 
-def _read_ekf_dataflash(log_dir: Path, t_max: float) -> Optional[dict]:
+def _read_ekf_dataflash(log_dir: Path, t_max: float) -> dict | None:
     """Read GPS / ORGN / XKF4 / MSG up to t_max from dataflash.BIN.
 
     Returns None if pymavlink or the dataflash file is unavailable.
@@ -220,10 +256,10 @@ def _read_ekf_dataflash(log_dir: Path, t_max: float) -> Optional[dict]:
     except ImportError:
         return None
 
-    gps: list = []    # (t, status, nsats, hdop)
-    orgn: list = []   # (t, type)
-    xkf4: list = []   # (t, ss, gps_check, fs, ts)
-    msgs: list = []   # (t, text) -- collected across the WHOLE log
+    gps: list = []  # (t, status, nsats, hdop)
+    orgn: list = []  # (t, type)
+    xkf4: list = []  # (t, ss, gps_check, fs, ts)
+    msgs: list = []  # (t, text) -- collected across the WHOLE log
     log = DFReader.DFReader_binary(str(path))
     msg = log.recv_msg()
     while msg is not None:
@@ -241,22 +277,42 @@ def _read_ekf_dataflash(log_dir: Path, t_max: float) -> Optional[dict]:
             # so the gate breakdown can report when (if ever) a gate cleared.
             if mt == "MSG":
                 txt = getattr(msg, "Message", "")
-                if any(k in txt for k in ("EKF", "GPS", "origin", "yaw", "Yaw",
-                                          "tilt", "aiding", "aligned")):
+                if any(
+                    k in txt
+                    for k in (
+                        "EKF",
+                        "GPS",
+                        "origin",
+                        "yaw",
+                        "Yaw",
+                        "tilt",
+                        "aiding",
+                        "aligned",
+                    )
+                ):
                     msgs.append((t, txt))
             elif t <= t_max + 0.5:
                 if mt == "GPS":
-                    gps.append((t, int(getattr(msg, "Status", 0)),
-                                int(getattr(msg, "NSats", 0)),
-                                float(getattr(msg, "HDop", 0.0))))
+                    gps.append(
+                        (
+                            t,
+                            int(getattr(msg, "Status", 0)),
+                            int(getattr(msg, "NSats", 0)),
+                            float(getattr(msg, "HDop", 0.0)),
+                        )
+                    )
                 elif mt == "ORGN":
                     orgn.append((t, int(getattr(msg, "Type", -1))))
                 elif mt == "XKF4":
-                    xkf4.append((t,
-                                 int(getattr(msg, "SS", 0)) & 0xFFFFFFFF,
-                                 int(getattr(msg, "GPS", 0)) & 0xFFFFFFFF,
-                                 int(getattr(msg, "FS", 0)) & 0xFFFFFFFF,
-                                 int(getattr(msg, "TS", 0)) & 0xFFFFFFFF))
+                    xkf4.append(
+                        (
+                            t,
+                            int(getattr(msg, "SS", 0)) & 0xFFFFFFFF,
+                            int(getattr(msg, "GPS", 0)) & 0xFFFFFFFF,
+                            int(getattr(msg, "FS", 0)) & 0xFFFFFFFF,
+                            int(getattr(msg, "TS", 0)) & 0xFFFFFFFF,
+                        )
+                    )
         msg = log.recv_msg()
 
     return {"gps": gps, "orgn": orgn, "xkf4": xkf4, "msgs": msgs}
@@ -264,12 +320,20 @@ def _read_ekf_dataflash(log_dir: Path, t_max: float) -> Optional[dict]:
 
 # EK3_SRC*_POSXY source enum (AP_NavEKF_Source::SourceXY).
 _POSXY_SRC: dict[int, str] = {
-    0: "None", 3: "GPS", 4: "Beacon", 6: "ExternalNav", 7: "WheelEncoder",
+    0: "None",
+    3: "GPS",
+    4: "Beacon",
+    6: "ExternalNav",
+    7: "WheelEncoder",
 }
 # EK3_SRC*_YAW source enum (AP_NavEKF_Source::SourceYaw).
 _YAW_SRC: dict[int, str] = {
-    0: "None", 1: "Compass", 2: "GPS", 3: "GPS_COMPASS_FALLBACK",
-    6: "ExternalYaw", 8: "ExternalYaw_COMPASS_FALLBACK",
+    0: "None",
+    1: "Compass",
+    2: "GPS",
+    3: "GPS_COMPASS_FALLBACK",
+    6: "ExternalYaw",
+    8: "ExternalYaw_COMPASS_FALLBACK",
 }
 
 
@@ -281,7 +345,7 @@ def _load_params(log_dir: Path) -> dict:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         return {}
 
 
@@ -299,7 +363,7 @@ def _const_pos_exit_gates(df: dict, params: dict, t_gate: float) -> None:
     msgs = df["msgs"]
 
     def first_msg(*subs: str):
-        for (t, txt) in msgs:
+        for t, txt in msgs:
             if any(s in txt for s in subs):
                 return (t, txt)
         return None
@@ -311,26 +375,32 @@ def _const_pos_exit_gates(df: dict, params: dict, t_gate: float) -> None:
 
     # 1. PosXY source must be GPS.
     posxy = params.get("EK3_SRC1_POSXY")
-    g1 = (posxy == 3.0)
+    g1 = posxy == 3.0
     pname = _POSXY_SRC.get(int(posxy), str(posxy)) if posxy is not None else "unknown"
     print(f"      [{tf(g1)}] PosXY source = GPS   : EK3_SRC1_POSXY={pname}")
 
     # 2. validOrigin.
     orgn0 = next(((t, ty) for (t, ty) in df["orgn"] if ty == 0), None)
     g2 = orgn0 is not None and orgn0[0] <= t_gate
-    print(f"      [{tf(g2)}] validOrigin          : "
-          + (f"set t={orgn0[0]:.1f}s" if orgn0 else "never set"))
+    print(
+        f"      [{tf(g2)}] validOrigin          : "
+        + (f"set t={orgn0[0]:.1f}s" if orgn0 else "never set")
+    )
 
     # 3. tiltAlignComplete (attitude valid; tiltErrVar < (5 deg)^2).
     tilt = first_msg("tilt alignment")
     attitude_bit = bool(ss & 0x1)
     g3 = (tilt is not None and tilt[0] <= t_gate) or attitude_bit
-    print(f"      [{tf(g3)}] tiltAlignComplete    : "
-          + (f"msg t={tilt[0]:.1f}s" if tilt else f"attitude_bit={int(attitude_bit)}"))
+    print(
+        f"      [{tf(g3)}] tiltAlignComplete    : "
+        + (f"msg t={tilt[0]:.1f}s" if tilt else f"attitude_bit={int(attitude_bit)}")
+    )
 
     # 4. yawAlignComplete -- with EK3_SRC1_YAW=GPS this needs GPS-yaw (RELPOSNED).
     yaw_src = params.get("EK3_SRC1_YAW")
-    yname = _YAW_SRC.get(int(yaw_src), str(yaw_src)) if yaw_src is not None else "unknown"
+    yname = (
+        _YAW_SRC.get(int(yaw_src), str(yaw_src)) if yaw_src is not None else "unknown"
+    )
     yaw = first_msg("yaw aligned", "yaw alignment")
     g4 = yaw is not None and yaw[0] <= t_gate
     if yaw is None:
@@ -338,41 +408,57 @@ def _const_pos_exit_gates(df: dict, params: dict, t_gate: float) -> None:
     elif yaw[0] <= t_gate:
         ydetail = f"aligned t={yaw[0]:.1f}s (src={yname})"
     else:
-        ydetail = f"NOT before gate; first align t={yaw[0]:.1f}s AFTER gate (src={yname})"
+        ydetail = (
+            f"NOT before gate; first align t={yaw[0]:.1f}s AFTER gate (src={yname})"
+        )
     print(f"      [{tf(g4)}] yawAlignComplete     : {ydetail}")
 
     # 5. delAngBiasLearned -- gyro bias converged. Not directly logged.
-    print("      [ ?] delAngBiasLearned     : not logged (gyro bias; usually clears fast)")
+    print(
+        "      [ ?] delAngBiasLearned     : not logged (gyro bias; usually clears fast)"
+    )
 
     # 6. gpsGoodToAlign -- GPS quality checks pass + gps_quality_good bit.
     g6 = bool(ss & (1 << 15)) and (gps_check == 0)
-    print(f"      [{tf(g6)}] gpsGoodToAlign       : "
-          f"gps_quality_good={int(bool(ss & (1 << 15)))} "
-          f"gps_check=0x{(gps_check or 0):x}")
+    print(
+        f"      [{tf(g6)}] gpsGoodToAlign       : "
+        f"gps_quality_good={int(bool(ss & (1 << 15)))} "
+        f"gps_check=0x{(gps_check or 0):x}"
+    )
 
     # 7. gpsDataToFuse -- fresh GPS data near the gate.
     near = [t for (t, s, n, h) in df["gps"] if t <= t_gate]
     g7 = bool(near) and (t_gate - near[-1] <= 1.0)
-    print(f"      [{tf(g7)}] gpsDataToFuse        : "
-          + (f"last GPS sample t={near[-1]:.1f}s" if near else "no GPS samples"))
+    print(
+        f"      [{tf(g7)}] gpsDataToFuse        : "
+        + (f"last GPS sample t={near[-1]:.1f}s" if near else "no GPS samples")
+    )
 
     # Blocking gate(s).
     blocking = []
-    if not g1: blocking.append("PosXY source != GPS")
-    if not g2: blocking.append("origin not set")
-    if not g3: blocking.append("tilt not aligned")
-    if not g4: blocking.append("yaw not aligned")
-    if not g6: blocking.append("GPS quality checks")
-    if not g7: blocking.append("no fresh GPS data")
+    if not g1:
+        blocking.append("PosXY source != GPS")
+    if not g2:
+        blocking.append("origin not set")
+    if not g3:
+        blocking.append("tilt not aligned")
+    if not g4:
+        blocking.append("yaw not aligned")
+    if not g6:
+        blocking.append("GPS quality checks")
+    if not g7:
+        blocking.append("no fresh GPS data")
     if blocking:
         print("      => BLOCKING gate(s): " + ", ".join(blocking))
     using = first_msg("is using GPS")
     if using:
         late = "  [AFTER 60s gate]" if using[0] > t_gate else ""
-        print(f"      => AID_ABSOLUTE engaged at t={using[0]:.1f}s (EKF is-using-GPS){late}")
+        print(
+            f"      => AID_ABSOLUTE engaged at t={using[0]:.1f}s (EKF is-using-GPS){late}"
+        )
 
 
-def _diagnose_ekf_blocker(log_dir: Path, t_gate: float) -> Optional[bool]:
+def _diagnose_ekf_blocker(log_dir: Path, t_gate: float) -> bool | None:
     """Print the dataflash EKF blocker chain at t_gate. Returns health bool.
 
     Walks the GPS -> checks -> origin -> aiding dependency in order and flags
@@ -400,8 +486,10 @@ def _diagnose_ekf_blocker(log_dir: Path, t_gate: float) -> Optional[bool]:
             gsats, ghdop = gate_gps[2], gate_gps[3]
         else:
             gname, gsats, ghdop = "?", 0, 0.0
-        print(f"    1. GPS 3D fix  : t={ft:.1f}s  @gate fix={gname} sats={gsats} "
-              f"hdop={ghdop:.2f}   [OK]")
+        print(
+            f"    1. GPS 3D fix  : t={ft:.1f}s  @gate fix={gname} sats={gsats} "
+            f"hdop={ghdop:.2f}   [OK]"
+        )
     else:
         print("    1. GPS 3D fix  : NEVER reached 3D fix   [!!]")
 
@@ -436,20 +524,22 @@ def _diagnose_ekf_blocker(log_dir: Path, t_gate: float) -> Optional[bool]:
         using_gps = bool(ss & (1 << 13))
         const_pos = bool(ss & (1 << 7))
         horiz_abs = bool(ss & (1 << 4))
-        glitch    = bool(ss & (1 << 14))
-        init      = bool(ss & (1 << 16))
-        gqual     = bool(ss & (1 << 15))
+        glitch = bool(ss & (1 << 14))
+        init = bool(ss & (1 << 16))
+        gqual = bool(ss & (1 << 15))
         link4 = using_gps and horiz_abs and not const_pos and not glitch
-        summary = (f"init={int(init)} gps_good={int(gqual)} using_gps={int(using_gps)} "
-                   f"const_pos={int(const_pos)} horiz_pos_abs={int(horiz_abs)} "
-                   f"glitch={int(glitch)}")
+        summary = (
+            f"init={int(init)} gps_good={int(gqual)} using_gps={int(using_gps)} "
+            f"const_pos={int(const_pos)} horiz_pos_abs={int(horiz_abs)} "
+            f"glitch={int(glitch)}"
+        )
         tag = "[OK]" if link4 else "[!!]"
         print(f"    4. nav status  : 0x{ss:05x}  {summary}  {tag}")
     else:
         print("    4. nav status  : no XKF4 records   [!!]")
 
     # First broken link -> the actual blocker.
-    reason: Optional[str] = None
+    reason: str | None = None
     if not link1:
         reason = "GPS never achieved a 3D fix"
     elif not link2:
@@ -458,9 +548,11 @@ def _diagnose_ekf_blocker(log_dir: Path, t_gate: float) -> Optional[bool]:
         reason = "EKF origin never set"
     elif not link4:
         if const_pos and not using_gps:
-            reason = ("EKF had healthy GPS + origin but never left const_pos_mode "
-                      "(AID_NONE) -- GPS aiding never started; check EK3_SRC posxy/yaw "
-                      "source and GPS-yaw (RELPOSNED) alignment")
+            reason = (
+                "EKF had healthy GPS + origin but never left const_pos_mode "
+                "(AID_NONE) -- GPS aiding never started; check EK3_SRC posxy/yaw "
+                "source and GPS-yaw (RELPOSNED) alignment"
+            )
         elif glitch:
             reason = "EKF flagged gps_glitching at the gate"
         else:
@@ -477,7 +569,7 @@ def _diagnose_ekf_blocker(log_dir: Path, t_gate: float) -> Optional[bool]:
     # EKF/GPS text messages inside the window (often name the exact gate).
     if df["msgs"]:
         print("    EKF/GPS msgs   :")
-        for (t, txt) in df["msgs"][:12]:
+        for t, txt in df["msgs"][:12]:
             print(f"      t={t:5.1f}s  {txt}")
         if len(df["msgs"]) > 12:
             print(f"      ... and {len(df['msgs']) - 12} more")
@@ -489,12 +581,13 @@ def _diagnose_ekf_blocker(log_dir: Path, t_gate: float) -> Optional[bool]:
 # CHECK 2 -- Kinematic-exit state vs the IC
 # ---------------------------------------------------------------------------
 
-def _load_ic(ic_path: Path) -> Optional[dict]:
+
+def _load_ic(ic_path: Path) -> dict | None:
     if not ic_path.exists():
         return None
     try:
         return json.loads(ic_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         return None
 
 
@@ -523,9 +616,9 @@ def check_kinematic_exit_vs_ic(fl: FlightLog, ic_path: Path) -> bool:
         return False
 
     # --- IC references --------------------------------------------------------
-    ic_pos = ic["pos"]                       # anchor-origin NED [m]
+    ic_pos = ic["pos"]  # anchor-origin NED [m]
     ic_alt = -ic_pos[2]
-    R0 = ic["R0"]                            # body->NED (steady IC)
+    R0 = ic["R0"]  # body->NED (steady IC)
     ic_bz = (R0[0][2], R0[1][2], R0[2][2])  # body_z column in NED
     ic_omega = ic["omega_spin"]
     ic_tension = ic.get("tension_eq_n", float("nan"))
@@ -533,7 +626,7 @@ def check_kinematic_exit_vs_ic(fl: FlightLog, ic_path: Path) -> bool:
     # --- Exit state -----------------------------------------------------------
     ex_pos = (tr.pos_x, tr.pos_y, tr.pos_z)
     ex_alt = -tr.pos_z
-    ex_bz = (tr.r02, tr.r12, tr.r22)        # body_z column in NED
+    ex_bz = (tr.r02, tr.r12, tr.r22)  # body_z column in NED
     ex_omega = tr.omega_rotor
     ex_tension = tr.tether_tension
 
@@ -542,8 +635,9 @@ def check_kinematic_exit_vs_ic(fl: FlightLog, ic_path: Path) -> bool:
     alt_err = abs(ex_alt - ic_alt)
     tilt_err = _angle_between_deg(ex_bz, ic_bz)
     rpm_err = abs(ex_omega - ic_omega)
-    tension_err = (abs(ex_tension - ic_tension)
-                   if not math.isnan(ic_tension) else float("nan"))
+    tension_err = (
+        abs(ex_tension - ic_tension) if not math.isnan(ic_tension) else float("nan")
+    )
 
     pos_ok = pos_err <= _POS_TOL_M
     alt_ok = alt_err <= _ALT_TOL_M
@@ -553,31 +647,44 @@ def check_kinematic_exit_vs_ic(fl: FlightLog, ic_path: Path) -> bool:
 
     print(f"  exit time        : t={tr.t_sim:.1f}s")
     print(f"  {'quantity':<16}{'exit':>14}{'IC':>14}{'error':>12}   verdict")
-    print(f"  {'-'*16}{'-'*14:>14}{'-'*14:>14}{'-'*12:>12}   -------")
-    print(f"  {'position (m)':<16}"
-          f"{f'[{ex_pos[0]:.1f},{ex_pos[1]:.1f},{ex_pos[2]:.1f}]':>14}"
-          f"{f'[{ic_pos[0]:.1f},{ic_pos[1]:.1f},{ic_pos[2]:.1f}]':>14}"
-          f"{pos_err:>10.2f} m   {'[OK]' if pos_ok else '[!!]'}")
-    print(f"  {'altitude (m)':<16}{ex_alt:>14.2f}{ic_alt:>14.2f}"
-          f"{alt_err:>10.2f} m   {'[OK]' if alt_ok else '[!!]'}")
-    print(f"  {'body_z tilt':<16}"
-          f"{f'[{ex_bz[0]:.2f},{ex_bz[1]:.2f},{ex_bz[2]:.2f}]':>14}"
-          f"{f'[{ic_bz[0]:.2f},{ic_bz[1]:.2f},{ic_bz[2]:.2f}]':>14}"
-          f"{tilt_err:>8.2f} deg   {'[OK]' if tilt_ok else '[!!]'}")
-    print(f"  {'rotor (rad/s)':<16}{ex_omega:>14.2f}{ic_omega:>14.2f}"
-          f"{rpm_err:>8.2f} r/s   {'[OK]' if rpm_ok else '[!!]'}")
+    print(f"  {'-' * 16}{'-' * 14:>14}{'-' * 14:>14}{'-' * 12:>12}   -------")
+    print(
+        f"  {'position (m)':<16}"
+        f"{f'[{ex_pos[0]:.1f},{ex_pos[1]:.1f},{ex_pos[2]:.1f}]':>14}"
+        f"{f'[{ic_pos[0]:.1f},{ic_pos[1]:.1f},{ic_pos[2]:.1f}]':>14}"
+        f"{pos_err:>10.2f} m   {'[OK]' if pos_ok else '[!!]'}"
+    )
+    print(
+        f"  {'altitude (m)':<16}{ex_alt:>14.2f}{ic_alt:>14.2f}"
+        f"{alt_err:>10.2f} m   {'[OK]' if alt_ok else '[!!]'}"
+    )
+    print(
+        f"  {'body_z tilt':<16}"
+        f"{f'[{ex_bz[0]:.2f},{ex_bz[1]:.2f},{ex_bz[2]:.2f}]':>14}"
+        f"{f'[{ic_bz[0]:.2f},{ic_bz[1]:.2f},{ic_bz[2]:.2f}]':>14}"
+        f"{tilt_err:>8.2f} deg   {'[OK]' if tilt_ok else '[!!]'}"
+    )
+    print(
+        f"  {'rotor (rad/s)':<16}{ex_omega:>14.2f}{ic_omega:>14.2f}"
+        f"{rpm_err:>8.2f} r/s   {'[OK]' if rpm_ok else '[!!]'}"
+    )
     if not math.isnan(ic_tension):
-        print(f"  {'tension (N)':<16}{ex_tension:>14.1f}{ic_tension:>14.1f}"
-              f"{tension_err:>10.1f} N   {'[OK]' if tension_ok else '[!!]'}")
+        print(
+            f"  {'tension (N)':<16}{ex_tension:>14.1f}{ic_tension:>14.1f}"
+            f"{tension_err:>10.1f} N   {'[OK]' if tension_ok else '[!!]'}"
+        )
     else:
-        print(f"  {'tension (N)':<16}{ex_tension:>14.1f}{'n/a':>14}"
-              f"{'n/a':>12}   [--]")
+        print(f"  {'tension (N)':<16}{ex_tension:>14.1f}{'n/a':>14}{'n/a':>12}   [--]")
 
     ok = pos_ok and alt_ok and tilt_ok and rpm_ok and tension_ok
-    print(f"\n  CHECK 2 verdict  : {_verdict(ok)}  "
-          + ("kite handed off at the IC state."
-             if ok else
-             "hand-off state deviates from IC -- fix the kinematic hand-off first."))
+    print(
+        f"\n  CHECK 2 verdict  : {_verdict(ok)}  "
+        + (
+            "kite handed off at the IC state."
+            if ok
+            else "hand-off state deviates from IC -- fix the kinematic hand-off first."
+        )
+    )
     return ok
 
 
@@ -585,11 +692,13 @@ def check_kinematic_exit_vs_ic(fl: FlightLog, ic_path: Path) -> bool:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _list_test_dirs() -> list:
     if not _LOG_DIR.exists():
         return []
-    dirs = [d for d in _LOG_DIR.iterdir()
-            if d.is_dir() and (d / "telemetry.csv").exists()]
+    dirs = [
+        d for d in _LOG_DIR.iterdir() if d.is_dir() and (d / "telemetry.csv").exists()
+    ]
     return sorted(dirs, key=lambda d: d.stat().st_mtime, reverse=True)
 
 
@@ -599,8 +708,10 @@ def diagnose(log_dir: Path, ic_path: Path) -> bool:
     print(f"\nPost-run SITL diagnosis: {log_dir.name}")
     print(f"  telemetry rows   : {len(fl.tel_rows)}")
     if fl.tel_rows:
-        print(f"  sim time span    : {fl.tel_rows[0].t_sim:.1f} .. "
-              f"{fl.tel_rows[-1].t_sim:.1f} s")
+        print(
+            f"  sim time span    : {fl.tel_rows[0].t_sim:.1f} .. "
+            f"{fl.tel_rows[-1].t_sim:.1f} s"
+        )
     print()
 
     ok1 = check_ekf_readiness(fl)
@@ -629,13 +740,20 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("test_name", nargs="?", default=None,
-                        help="Test directory name under simulation/logs/.")
-    parser.add_argument("--log-dir", default=None,
-                        help="Explicit log directory (overrides test_name).")
-    parser.add_argument("--ic", default=None,
-                        help="Path to the IC JSON (default: "
-                             "simulation/steady_state_starting.json).")
+    parser.add_argument(
+        "test_name",
+        nargs="?",
+        default=None,
+        help="Test directory name under simulation/logs/.",
+    )
+    parser.add_argument(
+        "--log-dir", default=None, help="Explicit log directory (overrides test_name)."
+    )
+    parser.add_argument(
+        "--ic",
+        default=None,
+        help="Path to the IC JSON (default: simulation/steady_state_starting.json).",
+    )
     args = parser.parse_args()
 
     ic_path = Path(args.ic) if args.ic else _IC_PATH

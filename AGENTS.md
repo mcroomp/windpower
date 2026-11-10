@@ -280,7 +280,7 @@ still verified. See `design/sitl_testing.md` for the list.
   exist only to work around circular imports are a sign of bad architecture — fix the circular
   dependency by refactoring (e.g. extract a shared module, invert the dependency) rather than
   papering over it with a local import.
-- Python 3.12+ is the project floor and should be treated as the baseline. Prefer modern Python
+- Python 3.14+ is the project floor and should be treated as the baseline. Prefer modern Python
   features when they improve clarity and reduce boilerplate (for example `match`/`case`, `X | Y`
   union types, and 3.12 generic/type-alias syntax) rather than avoiding them for backward-
   compatibility with older interpreters.

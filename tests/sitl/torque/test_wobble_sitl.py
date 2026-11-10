@@ -16,9 +16,10 @@ import math
 
 import pytest
 
+from tests.sitl.torque.torque_test_utils import run_observation_loop, save_telemetry, assert_physics_yaw_rate
+
 pytestmark = pytest.mark.sitl
 
-from tests.sitl.torque.torque_test_utils import run_observation_loop, save_telemetry, assert_physics_yaw_rate
 
 _SETTLE_S = 95.0
 _OBSERVE_S = 20.0

@@ -29,7 +29,6 @@ Euler angles extracted in ZYX order (yaw-pitch-roll) to match ArduPilot.
 import logging
 import numpy as np
 import math
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +125,7 @@ class PhysicalSensor:
         home_ned_z:  float = 0.0,
         gyro_sigma:  float = _GYRO_SIGMA,
         accel_sigma: float = _ACCEL_SIGMA,
-        rng_seed:    Optional[int] = None,
+        rng_seed:    int | None = None,
     ):
         self._home_ned_z  = float(home_ned_z)
         self._gyro_sigma  = gyro_sigma
@@ -209,7 +208,7 @@ class SpinSensor:
     def __init__(
         self,
         sigma:    float = 0.0,
-        rng_seed: "int | None" = None,
+        rng_seed: int | None = None,
         **_ignored,
     ):
         self._sigma = float(sigma)
@@ -233,8 +232,8 @@ def make_sensor(
     home_ned_z:  float,
     gyro_sigma:  float = _GYRO_SIGMA,
     accel_sigma: float = _ACCEL_SIGMA,
-    rng_seed:    Optional[int] = None,
-) -> "PhysicalSensor":
+    rng_seed:    int | None = None,
+) -> PhysicalSensor:
     """
     Return a PhysicalSensor for the given home altitude.
 

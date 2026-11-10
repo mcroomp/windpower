@@ -23,7 +23,14 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+
+try:
+    import pyvista as pv
+except ImportError:
+    sys.exit("PyVista not found.  pip install pyvista")
+
+from viz3d.telemetry import CSVSource
+from viz3d.visualize_3d import RAWESVisualizer, fit_camera
 
 # Ensure simulation/ is on sys.path when run from anywhere
 _HERE = Path(__file__).resolve().parent
@@ -33,14 +40,6 @@ _SIM  = _HERE.parent
 _FFMPEG = Path(r"C:\ffmpeg\bin")
 if _FFMPEG.exists():
     os.environ["PATH"] = str(_FFMPEG) + os.pathsep + os.environ.get("PATH", "")
-
-try:
-    import pyvista as pv
-except ImportError:
-    sys.exit("PyVista not found.  pip install pyvista")
-
-from viz3d.telemetry import CSVSource
-from viz3d.visualize_3d import RAWESVisualizer, fit_camera
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +65,8 @@ def render(
     speed: int = 2,
     width: int = 1280,
     height: int = 720,
-    cam_pos: Optional[tuple] = None,
-    cam_focal: Optional[tuple] = None,
+    cam_pos: tuple | None = None,
+    cam_focal: tuple | None = None,
 ) -> None:
     frames = list(source.frames())
     if not frames:

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "rawes"
 version = "0.1.0"
 description = "RAWES tethered autorotating rotor kite -- simulation, flight-stack, and analysis tooling"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 
 dependencies = [
     "linkhub-client",
@@ -34,7 +34,19 @@ simulation = [
 dev = [
     "pytest",
     "pytest-timeout",
+    "ruff",
 ]
+
+[tool.ruff]
+target-version = "py314"
+extend-exclude = ["archive", "tmp", "simulation/logs", "**/tests/oneoff"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "UP", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated MAVLink enum members must retain their wire-protocol names.
+"linkhub_client/src/linkhub_client/generated_protocol.py" = ["E741"]
 
 [tool.uv.sources]
 linkhub-client = { path = "linkhub_client", editable = true }

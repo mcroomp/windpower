@@ -111,7 +111,7 @@ def run_observation_loop(
 
 
 def save_telemetry(rows: list,
-                   log_dir: "Path",
+                   log_dir: Path,
                    log) -> None:
     """Save telemetry CSV to <log_dir>/telemetry.csv (matches flight test convention)."""
     path = log_dir / "telemetry.csv"

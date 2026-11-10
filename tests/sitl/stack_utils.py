@@ -22,6 +22,7 @@ from groundstation.rawes_modes import (
     MOCK_ORIGIN_LON_DEG as HOME_LON_DEG,
     MOCK_ORIGIN_ALT_M as HOME_ALT_M,
 )
+import contextlib
 
 # ---------------------------------------------------------------------------
 # Environment variable names
@@ -101,8 +102,8 @@ class ParamSetup:
         extended = base_setup.update({"NEW_PARAM": 1.0})
     """
 
-    def __init__(self, params: "Mapping[str, int | float]"):
-        self._params: "dict[str, int | float]" = {
+    def __init__(self, params: Mapping[str, int | float]):
+        self._params: dict[str, int | float] = {
             k: (int(v) if isinstance(v, int) else float(v))
             for k, v in params.items()
         }
@@ -112,7 +113,7 @@ class ParamSetup:
     def apply(
         self,
         gcs,
-        log: "logging.Logger | None" = None,
+        log: logging.Logger | None = None,
         set_timeout: float = 5.0,
     ) -> None:
         """Set every param via MAVLink, then verify all values match.
@@ -129,7 +130,7 @@ class ParamSetup:
     def verify(
         self,
         gcs,
-        log: "logging.Logger | None" = None,
+        log: logging.Logger | None = None,
         tol: float = 1e-4,
         read_timeout: float = 30.0,
     ) -> None:
@@ -195,31 +196,31 @@ class ParamSetup:
                 + "  - ARMING_SKIPCHK must be set via boot param file, not MAVLink\n"
             )
 
-    def merge(self, other: "ParamSetup") -> "ParamSetup":
+    def merge(self, other: ParamSetup) -> ParamSetup:
         """Return a new ParamSetup combining self and *other* (other wins)."""
         return ParamSetup({**self._params, **other._params})
 
-    def update(self, params: "dict[str, float]") -> "ParamSetup":
+    def update(self, params: dict[str, float]) -> ParamSetup:
         """Return a new ParamSetup with extra *params* merged in (they win)."""
         return ParamSetup({**self._params, **params})
 
-    def without(self, names) -> "ParamSetup":
+    def without(self, names) -> ParamSetup:
         """Return a new ParamSetup with *names* removed (no-op if absent)."""
         drop = set(names)
         return ParamSetup({k: v for k, v in self._params.items() if k not in drop})
 
-    def write_parm_file(self, path: "Path | str") -> None:
+    def write_parm_file(self, path: Path | str) -> None:
         """Write params to a SITL ``--add-param-file`` text file."""
         lines = [f"{name} {value}\n" for name, value in self._params.items()]
         Path(path).write_text("".join(lines), encoding="utf-8")
 
     @classmethod
-    def from_parm_file(cls, path: "Path | str") -> "ParamSetup":
+    def from_parm_file(cls, path: Path | str) -> ParamSetup:
         """Load a ParamSetup from an existing SITL parm file.
 
         Comment lines (starting with ``#``) and blank lines are ignored.
         """
-        params: "dict[str, int | float]" = {}
+        params: dict[str, int | float] = {}
         for line in Path(path).read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -236,7 +237,7 @@ class ParamSetup:
                     pass
         return cls(params)
 
-    def as_list(self) -> "list[tuple[str, float]]":
+    def as_list(self) -> list[tuple[str, float]]:
         """Return params as a list of (name, value) tuples (preserves dict order)."""
         return list(self._params.items())
 
@@ -286,7 +287,7 @@ def _check_ardupilot_version(sim_vehicle: Path) -> None:
         )
 
 
-def _resolve_sim_vehicle() -> "Path | None":
+def _resolve_sim_vehicle() -> Path | None:
     explicit = os.environ.get(SIM_VEHICLE_ENV)
     if explicit:
         candidate = Path(explicit)
@@ -303,15 +304,13 @@ def _resolve_sim_vehicle() -> "Path | None":
 def _launch_sitl(
     sim_vehicle: Path,
     log_path: Path,
-    add_param_file: "Path | None" = None,
+    add_param_file: Path | None = None,
 ) -> subprocess.Popen:
     # Truncate the ArduCopter terminal log so each test run starts fresh.
     # /tmp/ArduCopter.log accumulates across runs in the container — clearing it
     # here makes it contain only output from this test's SITL instance.
-    try:
+    with contextlib.suppress(OSError):
         open("/tmp/ArduCopter.log", "w").close()
-    except OSError:
-        pass
 
     # Always wipe EEPROM before launch — no parameter carryover between tests.
     # Each test writes a complete per-test boot param file (--add-param-file)
@@ -389,13 +388,12 @@ def _prime_sitl_eeprom(
         "-O", "51.5074,-0.1278,50,0",
         "--defaults", str(copter_heli_parm),
     ]
-    devnull = open(os.devnull, "w")
     proc = subprocess.Popen(
         cmd,
         cwd=str(Path.cwd()),  # same CWD as real SITL (/rawes/simulation in Docker)
         stdin=subprocess.DEVNULL,
-        stdout=devnull,
-        stderr=devnull,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
 
@@ -404,7 +402,6 @@ def _prime_sitl_eeprom(
     _tcp_touch("127.0.0.1", 5850, duration_s=wait_s - 2.0)
 
     _terminate_process(proc)
-    devnull.close()
 
 
 def _tcp_touch(host: str, port: int, duration_s: float) -> None:
@@ -502,10 +499,8 @@ def _kill_by_port(port: int, proto: str = "tcp") -> None:
             try:
                 if os.readlink(fd_path) == target:
                     pid = int(fd_path.split("/")[2])
-                    try:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.kill(pid, getattr(_signal, "SIGKILL", 9))
-                    except (ProcessLookupError, PermissionError):
-                        pass
             except OSError:
                 pass
     except Exception:
@@ -582,14 +577,14 @@ def _launch_mediator(
     sim_dir: Path,
     repo_root: Path,
     log_path: Path,
-    telemetry_log_path: "str | None" = None,
-    events_log_path: "str | None" = None,
-    tether_rest_length: "float | None" = None,
-    initial_state: "dict | None" = None,
-    startup_damp_seconds: "float | None" = None,
-    run_id: "int | None" = None,
-    base_k_ang: "float | None" = None,
-    extra_config: "dict | None" = None,
+    telemetry_log_path: str | None = None,
+    events_log_path: str | None = None,
+    tether_rest_length: float | None = None,
+    initial_state: dict | None = None,
+    startup_damp_seconds: float | None = None,
+    run_id: int | None = None,
+    base_k_ang: float | None = None,
+    extra_config: dict | None = None,
 ) -> subprocess.Popen:
     # Lazy import: config lives in simulation/, which must be on sys.path.
     # conftest.py and all test files add simulation/ to sys.path before importing
@@ -727,7 +722,7 @@ def _launch_mediator_torque(
     profile: str = "constant",
     tail_channel: int = 3,
     startup_hold_s: float = 45.0,
-    events_log_path: "str | None" = None,
+    events_log_path: str | None = None,
     startup_yaw_rate_deg_s: float = 0.0,
     motor_delay_ms: float = 0.0,
 ) -> subprocess.Popen:
@@ -758,13 +753,13 @@ def _launch_mediator_static(
     repo_root: Path,
     log_path: Path,
     *,
-    pos:        "np.ndarray",
-    vel:        "np.ndarray",
-    rpy:        "np.ndarray",
-    accel_body: "np.ndarray",
-    gyro:       "np.ndarray",
+    pos:        np.ndarray,
+    vel:        np.ndarray,
+    rpy:        np.ndarray,
+    accel_body: np.ndarray,
+    gyro:       np.ndarray,
     port: int = 9002,
-    events_log: "Path | None" = None,
+    events_log: Path | None = None,
 ) -> subprocess.Popen:
     """Launch mediator_static.py as a subprocess with fixed sensor values.
 
@@ -772,7 +767,7 @@ def _launch_mediator_static(
     with constant sensor values.  No physics, no threading in the test.
     Useful for static SITL diagnostics and minimal bring-up checks.
     """
-    def _fmt(arr) -> "list[str]":
+    def _fmt(arr) -> list[str]:
         return [str(float(v)) for v in arr]
 
     cmd = [

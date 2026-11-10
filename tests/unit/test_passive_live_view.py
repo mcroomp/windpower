@@ -97,7 +97,7 @@ def test_live_frame_contains_actual_and_target_orientation():
         pos_ned=(1.0, 2.0, -3.0),
     )
 
-    assert frame.R == pytest.approx(np.eye(3))
+    assert pytest.approx(np.eye(3)) == frame.R
     assert frame.body_z_eq == pytest.approx(np.array([1.0, 0.0, 0.0]))
     assert frame.omega_spin == pytest.approx(2.0 * np.pi)
     assert frame.pos_ned == pytest.approx(np.array([1.0, 2.0, -3.0]))
@@ -211,7 +211,7 @@ def test_frame_and_target_rotation_interpolation_are_smooth():
         (start.swash_collective + end.swash_collective) / 2.0
     )
     assert midpoint.pos_ned == pytest.approx(np.array([1.0, 2.0, -5.5]))
-    assert midpoint.R.T @ midpoint.R == pytest.approx(np.eye(3), abs=1e-12)
+    assert pytest.approx(np.eye(3), abs=1e-12) == midpoint.R.T @ midpoint.R
     assert target_midpoint.T @ target_midpoint == pytest.approx(
         np.eye(3), abs=1e-12
     )

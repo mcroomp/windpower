@@ -1,17 +1,16 @@
 """Off-plane steady-flight convergence checks for fixed wind-plane azimuth."""
 import math
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
-
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.test_steady_flight import DT, _run_simulation
+
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
+
 
 
 def _wrap_pi(angle_rad: float) -> float:

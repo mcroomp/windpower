@@ -34,20 +34,20 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VENV_PYTHON      = ".venv/Scripts/python.exe"
-REQUIREMENTS     = "simulation/requirements.txt"
-DEFAULT_SUMMARY  = "simulation/logs/suite_summary.json"
+VENV_PYTHON = ".venv/Scripts/python.exe"
+REQUIREMENTS = "simulation/requirements.txt"
+DEFAULT_SUMMARY = "simulation/logs/suite_summary.json"
 
 # ANSI colours
-RED    = "\033[31m"
-GREEN  = "\033[32m"
+RED = "\033[31m"
+GREEN = "\033[32m"
 YELLOW = "\033[33m"
-CYAN   = "\033[36m"
-RESET  = "\033[0m"
-BOLD   = "\033[1m"
-DIM    = "\033[2m"
+CYAN = "\033[36m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
 
-_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _ensure_venv_fresh(python: str) -> None:
@@ -61,67 +61,83 @@ def _ensure_venv_fresh(python: str) -> None:
         return
 
     digest = hashlib.sha256(req.read_bytes()).hexdigest()
-    stamp  = Path(python).parent / ".requirements_hash"
+    stamp = Path(python).parent / ".requirements_hash"
 
     if stamp.exists() and stamp.read_text().strip() == digest:
         return  # already up to date
 
-    print(f"{YELLOW}[env] requirements.txt changed — running pip install...{RESET}", flush=True)
+    print(
+        f"{YELLOW}[env] requirements.txt changed — running pip install...{RESET}",
+        flush=True,
+    )
     result = subprocess.run(
         [python, "-m", "pip", "install", "-q", "-r", str(req)],
         capture_output=False,
     )
     if result.returncode != 0:
-        print(f"{RED}[env] pip install failed (exit {result.returncode}){RESET}", flush=True)
+        print(
+            f"{RED}[env] pip install failed (exit {result.returncode}){RESET}",
+            flush=True,
+        )
     else:
         stamp.write_text(digest)
         print(f"{GREEN}[env] venv up to date{RESET}", flush=True)
 
+
 def _strip(line: str) -> str:
-    return _ANSI_RE.sub('', line)
+    return _ANSI_RE.sub("", line)
+
 
 def _is_test_result(line: str) -> bool:
     s = _strip(line)
-    return bool(re.search(r'\s(PASSED|FAILED|ERROR|XPASS|XFAIL|SKIPPED)', s)
-                or s.startswith('FAILED ') or s.startswith('ERROR '))
+    return bool(
+        re.search(r"\s(PASSED|FAILED|ERROR|XPASS|XFAIL|SKIPPED)", s)
+        or s.startswith("FAILED ")
+        or s.startswith("ERROR ")
+    )
+
 
 def _is_section_header(line: str) -> bool:
-    return bool(re.search(r'^[=\-]{5,}', _strip(line)))
+    return bool(re.search(r"^[=\-]{5,}", _strip(line)))
+
 
 def _is_final_summary(line: str) -> bool:
-    return bool(re.search(r'\d+ (passed|failed|error)', _strip(line)))
+    return bool(re.search(r"\d+ (passed|failed|error)", _strip(line)))
+
 
 def _is_failure_section_start(line: str) -> bool:
     s = _strip(line)
-    return 'FAILURES' in s or 'ERRORS' in s or 'short test summary' in s
+    return "FAILURES" in s or "ERRORS" in s or "short test summary" in s
+
 
 def _extract_test_id(line: str) -> str:
     """Extract bare test ID (path::test_name) from a result line."""
     s = _strip(line).strip()
-    m = re.match(r'^(\S+::\S+)\s+(PASSED|FAILED|ERROR)', s)
+    m = re.match(r"^(\S+::\S+)\s+(PASSED|FAILED|ERROR)", s)
     if m:
         return m.group(1)
-    m = re.match(r'^(?:FAILED|ERROR|PASSED)\s+(\S+)', s)
+    m = re.match(r"^(?:FAILED|ERROR|PASSED)\s+(\S+)", s)
     if m:
-        return m.group(1).rstrip(':')
+        return m.group(1).rstrip(":")
     return s
+
 
 def _colorize_result_line(line: str) -> str:
     s = _strip(line)
-    if re.search(r'\sPASSED', s) or s.startswith('PASSED '):
+    if re.search(r"\sPASSED", s) or s.startswith("PASSED "):
         return GREEN + s + RESET
-    if re.search(r'\sFAILED', s) or s.startswith('FAILED '):
+    if re.search(r"\sFAILED", s) or s.startswith("FAILED "):
         return RED + BOLD + s + RESET
-    if re.search(r'\sERROR', s) or s.startswith('ERROR '):
+    if re.search(r"\sERROR", s) or s.startswith("ERROR "):
         return YELLOW + BOLD + s + RESET
-    if re.search(r'\sSKIPPED', s):
+    if re.search(r"\sSKIPPED", s):
         return DIM + s + RESET
     return line
 
 
 def main() -> int:
     raw_args = sys.argv[1:]
-    filter_mode  = "summary"
+    filter_mode = "summary"
     summary_file = DEFAULT_SUMMARY
     pytest_args: list[str] = []
 
@@ -129,14 +145,20 @@ def main() -> int:
     while i < len(raw_args):
         a = raw_args[i]
         if a == "--filter" and i + 1 < len(raw_args):
-            filter_mode = raw_args[i + 1]; i += 2
+            filter_mode = raw_args[i + 1]
+            i += 2
         elif a == "--summary" and i + 1 < len(raw_args):
-            summary_file = raw_args[i + 1]; i += 2
+            summary_file = raw_args[i + 1]
+            i += 2
         else:
-            pytest_args.append(a); i += 1
+            pytest_args.append(a)
+            i += 1
 
     if filter_mode not in ("all", "summary", "failures"):
-        print(f"Unknown --filter '{filter_mode}'. Use all|summary|failures.", file=sys.stderr)
+        print(
+            f"Unknown --filter '{filter_mode}'. Use all|summary|failures.",
+            file=sys.stderr,
+        )
         return 2
 
     if pytest_args and pytest_args[0] == "bash":
@@ -151,24 +173,24 @@ def main() -> int:
     if not pytest_args:
         pytest_args = ["tests/unit", "-m", "not simtest", "-q"]
 
-    _venv  = Path(VENV_PYTHON)
+    _venv = Path(VENV_PYTHON)
     python = str(_venv.resolve()) if _venv.exists() else sys.executable
     _ensure_venv_fresh(python)
-    cmd    = [python, "-u", "-m", "pytest"] + pytest_args
+    cmd = [python, "-u", "-m", "pytest"] + pytest_args
 
-    print(f"{CYAN}{'-'*70}{RESET}")
+    print(f"{CYAN}{'-' * 70}{RESET}")
     print(f"{CYAN}cmd:    {' '.join(cmd)}{RESET}")
     print(f"{CYAN}filter: {filter_mode}{RESET}")
-    print(f"{CYAN}{'-'*70}{RESET}")
+    print(f"{CYAN}{'-' * 70}{RESET}")
     print()
 
-    in_detail_block    = False
+    in_detail_block = False
     passed_tests: list[str] = []
     failed_tests: list[str] = []
     final_summary_line = ""
     t_start = time.monotonic()
 
-    env  = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -182,11 +204,11 @@ def main() -> int:
     assert proc.stdout is not None
     for raw_line in proc.stdout:
         bare = raw_line.rstrip("\n")
-        s    = _strip(bare)
+        s = _strip(bare)
 
-        if re.search(r'\sPASSED', s):
+        if re.search(r"\sPASSED", s):
             passed_tests.append(_extract_test_id(bare))
-        elif re.search(r'\sFAILED', s) or s.startswith('FAILED '):
+        elif re.search(r"\sFAILED", s) or s.startswith("FAILED "):
             tid = _extract_test_id(bare)
             if tid not in failed_tests:
                 failed_tests.append(tid)
@@ -218,13 +240,13 @@ def main() -> int:
     proc.wait()
     elapsed = time.monotonic() - t_start
 
-    m = re.search(r'(\d+) passed', final_summary_line)
+    m = re.search(r"(\d+) passed", final_summary_line)
     n_pass = int(m.group(1)) if m else len(passed_tests)
-    m = re.search(r'(\d+) failed', final_summary_line)
+    m = re.search(r"(\d+) failed", final_summary_line)
     n_fail = int(m.group(1)) if m else len(failed_tests)
-    m = re.search(r'(\d+) error', final_summary_line)
-    n_err  = int(m.group(1)) if m else 0
-    m = re.search(r'(\d+) skipped', final_summary_line)
+    m = re.search(r"(\d+) error", final_summary_line)
+    n_err = int(m.group(1)) if m else 0
+    m = re.search(r"(\d+) skipped", final_summary_line)
     n_skip = int(m.group(1)) if m else 0
 
     rc = proc.returncode
@@ -234,41 +256,50 @@ def main() -> int:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     summary = {
-        "timestamp":    timestamp,
-        "elapsed_s":    round(elapsed, 2),
-        "exit_code":    rc,
-        "passed":       n_pass,
-        "failed":       n_fail,
-        "errors":       n_err,
-        "skipped":      n_skip,
-        "result":       "passed" if rc == 0 else "failed",
+        "timestamp": timestamp,
+        "elapsed_s": round(elapsed, 2),
+        "exit_code": rc,
+        "passed": n_pass,
+        "failed": n_fail,
+        "errors": n_err,
+        "skipped": n_skip,
+        "result": "passed" if rc == 0 else "failed",
         "failed_tests": failed_tests,
-        "cmd":          cmd,
+        "cmd": cmd,
     }
     summary_path.write_text(json.dumps(summary, indent=2))
 
     _time_str = f"{elapsed:.1f}s"
 
     print()
-    print(f"{CYAN}{'-'*70}{RESET}")
+    print(f"{CYAN}{'-' * 70}{RESET}")
     if rc == 0:
-        print(f"{GREEN}{BOLD}  ALL TESTS PASSED{RESET}  "
-              f"{GREEN}{n_pass} passed{RESET}"
-              + (f", {DIM}{n_skip} skipped{RESET}" if n_skip else "")
-              + f"  {DIM}({_time_str}){RESET}")
+        print(
+            f"{GREEN}{BOLD}  ALL TESTS PASSED{RESET}  "
+            f"{GREEN}{n_pass} passed{RESET}"
+            + (f", {DIM}{n_skip} skipped{RESET}" if n_skip else "")
+            + f"  {DIM}({_time_str}){RESET}"
+        )
     else:
         parts = []
-        if n_fail: parts.append(f"{RED}{BOLD}{n_fail} failed{RESET}")
-        if n_err:  parts.append(f"{YELLOW}{BOLD}{n_err} error{RESET}")
-        if n_pass: parts.append(f"{GREEN}{n_pass} passed{RESET}")
-        if n_skip: parts.append(f"{DIM}{n_skip} skipped{RESET}")
-        print(f"{RED}{BOLD}  TESTS FAILED{RESET}  " + ", ".join(parts)
-              + f"  {DIM}({_time_str}){RESET}")
+        if n_fail:
+            parts.append(f"{RED}{BOLD}{n_fail} failed{RESET}")
+        if n_err:
+            parts.append(f"{YELLOW}{BOLD}{n_err} error{RESET}")
+        if n_pass:
+            parts.append(f"{GREEN}{n_pass} passed{RESET}")
+        if n_skip:
+            parts.append(f"{DIM}{n_skip} skipped{RESET}")
+        print(
+            f"{RED}{BOLD}  TESTS FAILED{RESET}  "
+            + ", ".join(parts)
+            + f"  {DIM}({_time_str}){RESET}"
+        )
         if failed_tests:
             print(f"{RED}  Failed tests:{RESET}")
             for t in failed_tests:
                 print(f"{RED}    - {t}{RESET}")
-    print(f"{CYAN}{'-'*70}{RESET}")
+    print(f"{CYAN}{'-' * 70}{RESET}")
     print(f"{CYAN}summary: {summary_path.resolve()}{RESET}")
 
     return rc

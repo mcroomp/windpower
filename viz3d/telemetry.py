@@ -22,10 +22,10 @@ Usage:
 from __future__ import annotations
 
 import queue
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, List, Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
+from collections.abc import Iterator
 
 import numpy as np
 
@@ -47,7 +47,7 @@ class TelemetryFrame:
     swash_collective: float = 0.0      # collective blade pitch [rad]
     swash_tilt_lon: float = 0.0        # longitudinal swashplate tilt, normalised [-1,1]
     swash_tilt_lat: float = 0.0        # lateral swashplate tilt, normalised [-1,1]
-    body_z_eq: Optional[np.ndarray] = None  # equilibrium body_z setpoint (unit vec, NED)
+    body_z_eq: np.ndarray | None = None  # equilibrium body_z setpoint (unit vec, NED)
     wind_ned: np.ndarray = field(
         default_factory=lambda: np.array([10.0, 0.0, 0.0])
     )
@@ -124,7 +124,7 @@ class LiveQueueSource:
         # in step loop: q.put(TelemetryFrame(...))
         # when done:    q.put(None)
     """
-    def __init__(self, q: "queue.Queue", timeout: float = 5.0) -> None:
+    def __init__(self, q: queue.Queue, timeout: float = 5.0) -> None:
         self._q = q
         self._timeout = timeout
 

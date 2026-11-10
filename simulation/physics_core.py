@@ -35,8 +35,6 @@ import numpy as np
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-import sys
-import os
 
 from simulation.dynamics import RigidBodyDynamics
 from dynbem       import create_aero, RotorInputs, step_omega
@@ -323,8 +321,8 @@ class PhysicsCore:
 
     def step(self, dt: float, collective_rad: float,
              tilt_lon: float, tilt_lat: float,
-             rest_length: "float | None" = None,
-             yaw_throttle: "float | None" = None,
+             rest_length: float | None = None,
+             yaw_throttle: float | None = None,
              payout_rate_ms: float | None = None) -> dict:
         """
         400 Hz step with caller-supplied tilts.
@@ -385,8 +383,8 @@ class PhysicsCore:
 
     def _integrate(self, dt: float, collective_rad: float,
                    tilt_lon: float, tilt_lat: float,
-                   rest_length: "float | None",
-                   yaw_throttle: "float | None" = None,
+                   rest_length: float | None,
+                   yaw_throttle: float | None = None,
                    payout_rate_ms: float | None = None) -> dict:
 
         if not np.isfinite(dt) or dt <= 0.0:

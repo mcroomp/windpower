@@ -19,16 +19,12 @@ No ground command updates are sent after start.
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 from arduloop import (
     GuidedAttitudeController,
@@ -44,6 +40,9 @@ from simulation.telemetry_csv import TelRow, write_csv
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.simtests._rotor_helpers import load_default_rotor
+
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
+
 
 
 _ROTOR = load_default_rotor()

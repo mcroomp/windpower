@@ -9,8 +9,6 @@ Step 3: verify each IC is reproducible — restart simulate_point from that IC a
         check it immediately stays within tolerance.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 

@@ -21,15 +21,12 @@ NED coordinates throughout.  X=North, Y=East, Z=Down.
 """
 import math
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 import simulation
 from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic, step_omega
@@ -42,6 +39,9 @@ from simulation.controller import compute_bz_altitude_hold
 from tests.simtests._rotor_helpers import (
     load_default_rotor, dynamics_kwargs, BODY_Z_SLEW_RATE_RAD_S,
 )
+
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
+
 
 
 # ── Rotor / physics constants ──────────────────────────────────────────────────
@@ -241,7 +241,6 @@ def _compute_ic() -> dict:
 
     coll_settled       = float(col_b)
     omega_spin_settled = float(om_b)
-    body_z_raw         = bz_b
 
     # ── Trim cyclic at the solved IC ────────────────────────────────────────
     # Find the (tilt_lon, tilt_lat) that null hub-frame Mx, My at the solved
@@ -568,8 +567,8 @@ def _print_steady(log, m: dict, label: str) -> None:
     ]
     log.write(lines, f"[{label}] tlen_dev={m['max_tlen_dev']:.3f} m  alt_range={m['alt_range']:.2f} m  tension_min={m['min_tension']:.0f} N")
     print()
-    for l in lines:
-        print(f"  [{label}] {l}")
+    for line in lines:
+        print(f"  [{label}] {line}")
     print(f"  [{label}] telemetry -> {m['csv_path']}")
 
 
@@ -699,7 +698,6 @@ def test_ic_r0_kinematic(simtest_log):
     rest       = ic.rest_length
     d = json.loads(_JSON_PATH.read_text())
     tension_sp = float(d.get("tension_eq_n", 435.0))
-    from simulation.param_defaults import thrust_to_coll_rad as _t2c
     # Use coll_eq_rad (physics equilibrium collective) for consistent physics.
     stack_coll = float(ic.coll_eq_rad)
     trim_tilt_lon = float(d.get("trim_tilt_lon", 0.0))

@@ -5,14 +5,14 @@ Finds graph boundaries automatically by detecting the axis lines in the image,
 then transforms data coordinates to image pixel coordinates for accurate overlay.
 """
 
-import sys, math, csv
+import math
+import csv
 from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
-from matplotlib.transforms import Affine2D
 
 HERE = Path(__file__).parent
 
@@ -83,7 +83,7 @@ row_d_t = np.mean(top_region < 0.3, axis=1)
 y_top_row = int(np.argmax(row_d_t))
 
 print(f"Image size: {W}x{H}")
-print(f"Detected graph boundaries (pixels):")
+print("Detected graph boundaries (pixels):")
 print(f"  x-axis col (left):  {x_axis_col}")
 print(f"  x-axis row (bottom): {y_axis_row}")
 print(f"  right col:          {x_right_col}")

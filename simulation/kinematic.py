@@ -32,7 +32,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from typing import Any, Callable, Tuple
+from typing import Any
+from collections.abc import Callable
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +85,7 @@ def make_linear_traj(
     target_vel,
     duration: float,
     ramp_s: float = 0.0,
-) -> "Callable[[float], Tuple[np.ndarray, np.ndarray]]":
+) -> Callable[[float], tuple[np.ndarray, np.ndarray]]:
     """
     Return a trajectory callable for the classic linear+ramp kinematic path.
 
@@ -120,7 +121,7 @@ def make_linear_traj(
     t_ramp_start = duration - ramp_s
     ramp_start_pos = launch_pos + target_vel * t_ramp_start
 
-    def _fn(t_sim: float) -> "Tuple[np.ndarray, np.ndarray]":
+    def _fn(t_sim: float) -> tuple[np.ndarray, np.ndarray]:
         if ramp_s > 0.0 and t_sim >= t_ramp_start:
             u         = t_sim - t_ramp_start
             ramp_frac = max(0.0, (ramp_s - u) / ramp_s)
@@ -131,7 +132,7 @@ def make_linear_traj(
             vel = target_vel.copy()
         return pos, vel
 
-    def _accel(t_sim: float) -> "np.ndarray":
+    def _accel(t_sim: float) -> np.ndarray:
         if ramp_s > 0.0 and t_sim >= t_ramp_start:
             return -target_vel / ramp_s
         return np.zeros(3)
@@ -150,7 +151,7 @@ def make_smooth_trapezoid_traj(
     cruise_speed: float,
     accel_s: float,
     decel_s: float,
-) -> "Callable[[float], Tuple[np.ndarray, np.ndarray]]":
+) -> Callable[[float], tuple[np.ndarray, np.ndarray]]:
     """
     Smooth trapezoidal-speed kinematic trajectory that ends exactly at
     ``target_pos`` with zero velocity.
@@ -211,7 +212,7 @@ def make_smooth_trapezoid_traj(
     D            = s_cruise_end + 0.5 * vmax * td
     launch_pos   = target_pos - D * direction
 
-    def _speed_dist(t: float) -> "Tuple[float, float]":
+    def _speed_dist(t: float) -> tuple[float, float]:
         if t <= 0.0:
             return 0.0, 0.0
         if t < ta:
@@ -228,11 +229,11 @@ def make_smooth_trapezoid_traj(
             return v, s
         return 0.0, D
 
-    def _fn(t_sim: float) -> "Tuple[np.ndarray, np.ndarray]":
+    def _fn(t_sim: float) -> tuple[np.ndarray, np.ndarray]:
         v, s = _speed_dist(t_sim)
         return launch_pos + s * direction, v * direction
 
-    def _accel(t_sim: float) -> "np.ndarray":
+    def _accel(t_sim: float) -> np.ndarray:
         if 0.0 < t_sim < ta:
             a = vmax * 0.5 * (math.pi / ta) * math.sin(math.pi * t_sim / ta)
             return a * direction
@@ -307,9 +308,9 @@ class KinematicStartup:
         target_vel = None,
         duration:  float = 0.0,
         ramp_s:    float = 0.0,
-        R0:        "np.ndarray | None" = None,
-        traj_fn:   "Callable[[float], Tuple[np.ndarray, np.ndarray]] | None" = None,
-        R_fn:      "Callable[[float], np.ndarray] | None" = None,
+        R0:        np.ndarray | None = None,
+        traj_fn:   Callable[[float], tuple[np.ndarray, np.ndarray]] | None = None,
+        R_fn:      Callable[[float], np.ndarray] | None = None,
     ) -> None:
         self.duration = float(duration)
         self.R0       = (np.asarray(R0, dtype=float).copy()
@@ -376,7 +377,7 @@ class KinematicStartup:
         return max(0.0, 1.0 - t_sim / self.duration)
 
     # ------------------------------------------------------------------
-    def state_at(self, t_sim: float) -> "tuple[np.ndarray, np.ndarray] | None":
+    def state_at(self, t_sim: float) -> tuple[np.ndarray, np.ndarray] | None:
         """
         Return (pos, vel) for the kinematic trajectory at t_sim, or None if the
         kinematic phase has ended (caller should run free-flight physics).

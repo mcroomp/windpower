@@ -4,8 +4,6 @@ test_controller.py — Unit tests for simulation/controller.py.
 Covers compute_bz_tether, slerp_body_z, compute_rate_cmd, and related
 geometry helpers.
 """
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest

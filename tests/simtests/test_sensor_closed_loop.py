@@ -49,24 +49,23 @@ gyro_sigma = accel_sigma = 0.0 — noiseless for determinism.
 """
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
-
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
-
-_ROTOR_S = load_default_rotor()
 from simulation.controller import (AltitudeHoldController, compute_rate_cmd,
                           damp_bz_eq_lateral, HeliCyclicController)
 from simulation.sensor import PhysicalSensor
 from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
+
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
+
+
+_ROTOR_S = load_default_rotor()
 
 _IC  = load_ic()
 

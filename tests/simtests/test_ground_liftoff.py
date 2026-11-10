@@ -35,12 +35,6 @@ import numpy as np
 import pytest
 
 
-pytestmark = [
-    pytest.mark.simtest,
-    pytest.mark.timeout(300),
-    pytest.mark.skip(reason="Temporarily disabled while liftoff/reel-out behavior is being investigated"),
-]
-
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
 from simulation.rawes_lua_harness import RawesLua
@@ -48,6 +42,13 @@ from simulation.winch import GovernedWinchController
 from linkhub_client.messages import NamedValueFloat
 from groundstation.rawes_modes import MODE_STEADY, MODE_TAKEOFF, send_anchor_ned
 from tests.simtests._rotor_helpers import load_default_rotor
+
+pytestmark = [
+    pytest.mark.simtest,
+    pytest.mark.timeout(300),
+    pytest.mark.skip(reason="Temporarily disabled while liftoff/reel-out behavior is being investigated"),
+]
+
 
 # ── Physical constants ────────────────────────────────────────────────────────
 _ROTOR = load_default_rotor()

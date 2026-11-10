@@ -17,8 +17,6 @@ Altitude = -pos[2]. Upward thrust = dot(F_world, body_z).
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 

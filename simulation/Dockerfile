@@ -47,12 +47,14 @@ RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && echo UTC > /etc/timezone \
 # =============================================================================
 FROM base AS pyenv
 
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 ENV VENV_DIR=/rawes/.venv
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
 
 COPY simulation/requirements.txt simulation/requirements-docker.txt /tmp/
-RUN python3 -m venv "$VENV_DIR" \
-    && "$VENV_DIR/bin/pip" install --index-url "$PIP_INDEX_URL" --upgrade pip --quiet \
-    && "$VENV_DIR/bin/pip" install -r /tmp/requirements-docker.txt --quiet
+RUN uv python install 3.14.10 \
+    && uv venv --python 3.14.10 "$VENV_DIR" \
+    && uv pip install --python "$VENV_DIR/bin/python" -r /tmp/requirements-docker.txt --quiet
 
 # Activate venv for all subsequent RUN commands and the final shell
 ENV PATH="$VENV_DIR/bin:/usr/local/bin:$PATH"

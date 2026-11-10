@@ -74,7 +74,7 @@ def _fmt_row(r: TelRow) -> str:
     )
 
 
-def _find_event(rows: list[TelRow], pred) -> "TelRow | None":
+def _find_event(rows: list[TelRow], pred) -> TelRow | None:
     for r in rows:
         if pred(r):
             return r
@@ -83,7 +83,7 @@ def _find_event(rows: list[TelRow], pred) -> "TelRow | None":
 
 def find_first_anomaly(
     rows: list[TelRow], break_load: float
-) -> tuple[str | None, "TelRow | None"]:
+) -> tuple[str | None, TelRow | None]:
     """Earliest of {break-load breach, floor hit} -- the first sign something
     has gone wrong. Returns (label, row) or (None, None) if neither occurs."""
     breach = _find_event(rows, lambda r: r.tether_tension >= break_load)
@@ -259,8 +259,7 @@ def main() -> int:
         "--stride",
         type=int,
         default=None,
-        help="print every Nth row (default: auto, to keep the table under ~%d rows)"
-        % MAX_TABLE_ROWS,
+        help=f"print every Nth row (default: auto, to keep the table under ~{MAX_TABLE_ROWS} rows)",
     )
     ap.add_argument(
         "--full",

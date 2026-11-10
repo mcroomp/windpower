@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import os
 from datetime import datetime
+from pathlib import Path
 
 # msvcrt is Windows stdlib -- used for non-blocking ESC/key reads.
 # Falls back to a stub on non-Windows so the rest of the module still imports.
@@ -21,6 +22,7 @@ except ImportError:
     msvcrt = _MsvcrtStub()  # type: ignore[assignment]
 
 from .constants import _LOG_DIR
+import contextlib
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +138,9 @@ class _RunLog:
         meta: dict,
         *,
         directory: str | Path | None = None,
-    ) -> "_RunLog":
+    ) -> _RunLog:
         path = _log_path(verb, name, directory)
-        fh = open(path, "w", newline="")
+        fh = open(path, "w", newline="")  # noqa: SIM115 - ownership transfers to _RunLog.close()
         fh.write(f"# {verb}.csv -- written by calibrate.py {verb}\n")
         for k, v in meta.items():
             fh.write(f"# {k}: {v}\n")
@@ -154,10 +156,8 @@ class _RunLog:
         self.n_rows += 1
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self._fh.close()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------

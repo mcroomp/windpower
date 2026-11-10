@@ -17,19 +17,17 @@ Coordinate frame: NED — X=North, Y=East, Z=Down.  Tether anchor at origin.
 """
 import pytest
 
+import math
+import numpy as np
+from tests.unit._aero_probe import make_probe, probe_steady
+from simulation.tether import SpringDamperTether, TetherInputs
+
 pytestmark = pytest.mark.expensive
 
-import math
-import sys
-from pathlib import Path
-
-import numpy as np
 
 
-import simulation.mediator as _mediator_module
-from tests.unit._aero_probe import make_probe, probe_steady
 
-from simulation.tether import SpringDamperTether, TetherInputs
+
 
 # ── Physical constants ────────────────────────────────────────────────────────
 MASS   = 5.0                        # kg  (matches test_force_balance.py)

@@ -165,9 +165,11 @@ def test_file_download_requests_an_ftp_transfer(tmp_path: Path) -> None:
 
 def test_failed_transfer_raises_and_leaves_no_file(tmp_path: Path) -> None:
     destination = tmp_path / "dataflash-4.BIN"
-    with _stub_session("failed") as session:
-        with pytest.raises(LinkHubError, match="link lost"):
-            session.download_log(4, destination)
+    with (
+        _stub_session("failed") as session,
+        pytest.raises(LinkHubError, match="link lost"),
+    ):
+        session.download_log(4, destination)
 
     assert not destination.exists()
     assert not (tmp_path / "dataflash-4.BIN.part").exists()

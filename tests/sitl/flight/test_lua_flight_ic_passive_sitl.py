@@ -16,26 +16,26 @@ from __future__ import annotations
 
 import logging
 import math
-import sys
 
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.sitl
-
-
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
-from tests.sitl.stack_infra import (  # noqa: E402
-    StackContext,
-    assert_no_mediator_criticals,
-    get_arducopter_crash_info,
-    observe,
-)
 from linkhub_client.messages import (
     NamedValueFloat,
     ServoOutputRaw,
     Statustext,
     decode_message,
+)
+
+pytestmark = pytest.mark.sitl
+
+
+from tests.sitl.stack_infra import (  # noqa: E402
+    StackContext,
+    assert_no_mediator_criticals,
+    get_arducopter_crash_info,
+    observe,
 )
 
 # Timing

@@ -5,8 +5,6 @@ Tests that simulate_point() with omega convergence detection can settle all
 cells from T=25 N to T=1000 N at el=30 deg, reel-out target v=-0.8 m/s.
 """
 import math
-import sys
-from pathlib import Path
 
 import pytest
 

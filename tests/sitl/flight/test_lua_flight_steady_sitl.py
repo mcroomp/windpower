@@ -55,13 +55,9 @@ not EKF LOCAL_POSITION_NED (which can lag physics crashes by tens of seconds).
 """
 import logging
 import math
-import sys
 import numpy as np
 
 import pytest
-
-pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1800)]
-
 
 from groundstation.rawes_diag import diag_values
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
@@ -78,6 +74,10 @@ from linkhub_client.messages import (
     decode_message,
 )
 from analysis.analyse_run import compute_steady_metrics, print_flight_report
+
+pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1800)]
+
+
 
 # -- Timing -------------------------------------------------------------------
 _KINEMATIC_TIMEOUT_S = 60.0   # s from fixture yield to kinematic end (4.7 timing jitter can reduce effective margin near the 80 s kinematic exit)
@@ -216,8 +216,6 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
     ekf_yaw_reset       = False
 
     t_obs_start        = gcs.sim_now()
-    deadline           = t_obs_start + _OBS_SECONDS
-    t_last_log         = t_obs_start
     t_capture_deadline = t_obs_start + _CAPTURE_TIMEOUT_S
 
     log.info("=== test_lua_flight_steady_sitl: observing %.0f s of free flight ===", _OBS_SECONDS)

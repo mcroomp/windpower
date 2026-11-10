@@ -31,7 +31,6 @@ import json
 import math
 import logging
 import socket
-import sys
 import os
 import time
 from pathlib import Path
@@ -50,10 +49,11 @@ from simulation.winch_node import GovernedWinchNode, Anemometer
 from groundstation.winch_protocol import WinchCommand
 import simulation.config as _mcfg
 from dynbem import rotor_definition as _rd
-from simulation.telemetry_csv import COLUMNS as _TEL_COLUMNS, ASYNC_MAV_COLUMNS
+from simulation.telemetry_columns import COLUMNS as _TEL_COLUMNS, ASYNC_MAV_COLUMNS
 from simulation.mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from simulation.mediator_events import MediatorEventLog
 from types import SimpleNamespace
+import contextlib
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -215,7 +215,7 @@ def run_mediator(args, trajectory=None):
     # form (e.g. "beaupoil_2026") by resolving against the project's
     # rotor_definitions/ directory.
     _rotor_spec = str(cfg["rotor_definition"])
-    if not _rotor_spec.endswith(".yaml") and not os.path.sep in _rotor_spec:
+    if not _rotor_spec.endswith(".yaml") and os.path.sep not in _rotor_spec:
         _rotor_spec = str(Path(__file__).resolve().parent
                           / "rotor_definitions" / f"{_rotor_spec}.yaml")
     rotor  = _rd.load(_rotor_spec)
@@ -300,7 +300,7 @@ def run_mediator(args, trajectory=None):
     _telemetry_file   = None
     _telemetry_writer = None
     if args.telemetry_log:
-        _telemetry_file = open(args.telemetry_log, "w", newline="", encoding="utf-8")  # noqa: WPS515
+        _telemetry_file = open(args.telemetry_log, "w", newline="", encoding="utf-8")  # noqa: SIM115 - closed in the loop's finally block
         _telemetry_writer = csv.DictWriter(_telemetry_file, fieldnames=_TEL_COLUMNS)
         _telemetry_writer.writeheader()
         log.info("Telemetry logging -> %s", args.telemetry_log)
@@ -725,10 +725,8 @@ def run_mediator(args, trajectory=None):
                 pass
 
         log.info("Closing connections ...")
-        try:
+        with contextlib.suppress(Exception):
             sitl.close()
-        except Exception:
-            pass
         log.info("Mediator stopped.")
 
 

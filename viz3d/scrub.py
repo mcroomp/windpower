@@ -22,10 +22,6 @@ import argparse
 import sys
 from pathlib import Path
 
-# Ensure simulation/ is on sys.path when run from anywhere
-_HERE = Path(__file__).resolve().parent
-_SIM  = _HERE.parent
-
 try:
     import pyvista as pv  # noqa: F401 — fail fast with a clear message
 except ImportError:

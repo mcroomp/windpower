@@ -64,9 +64,9 @@ class RigidBodyDynamics:
         self._I_spin = float(I_spin)  # rotor spin inertia (separate DOF)
         self._z_floor = float(z_floor) if z_floor is not None else None
 
-        I = np.asarray(I_body, dtype=float)
-        self._I_b     = np.diag(I)
-        self._I_b_inv = np.diag(1.0 / I)
+        inertia = np.asarray(I_body, dtype=float)
+        self._I_b     = np.diag(inertia)
+        self._I_b_inv = np.diag(1.0 / inertia)
 
         self._pos   = np.asarray(pos0,   dtype=float).copy()
         self._vel   = np.asarray(vel0,   dtype=float).copy()

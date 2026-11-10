@@ -8,16 +8,23 @@ set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;%ProgramFiles%\WinGet\Links;%Pro
 
 call :ensure_tool uv astral-sh.uv
 if errorlevel 1 exit /b 1
-echo [INFO] Installing uv-managed Python 3.12 ...
-call uv python install 3.12
+echo [INFO] Installing uv-managed Python 3.14.10 ...
+call uv python install 3.14.10
 if errorlevel 1 (
-    echo ERROR: uv could not install Python 3.12.
+    echo ERROR: uv could not install Python 3.14.10.
     exit /b 1
 )
 echo [INFO] Synchronizing the project environment ...
-call uv sync --project "%REPO%" --python 3.12 --managed-python --locked --dev --extra simulation
+call uv sync --project "%REPO%" --python 3.14.10 --managed-python --locked --dev --extra simulation
 if errorlevel 1 (
     echo ERROR: uv sync failed.
+    exit /b 1
+)
+
+echo [INFO] Checking Python with Ruff ...
+call uv run --no-sync --project "%REPO%" ruff check "%REPO%"
+if errorlevel 1 (
+    echo ERROR: Ruff checks failed.
     exit /b 1
 )
 
