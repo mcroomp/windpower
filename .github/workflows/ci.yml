@@ -32,11 +32,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --dev --extra simulation
 
-      - name: Run Ruff
-        run: uv run --no-sync ruff check .
-
-      - name: Run Pyright
-        run: uv run --no-sync python -m pyright --project pyrightconfig.json --pythonpath .venv/bin/python --warnings
+      - name: Run lint tests (Ruff + Pyright)
+        run: uv run --no-sync python -m pytest tests/lint --run-lint -m lint -v
 
   unit-and-simtests:
     name: Unit + Simtests

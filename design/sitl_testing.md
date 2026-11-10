@@ -40,8 +40,9 @@ Verified behavior from `test.sh`:
   measures LinkHub rather than contention from another stack.
 - Before collection the runner calls `bash setup.sh build` and probes the image
   for Python 3.14+, `arducopter-heli`, and `linkhub`.
-- Runtime images install managed Python 3.14.10, shared Node.js 24.x, Ruff, and Pyright. Each pytest worker
-  runs the shared [Python lint gate](testing.md#python-linting) before collection.
+- Runtime images install managed Python 3.14.10, shared Node.js 24.x, Ruff, and Pyright.
+  The pre-worker build check runs the [Python lint gates](testing.md#python-linting)
+  once; workers do not repeat them before collection.
 - Docker installs locked development dependencies plus the `simulation` and `sitl`
   extras from `pyproject.toml` and `uv.lock`. The `sitl` extra supplies ArduPilot's
   Python launch tools. The dependency layer omits local editable packages; each

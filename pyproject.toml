@@ -89,6 +89,7 @@ include = [
 timeout = 600
 pythonpath = ["linkhub_client/src"]
 markers = [
+    "lint: repository-wide static checks; enable with --run-lint",
     "simtest: full physics simulation (seconds-minutes); excluded from quick unit run",
     "sitl: ArduPilot SITL integration test (Docker); run via test.sh stack",
     "expensive: loop-heavy unit test; run explicitly with -m expensive",

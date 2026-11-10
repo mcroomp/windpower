@@ -1,26 +1,21 @@
-"""Shared validation for every pytest tier."""
-
-from pathlib import Path
-import subprocess
-import sys
+"""Shared pytest options for every test tier."""
 
 import pytest
 
 
-def pytest_sessionstart(session: pytest.Session) -> None:
-    root = Path(__file__).resolve().parents[1]
-    checks = (
-        ("Ruff", ["ruff", "check", str(root)]),
-        ("Pyright", [
-            "pyright", "--project", str(root / "pyrightconfig.json"),
-            "--pythonpath", sys.executable, "--warnings",
-        ]),
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-lint",
+        action="store_true",
+        default=False,
+        help="Enable tests marked lint (Ruff and Pyright).",
     )
-    for name, args in checks:
-        result = subprocess.run(
-            [sys.executable, "-m", *args],
-            cwd=root,
-            check=False,
-        )
-        if result.returncode:
-            raise pytest.UsageError(f"{name} failed; fix the reported errors before running tests.")
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--run-lint"):
+        return
+    skip_lint = pytest.mark.skip(reason="Lint tests require --run-lint")
+    for item in items:
+        if item.get_closest_marker("lint"):
+            item.add_marker(skip_lint)
