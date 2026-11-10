@@ -1,6 +1,9 @@
 {
   "name": "rawes-presentations",
   "private": true,
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "slidev presentation_sitl_aero.md",
     "build": "slidev build presentation_sitl_aero.md",

@@ -186,7 +186,7 @@ setup.cmd            (Windows)         or       bash setup.sh
 
 On Windows, `setup.cmd` owns the complete setup:
 
-- Install missing uv (`astral-sh.uv`), Node.js LTS (`OpenJS.NodeJS.LTS`),
+- Install missing uv (`astral-sh.uv`), Node.js 24.x (`OpenJS.NodeJS.LTS`, selecting a matching release),
   Rust (`Rustlang.Rustup`), and Visual Studio C++ Build Tools through WinGet.
   An existing Build Tools installation missing C++ support is updated through
   its Visual Studio installer. C++ tools and the x64 Windows SDK can require a
@@ -199,7 +199,7 @@ On Windows, `setup.cmd` owns the complete setup:
 Git Bash delegates to the same Windows bootstrap. If WinGet is missing, install
 or update **App Installer** from Microsoft Store first. Setup stops explicitly
 if any installation or build fails; restart Windows if requested and rerun it.
-On native Linux, install uv, Node.js/npm, and Rust/Cargo before running
+On native Linux, install uv, Node.js 24.x/npm, and Rust/Cargo before running
 `bash setup.sh`; system build prerequisites are not installed automatically.
 
 `run_linkhub_ui.cmd --build <connection>` calls `setup.cmd` before launching.
@@ -221,6 +221,12 @@ lightweight hardware environment; `uv sync --dev --extra simulation` adds the
 scientific/Lua stack. Run `uv sync` explicitly after dependency changes
 (`UV_NO_SYNC=1` is configured on this workstation).
 Python 3.14 is the minimum; `.python-version` pins the development interpreter.
+Node.js uses one shared system installation for UI tools and Pyright; `.node-version`
+selects major 24 with patch updates allowed. CI reads that file, setup rejects
+other majors, and each npm project enforces `24.x`. Pyright does not install a
+private Node.js wheel.
+All npm projects use `https://packagefeedproxy.microsoft.io/npm/`, including
+locked tarball URLs, rather than contacting the public npm registry directly.
 If an older uv reports no download for the pinned Python release, update uv
 using its owning package manager (on Windows, `winget upgrade --id astral-sh.uv`).
 

@@ -80,6 +80,8 @@ For standalone type diagnostics, install the simulation extra and run
 `uv run pyright`. The basic-mode configuration in `pyrightconfig.json` currently
 reports existing errors and is not yet a build/test gate. Simulation dependencies
 include NeuralFoil for the SG6042 polar analysis.
+Pyright uses the same system Node.js 24.x as npm builds; install/select the
+major in `.node-version` before invoking it, rather than installing `pyright[nodejs]`.
 
 ## Markers and timeouts
 

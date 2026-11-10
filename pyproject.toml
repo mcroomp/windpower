@@ -33,7 +33,7 @@ simulation = [
 
 [dependency-groups]
 dev = [
-    "pyright[nodejs]",
+    "pyright",
     "pytest",
     "pytest-timeout",
     "ruff",

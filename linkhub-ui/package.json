@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "build:demo": "tsc --noEmit && vite build --config vite.demo.config.ts",

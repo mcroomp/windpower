@@ -1,6 +1,9 @@
 {
   "name": "am32config",
   "version": "1.0.0",
+  "engines": {
+    "node": "24.x"
+  },
   "description": "",
   "main": "index.js",
   "scripts": {

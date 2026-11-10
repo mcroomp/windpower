@@ -56,12 +56,19 @@ _setup_venv() {
         echo "[ERROR] uv is required. Install it from https://docs.astral.sh/uv/getting-started/installation/" >&2
         return 1
     fi
-    for tool in npm cargo; do
+    for tool in node npm cargo; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             echo "[ERROR] $tool is required for project setup." >&2
             return 1
         fi
     done
+    local node_major
+    node_major="$(tr -d '\r\n' < "$REPO_DIR/.node-version")"
+    if [[ -z "$node_major" ]] || ! node -e \
+        "if (process.versions.node.split('.')[0] !== process.argv[1]) process.exit(1)" "$node_major"; then
+        echo "[ERROR] Node.js $node_major.x is required; select it on PATH before setup." >&2
+        return 1
+    fi
     echo "[INFO] Installing uv-managed Python 3.14.10 ..."
     uv python install 3.14.10
     echo "[INFO] Synchronizing the project environment ..."
