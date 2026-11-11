@@ -11,9 +11,11 @@ Outputs (saved alongside this script):
     naca_comparison_page9.png   — Recreated chart next to original scan
 """
 
+from __future__ import annotations
+
 import math
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
 import numpy as np
 import matplotlib
 
@@ -21,6 +23,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import csv
+from simulation.plotting import axes_view, figure_view
+
+if TYPE_CHECKING:
+    from simulation.plotting import PlotAxes
 
 HERE = Path(__file__).parent
 
@@ -108,18 +114,19 @@ COLORS = plt.cm.RdYlGn(np.linspace(0.15, 0.85, len(C_PITCHES)))[::-1]
 # Figure 1 — Rotor C (NACA 4412) four-panel chart
 # ---------------------------------------------------------------------------
 
-fig, axes = plt.subplots(2, 2, figsize=(13, 10))
+native_fig, axes = plt.subplots(2, 2, figsize=(13, 10))
+fig = figure_view(native_fig)
 fig.suptitle(
     "NACA-TR-552  —  Rotor C (NACA 4412, cambered)  —  digitized from wind-tunnel data\n"
     "Wheatley & Bioletti 1936    |    shaded band = RAWES Beaupoil operating range (μ = 0.10–0.18)",
     fontsize=11,
 )
 
-panels = [
-    ("CL", "Lift coefficient  $C_L$", (0, 0.30), axes[0, 0]),
-    ("CT", "Thrust coefficient  $C_T$", (0, 0.012), axes[0, 1]),
-    ("LD", "Lift / Drag  $L/D$", (0, 6.0), axes[1, 0]),
-    ("alpha", "Shaft angle of attack  α  [°]", (0, 90), axes[1, 1]),
+panels: list[tuple[Literal["CL", "CT", "LD", "alpha"], str, tuple[float, float], PlotAxes]] = [
+    ("CL", "Lift coefficient  $C_L$", (0, 0.30), axes_view(axes[0, 0])),
+    ("CT", "Thrust coefficient  $C_T$", (0, 0.012), axes_view(axes[0, 1])),
+    ("LD", "Lift / Drag  $L/D$", (0, 6.0), axes_view(axes[1, 0])),
+    ("alpha", "Shaft angle of attack  α  [°]", (0, 90), axes_view(axes[1, 1])),
 ]
 
 for key, ylabel, ylim, ax in panels:
@@ -170,41 +177,50 @@ axes[0, 0].annotate(
 plt.tight_layout()
 out1 = HERE / "naca_4412_performance.png"
 fig.savefig(out1, dpi=150, bbox_inches="tight")
-plt.close(fig)
+plt.close(native_fig)
 print(f"Saved: {out1}")
 
 # ---------------------------------------------------------------------------
 # Figure 2 — All four rotors compared at optimum pitch (μ full range)
 # ---------------------------------------------------------------------------
 
-ROTOR_STYLES = {
-    "A": dict(color="#1f77b4", ls="-", lw=2.0, label="A — NACA 0012 (symmetric)"),
-    "B": dict(
-        color="#ff7f0e", ls="--", lw=2.0, label="B — NACA 0018 (symmetric, thick)"
-    ),
-    "C": dict(
-        color="#2ca02c",
-        ls="-",
-        lw=2.5,
-        label="C — NACA 4412 (cambered) ← closest to SG6042",
-    ),
-    "D": dict(
-        color="#d62728", ls="-.", lw=2.0, label="D — NACA 4418 (cambered, thick)"
-    ),
+class _RotorStyle(TypedDict):
+    color: str
+    ls: str
+    lw: float
+    label: str
+
+
+ROTOR_STYLES: dict[str, _RotorStyle] = {
+    "A": {"color": "#1f77b4", "ls": "-", "lw": 2.0, "label": "A — NACA 0012 (symmetric)"},
+    "B": {
+        "color": "#ff7f0e", "ls": "--", "lw": 2.0, "label": "B — NACA 0018 (symmetric, thick)"
+    },
+    "C": {
+        "color": "#2ca02c",
+        "ls": "-",
+        "lw": 2.5,
+        "label": "C — NACA 4412 (cambered) ← closest to SG6042",
+    },
+    "D": {
+        "color": "#d62728", "ls": "-.", "lw": 2.0, "label": "D — NACA 4418 (cambered, thick)"
+    },
 }
 
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+native_fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+fig = figure_view(native_fig)
 fig.suptitle(
     "NACA-TR-552  —  All four rotors at pitch = 3.5°  (near-optimum for cambered sections)\n"
     "Shaded band = RAWES Beaupoil operating range (μ = 0.10–0.18)",
     fontsize=11,
 )
 
-for ax, key, ylabel, ylim in [
-    (axes[0], "CL", "Lift coefficient  $C_L$", (0, 0.30)),
-    (axes[1], "CT", "Thrust coefficient  $C_T$", (0, 0.012)),
-    (axes[2], "LD", "Lift / Drag  $L/D$", (0, 6.5)),
-]:
+comparison_panels: list[tuple[PlotAxes, Literal["CL", "CT", "LD"], str, tuple[float, float]]] = [
+    (axes_view(axes[0]), "CL", "Lift coefficient  $C_L$", (0, 0.30)),
+    (axes_view(axes[1]), "CT", "Thrust coefficient  $C_T$", (0, 0.012)),
+    (axes_view(axes[2]), "LD", "Lift / Drag  $L/D$", (0, 6.5)),
+]
+for ax, key, ylabel, ylim in comparison_panels:
     ax.set_xlabel("Tip-speed ratio  μ", fontsize=9)
     ax.set_ylabel(ylabel, fontsize=9)
     ax.set_xlim(0, 0.95)
@@ -229,7 +245,7 @@ for ax, key, ylabel, ylim in [
 plt.tight_layout()
 out2 = HERE / "naca_comparison_all_rotors.png"
 fig.savefig(out2, dpi=150, bbox_inches="tight")
-plt.close(fig)
+plt.close(native_fig)
 print(f"Saved: {out2}")
 
 # ---------------------------------------------------------------------------
@@ -238,7 +254,8 @@ print(f"Saved: {out2}")
 
 orig_img = HERE / "page-09.png"
 if orig_img.exists():
-    fig, axes = plt.subplots(1, 2, figsize=(16, 10))
+    native_fig, axes = plt.subplots(1, 2, figsize=(16, 10))
+    fig = figure_view(native_fig)
     fig.suptitle(
         "Left: recreated from digitized data (Rotor C, NACA 4412, CT and CL)\n"
         "Right: original NACA-TR-552 page 207 scan  —  verify digitization accuracy",
@@ -318,24 +335,26 @@ if orig_img.exists():
     plt.subplots_adjust(left=0.05, right=0.98, top=0.88, bottom=0.05, wspace=0.12)
     out3 = HERE / "naca_comparison_vs_original.png"
     fig.savefig(out3, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    plt.close(native_fig)
     print(f"Saved: {out3}")
 
 # ---------------------------------------------------------------------------
 # Figure 4 — Beaupoil context: where our rotor sits on the NACA curves
 # ---------------------------------------------------------------------------
 
-fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+native_fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+fig = figure_view(native_fig)
 fig.suptitle(
     "NACA-TR-552 Rotor C (NACA 4412) — zoomed to RAWES Beaupoil operating range\n"
     "Beaupoil op. point: μ ≈ 0.10–0.18,  estimated pitch ≈ 0° to −5.7°",
     fontsize=10,
 )
 
-for ax, key, ylabel, ylim in [
-    (axes[0], "CL", "Lift coefficient  $C_L$", (-0.05, 0.20)),
-    (axes[1], "CT", "Thrust coefficient  $C_T$", (0, 0.008)),
-]:
+zoom_panels: list[tuple[PlotAxes, Literal["CL", "CT"], str, tuple[float, float]]] = [
+    (axes_view(axes[0]), "CL", "Lift coefficient  $C_L$", (-0.05, 0.20)),
+    (axes_view(axes[1]), "CT", "Thrust coefficient  $C_T$", (0, 0.008)),
+]
+for ax, key, ylabel, ylim in zoom_panels:
     ax.set_xlabel("Tip-speed ratio  μ", fontsize=9)
     ax.set_ylabel(ylabel, fontsize=9)
     ax.set_xlim(0, 0.60)
@@ -388,7 +407,7 @@ for ax in axes:
 plt.tight_layout()
 out4 = HERE / "naca_beaupoil_range.png"
 fig.savefig(out4, dpi=150, bbox_inches="tight")
-plt.close(fig)
+plt.close(native_fig)
 print(f"Saved: {out4}")
 
 print("\nAll plots saved to:", HERE)

@@ -188,7 +188,7 @@ def make_yaw_params_from_file():
     return _make_axis_params_from_file("YAW")
 
 
-def _resolve_default_rotor_yaml() -> Path:
+def resolve_default_rotor_yaml() -> Path:
     """Return the path to the project default rotor YAML (beaupoil_2026)."""
     return Path(__file__).resolve().parent / "rotor_definitions" / "beaupoil_2026.yaml"
 
@@ -206,7 +206,7 @@ def load_collective_phys_range() -> tuple[float, float]:
     With the standard parm values H_COL_MIN=1000, H_COL_MAX=2000 (full servo
     span), col_at_thrust_0 = col_min_rad and col_at_thrust_1 = col_max_rad.
     """
-    with open(_resolve_default_rotor_yaml(), encoding="utf-8") as _f:
+    with open(resolve_default_rotor_yaml(), encoding="utf-8") as _f:
         _rotor_data = yaml.safe_load(_f)
     _ctrl = _rotor_data["control"]
     col_min_rad = float(_ctrl["col_min_rad"])

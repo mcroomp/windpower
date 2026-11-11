@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 from collections.abc import Callable, Mapping
 import json
+from typing import Any
 import logging
 import math
 import os
@@ -353,7 +354,7 @@ class StackContext:
     telemetry_log:       Path | None  = None
     linkhub_journal:     Path | None  = None
     mavlog_cursor:        str | None  = None
-    initial_state:       dict | None  = None
+    initial_state:       Mapping[str, Any] | None = None
     home_alt_m:          float        = 0.0
     flight_events:       dict         = dataclasses.field(default_factory=dict)
     all_statustext:      list         = dataclasses.field(default_factory=list)

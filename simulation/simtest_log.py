@@ -45,7 +45,7 @@ class BadEventLog:
     """
 
     def __init__(self) -> None:
-        self._events: list[dict] = []
+        self._events: list[dict[str, object]] = []
 
     # ------------------------------------------------------------------ write
     def record(self, kind: str, t: float, phase: str, alt: float, **extra: object) -> None:
@@ -66,7 +66,7 @@ class BadEventLog:
         return False
 
     # ----------------------------------------------------------------- query
-    def of_kind(self, kind: str, phase: str | None = None) -> list[dict]:
+    def of_kind(self, kind: str, phase: str | None = None) -> list[dict[str, object]]:
         evs = [e for e in self._events if e["kind"] == kind]
         if phase is not None:
             evs = [e for e in evs if e["phase"] == phase]
@@ -85,13 +85,14 @@ class BadEventLog:
         # Gather all unique kinds in insertion order
         seen: dict[str, None] = {}
         for e in self._events:
-            seen[e["kind"]] = None
-        parts = []
+            seen[str(e["kind"])] = None
+        parts: list[str] = []
         for kind in seen:
             evs = self.of_kind(kind)
             by_phase: dict[str, int] = {}
             for e in evs:
-                by_phase[e["phase"]] = by_phase.get(e["phase"], 0) + 1
+                phase = str(e["phase"])
+                by_phase[phase] = by_phase.get(phase, 0) + 1
             detail = "+".join(
                 f"{c}({p})" for p, c in sorted(by_phase.items())
             )

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from dynbem import RotorInputs
 
-from simulation.physics_core import PhysicsCore
+from simulation.physics_core import PhysicsCore, PrescribedAeroLoads
 from simulation.param_defaults import thrust_to_coll_rad
 from simulation.tether import SpringDamperTether, TetherInputs, TetherProperties
 from simulation.winch import TorqueWinchController
@@ -88,9 +88,9 @@ class _ConstantAero:
         return None
 
     def step(self, inputs: RotorInputs, state: object, dt: float):
-        return SimpleNamespace(
+        return PrescribedAeroLoads(
             F_world=np.array([0.0, 0.0, -self._lift]),
-            m_hub_world=np.zeros(3), Q_spin=0.0,
+            m_hub_world=np.zeros(3), M_spin=np.zeros(3), Q_spin=0.0,
         ), state
 
 

@@ -20,14 +20,21 @@ Shaft angle convention (alpha_s from horizontal):
     At mu=0.10, alpha_s≈58 (steeply tilted); at mu=0.90, alpha_s≈13 (nearly edge-on).
 """
 
+from __future__ import annotations
+
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 import numpy as np
+from numpy.typing import NDArray
 import matplotlib
 from dynbem import rotor_definition as rd
-from dynbem import create_aero
+from dynbem import create_aero, RotorInputs
 from matplotlib.lines import Line2D
-from matplotlib.axes import Axes
+from simulation.plotting import add_subplot, create_figure
+
+if TYPE_CHECKING:
+    from simulation.plotting import PlotAxes
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -39,8 +46,8 @@ REPO = HERE.parents[2]
 # ---------------------------------------------------------------------------
 # Rotor and model setup
 # ---------------------------------------------------------------------------
-rotor = rd.load("naca_tr_552_c")
-aero  = create_aero(rotor, model="rotor")
+rotor = rd.load(REPO / "simulation" / "rotor_definitions" / "naca_tr_552_c.yaml")
+aero  = create_aero(rotor, model="quasi_static")
 
 RHO   = 1.225  # kg/m^3, NACA sea-level wind-tunnel condition
 R     = rotor.blade.radius_m
@@ -94,20 +101,24 @@ def compute_cl_naca_bem(mu: float, alpha_s_deg: float, pitch_deg: float) -> floa
     wind  = np.array([V, 0.0, 0.0])
     coll  = math.radians(pitch_deg)
 
-    # t=100 bypasses the aero ramp
-    f = aero.compute_forces(coll, 0.0, 0.0, R_hub, np.zeros(3), OMEGA, wind)
-    T = float(np.dot(f[:3], R_hub[:, 2]))
+    inputs = RotorInputs(
+        collective_rad=coll, tilt_lon=0.0, tilt_lat=0.0,
+        R_hub=R_hub, v_hub_world=np.zeros(3), wind_world=wind,
+        omega_rad_s=OMEGA, rho_kg_m3=RHO,
+    )
+    result, _ = aero.step(inputs, aero.initial_rotor_state(), 0.0025)
+    T = float(np.dot(result.F_world, R_hub[:, 2]))
     return T / NORM_NACA
 
 
 # ---------------------------------------------------------------------------
 # Load digitized NACA CSV for Rotor C
 # ---------------------------------------------------------------------------
-def load_naca_cl() -> dict:
+def load_naca_cl() -> dict[float, list[tuple[float, float]]]:
     """Load CL values for Rotor C from naca_tr_552_data.csv.
     Returns dict: pitch_deg -> sorted list of (mu, CL).
     """
-    data = {}
+    data: dict[float, list[tuple[float, float]]] = {}
     csv_path = HERE / "naca_tr_552_data.csv"
     with open(csv_path) as fp:
         for raw_line in fp:
@@ -145,15 +156,16 @@ MU_SCAN = np.linspace(0.08, 0.90, 70)
 colors = plt.cm.RdYlGn(np.linspace(0.12, 0.88, len(PITCHES)))[::-1]
 
 print("\nComputing BEM curves...")
-bem_curves = {}
+bem_curves: dict[float, tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
 for pitch in PITCHES:
-    mus, cls = [], []
+    mu_points: list[float] = []
+    cl_points: list[float] = []
     for mu in MU_SCAN:
         a_s = alpha_s_from_mu(mu)
         cl  = compute_cl_naca_bem(mu, a_s, pitch)
-        mus.append(mu)
-        cls.append(cl)
-    bem_curves[pitch] = (np.array(mus), np.array(cls))
+        mu_points.append(float(mu))
+        cl_points.append(cl)
+    bem_curves[pitch] = (np.array(mu_points), np.array(cl_points))
     mu_mid = 0.30
     cl_mid = compute_cl_naca_bem(mu_mid, alpha_s_from_mu(mu_mid), pitch)
     print(f"  pitch={pitch:+.1f}°  CL(mu=0.10)={compute_cl_naca_bem(0.10, alpha_s_from_mu(0.10), pitch):.3f}"
@@ -178,11 +190,11 @@ for pitch in [4.5, 3.5, 1.5, 0.0]:
 # ---------------------------------------------------------------------------
 # Plot — three panels
 # ---------------------------------------------------------------------------
-fig = plt.figure(figsize=(18, 6))
-gs  = fig.add_gridspec(1, 3, wspace=0.32)
-ax_bem  = fig.add_subplot(gs[0])
-ax_naca = fig.add_subplot(gs[1])
-ax_both = fig.add_subplot(gs[2])
+native_fig, fig = create_figure(plt, (18, 6))
+gs = fig.add_gridspec(1, 3, wspace=0.32)
+_, ax_bem = add_subplot(fig, gs[0])
+_, ax_naca = add_subplot(fig, gs[1])
+_, ax_both = add_subplot(fig, gs[2])
 
 fig.suptitle(
     "NACA TR-552 Rotor C (NACA 4412) — BEM prediction vs digitised data\n"
@@ -193,7 +205,7 @@ fig.suptitle(
 Y_MIN, Y_MAX = -0.08, 0.35
 X_MIN, X_MAX =  0.0,  0.92
 
-def setup_ax(ax: Axes, title: str):
+def setup_ax(ax: PlotAxes, title: str) -> None:
     ax.set_xlim(X_MIN, X_MAX)
     ax.set_ylim(Y_MIN, Y_MAX)
     ax.set_xlabel(r"Advance ratio  $\mu$", fontsize=10)
@@ -220,7 +232,7 @@ ax_bem.legend(title="Pitch setting", fontsize=7, title_fontsize=8,
               loc='upper right', ncol=2)
 ax_bem.annotate(f"CL_alpha={rotor.airfoil.CL_alpha_per_rad:.1f}/rad\nCL0={rotor.airfoil.CL0:.2f}\nCD0={rotor.airfoil.CD0:.3f}",
                 xy=(0.55, 0.26), fontsize=7.5, color='#333333',
-                bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', ec='gray', alpha=0.85))
+                bbox={"boxstyle": "round,pad=0.3", "fc": "lightyellow", "ec": "gray", "alpha": 0.85})
 
 # ── Middle: NACA data ─────────────────────────────────────────────────────────
 naca_pitches_plot = [4.5, 3.5, 3.0, 1.5, 0.0, -1.5, -3.0, -4.5]
@@ -255,7 +267,7 @@ handles = [Line2D([0],[0], color='gray', lw=2, ls='--', label='BEM prediction'),
 ax_both.legend(handles=handles, fontsize=8, loc='upper right')
 ax_both.annotate("BEM tends to\noverpredict at μ>0.3\n(retreating-blade\nreversal not modelled)",
                  xy=(0.55, 0.10), fontsize=7.5, color='#333333',
-                 bbox=dict(boxstyle='round,pad=0.3', fc='#fff8dc', ec='gray', alpha=0.85))
+                 bbox={"boxstyle": "round,pad=0.3", "fc": "#fff8dc", "ec": "gray", "alpha": 0.85})
 
 # Mark RAWES operating range on middle panel too
 for ax in [ax_bem, ax_naca, ax_both]:
@@ -265,5 +277,5 @@ for ax in [ax_bem, ax_naca, ax_both]:
 plt.tight_layout()
 out = HERE / "bem_vs_naca_rotor_c.png"
 fig.savefig(out, dpi=150, bbox_inches='tight')
-plt.close(fig)
+plt.close(native_fig)
 print(f"\nSaved: {out}")

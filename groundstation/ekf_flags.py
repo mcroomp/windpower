@@ -139,7 +139,7 @@ def flag_diff(old: int, new: int) -> str:
     """
     gained = new & ~old
     lost   = old & ~new
-    parts  = []
+    parts: list[str] = []
     if gained:
         parts.append(f"+[{decode_flags(gained)}]")
     if lost:

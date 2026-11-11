@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 import simulation
 from dynbem import QuasiStaticRotorState, RotorInputs, create_aero, rotor_definition
-from dynbem._dynbem import _QuasiStaticBEMLinear
 from simulation.ic import load_ic
+if TYPE_CHECKING:
+    from simulation.physics_core import AeroModel
 
 
 SIM = Path(simulation.__file__).resolve().parent
@@ -35,7 +37,7 @@ def _load_ic() -> SimpleNamespace:
 
 
 def _moment_body(
-    aero: _QuasiStaticBEMLinear,
+    aero: AeroModel[QuasiStaticRotorState],
     state: QuasiStaticRotorState,
     ic: SimpleNamespace,
     tilt_lon: float,

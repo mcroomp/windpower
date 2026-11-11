@@ -752,7 +752,7 @@ def play(
         profile = m.get("profile", m.get("test", "constant"))
         omega_nom = float(m.get("omega_rotor_rads", 28.0))
         dyn_start = _find_dynamics_start(_frames[0])
-        omega_fn, _ = _MEDIATOR_PROFILES.get(profile, _MEDIATOR_PROFILES["constant"])
+        omega_fn = _MEDIATOR_PROFILES.get(profile, _MEDIATOR_PROFILES["constant"])[0]
 
         def _omega(frame_t: float) -> float:
             dynamics_t = max(0.0, frame_t - dyn_start)

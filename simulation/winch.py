@@ -107,7 +107,7 @@ class TorqueWinchController:
     def net_energy_j(self) -> float:
         return self._energy_out_j - self._energy_in_j
 
-    def log_fields(self) -> dict:
+    def log_fields(self) -> dict[str, float]:
         return {"winch_speed_ms": self._speed}
 
 
@@ -283,7 +283,7 @@ class WinchController:
         """Cumulative net energy (harvest minus consumption) [J]."""
         return self._energy_out_j - self._energy_in_j
 
-    def log_fields(self) -> dict:
+    def log_fields(self) -> dict[str, float]:
         """Standard winch state fields for telemetry kwargs."""
         return dict(winch_speed_ms=self._speed)
 
@@ -458,6 +458,6 @@ class GovernedWinchController:
         """Cumulative net energy (harvest minus consumption) [J]."""
         return self._energy_out_j - self._energy_in_j
 
-    def log_fields(self) -> dict:
+    def log_fields(self) -> dict[str, float]:
         """Standard winch state fields for telemetry kwargs."""
         return dict(winch_speed_ms=self._speed)

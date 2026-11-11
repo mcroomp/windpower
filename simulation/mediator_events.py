@@ -89,11 +89,11 @@ class MediatorEventLog:
     def path(self) -> Path | None:
         return self._path
 
-    def read_all(self) -> list[dict]:
+    def read_all(self) -> list[dict[str, Any]]:
         """Read and parse every event line from the file."""
         if self._path is None or not self._path.exists():
             return []
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         for line in self._path.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line:
@@ -106,11 +106,11 @@ class MediatorEventLog:
         """Return True if at least one event with the given name exists."""
         return any(e.get("event") == event for e in self.read_all())
 
-    def get_events(self, event: str) -> list[dict]:
+    def get_events(self, event: str) -> list[dict[str, Any]]:
         """Return all events with the given name, in order."""
         return [e for e in self.read_all() if e.get("event") == event]
 
-    def last_event(self, event: str) -> dict | None:
+    def last_event(self, event: str) -> dict[str, Any] | None:
         """Return the last event with the given name, or None."""
         events = self.get_events(event)
         return events[-1] if events else None

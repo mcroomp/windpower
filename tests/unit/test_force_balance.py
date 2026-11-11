@@ -6,11 +6,11 @@ stationary hub, omega=28 rad/s.
 import math
 
 import numpy as np
-from dynbem import AeroResult
 
 
 from simulation.dynamics import RigidBodyDynamics
 from simulation.frames import build_orb_frame
+from simulation.physics_core import AeroLoads
 from simulation.rotor_physics import require_mass_kg
 from tests.common.aero_probe import load_rotor, make_probe, probe_steady
 
@@ -34,7 +34,7 @@ def _R_tilt(elevation_deg: float) -> np.ndarray:
     return build_orb_frame(body_z)
 
 
-def _thrust_along_normal(result: AeroResult, R_hub: np.ndarray):
+def _thrust_along_normal(result: AeroLoads, R_hub: np.ndarray):
     """Upward thrust opposing body_z (FRD: body_z down).  Positive = upward."""
     return float(-np.dot(result.F_world, R_hub[:, 2]))
 

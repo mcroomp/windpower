@@ -22,7 +22,7 @@ from simulation.controller import (AZ_REF_TAU_S, compute_bz_altitude_hold,
                         slerp_body_z, update_plane_azimuth,
                         YawTrimObserver)
 from groundstation.landing_planner import LandingCommand
-from simulation.physics_core import HubObservation
+from simulation.physics_core import HubObservation, PhysicsStepResult
 from groundstation.pumping_planner import TensionCommand
 from simulation.param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range
 from simulation.telemetry_csv import TelRow, write_csv
@@ -187,7 +187,7 @@ class _MockArdupilotBase:
 
     def step_physics(
         self, runner: PhysicsRunner, dt: float, *, rest_length: float | None = None
-    ) -> dict:
+    ) -> PhysicsStepResult:
         if self._guided_ctrl is None:
             raise RuntimeError("Call enable_guided() before step_physics()")
         obs = runner.observe()
@@ -233,7 +233,7 @@ class _MockArdupilotBase:
         """Backend-specific telemetry field overrides."""
         return {}
 
-    def log(self, runner: PhysicsRunner, sr: dict, *, force: bool = False) -> None:
+    def log(self, runner: PhysicsRunner, sr: PhysicsStepResult, *, force: bool = False) -> None:
         if self.tel_fn is None or self._tel_every is None:
             return
         if force or self._log_step % self._tel_every == 0 or sr.get("ground_contact", False):
@@ -478,7 +478,7 @@ class _LuaBackend(_MockArdupilotBase):
 
     def step(
         self, runner: PhysicsRunner, dt: float, *, rest_length: float | None = None
-    ) -> dict:
+    ) -> PhysicsStepResult:
         if not self._ctrl._target_set:
             obs = runner.observe()
             self._ctrl.set_target_rotation(obs.R, sim_time=runner.t_sim)

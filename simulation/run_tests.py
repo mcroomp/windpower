@@ -242,7 +242,7 @@ def main() -> int:
             + f"  {DIM}({_time_str}){RESET}"
         )
     else:
-        parts = []
+        parts: list[str] = []
         if n_fail:
             parts.append(f"{RED}{BOLD}{n_fail} failed{RESET}")
         if n_err:

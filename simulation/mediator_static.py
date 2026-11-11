@@ -28,7 +28,7 @@ import numpy as np
 
 from simulation.mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from simulation.mediator_events import MediatorEventLog
-from simulation.sitl_interface import SITLInterface
+from simulation.sitl_interface import SITLInterface, SITLState
 
 log = logging.getLogger("mediator_static")
 
@@ -63,10 +63,12 @@ def main() -> None:
     ev.open()
 
     # step_fn ignores servo values — sensor output is always fixed
-    _state = dict(pos_ned=pos, vel_ned=vel, rpy_rad=rpy,
-                  accel_body=accel_body, gyro_body=gyro)
+    _state: SITLState = {
+        "pos_ned": pos, "vel_ned": vel, "rpy_rad": rpy,
+        "accel_body": accel_body, "gyro_body": gyro,
+    }
 
-    def step_fn(_servos: np.ndarray, _t: float):
+    def step_fn(_servos: np.ndarray, _t: float) -> SITLState:
         return _state
 
     n = 0

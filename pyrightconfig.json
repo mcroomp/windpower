@@ -32,6 +32,10 @@
   ],
   "pythonVersion": "3.14",
   "typeCheckingMode": "standard",
+  "strict": [
+    "simulation",
+    "groundstation"
+  ],
   "reportMissingParameterType": "error",
   "reportMissingImports": "warning",
   "reportMissingModuleSource": "none"

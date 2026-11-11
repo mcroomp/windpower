@@ -15,14 +15,14 @@ import threading
 import time
 from pathlib import Path
 from collections.abc import Iterator
-from typing import Protocol, TextIO
+from typing import Any, Protocol, TextIO, cast
 
-from pymavlink import mavutil
+from pymavlink import mavutil  # pyright: ignore[reportMissingTypeStubs]
 import contextlib
 
 
 class _DictMessage(Protocol):
-    def to_dict(self) -> dict: ...
+    def to_dict(self) -> dict[str, Any]: ...
 
 
 def _json_safe(value: object) -> object:
@@ -30,9 +30,12 @@ def _json_safe(value: object) -> object:
     if isinstance(value, (bytes, bytearray)):
         return list(value)
     if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
+        return {
+            key: _json_safe(item)
+            for key, item in cast(dict[object, object], value).items()
+        }
     if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
+        return [_json_safe(item) for item in cast(list[object] | tuple[object, ...], value)]
     return value
 
 
@@ -96,7 +99,7 @@ class MavlinkLogWriter:
 def iter_messages(
     path: str | Path,
     types: list[str] | None = None,
-) -> Iterator[dict]:
+) -> Iterator[dict[str, Any]]:
     """
     Yield message dicts from a mavlink.jsonl file.
 

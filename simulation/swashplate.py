@@ -33,7 +33,7 @@ import math
 import yaml
 import numpy as np
 from dynbem import RotorDefinition
-from simulation.param_defaults import load_collective_phys_range as _load_col_range, _resolve_default_rotor_yaml
+from simulation.param_defaults import load_collective_phys_range as _load_col_range, resolve_default_rotor_yaml
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ def ardupilot_h3_120_forward(
     pitch_norm:     float,
     h_col_min:      float = 1000.0,
     h_col_max:      float = 2000.0,
-) -> tuple:
+) -> tuple[float, float, float]:
     """
     ArduPilot H3-120 forward swashplate mix.
 
@@ -92,7 +92,7 @@ def ardupilot_h3_120_forward(
     collective_offset = (h_col_min - 1000.0) * 0.001
     col_scaled = collective_out * collective_scalar + collective_offset
 
-    out = []
+    out: list[float] = []
     for i in range(3):
         output = _ROLL_F[i] * roll_norm + _PITCH_F[i] * pitch_norm + col_scaled
         out.append(2.0 * output - 1.0)   # rescale [0..1] → [-1..+1]
@@ -110,7 +110,7 @@ def ardupilot_h3_120_inverse(
     s3:        float,
     h_col_min: float = 1000.0,
     h_col_max: float = 2000.0,
-) -> tuple:
+) -> tuple[float, float, float]:
     """
     ArduPilot H3-120 inverse swashplate mix.
 
@@ -336,7 +336,7 @@ class SwashplateServoModel:
         if col_min_rad is None or col_max_rad is None:
             col_min_rad, col_max_rad = _load_col_range()
         if slew_rate_deg_s is None or travel_deg is None:
-            with open(_resolve_default_rotor_yaml(), encoding="utf-8") as _f:
+            with open(resolve_default_rotor_yaml(), encoding="utf-8") as _f:
                 _ctrl = yaml.safe_load(_f)["control"]
             if slew_rate_deg_s is None:
                 slew_rate_deg_s = float(_ctrl["servo_slew_rate_deg_s"])

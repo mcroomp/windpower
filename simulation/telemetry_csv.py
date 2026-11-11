@@ -42,23 +42,99 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from numpy.typing import ArrayLike
+from numpy.typing import NDArray
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, ReadOnly, TypedDict
 from simulation.tether import TetherResult
 
 from simulation.telemetry_columns import (
     COLUMNS,
 )
 
+if TYPE_CHECKING:
+    from simulation.physics_core import AeroLoads
+
 
 # ---------------------------------------------------------------------------
 # TelRow
 # ---------------------------------------------------------------------------
 
+class _TelemetryData(TypedDict, total=False):
+    pos_ned: Sequence[float] | NDArray[np.float64]
+    vel_ned: Sequence[float] | NDArray[np.float64]
+    wind_ned: Sequence[float] | NDArray[np.float64]
+    body_z_eq: Sequence[float] | NDArray[np.float64] | None
+    R: Sequence[Sequence[float]] | NDArray[np.float64] | None
+    rpy: Sequence[float] | NDArray[np.float64]
+    omega_body: Sequence[float] | NDArray[np.float64]
+    accel_world: Sequence[float] | NDArray[np.float64]
+    tether_force: Sequence[float] | NDArray[np.float64]
+    aero_F: Sequence[float] | NDArray[np.float64]
+    net_F: Sequence[float] | NDArray[np.float64]
+    net_M: Sequence[float] | NDArray[np.float64]
+    t_sim: float
+    sitl_time: float
+    frame_count: int
+    phase: str
+    tether_rest_length: float
+    omega_rotor: float
+    tether_tension: float
+    tether_slack: int
+    aero_mx: float
+    aero_my: float
+    aero_mz: float
+    tether_mx: float
+    tether_my: float
+    tether_mz: float
+    collective_rad: float
+    tilt_lon: float
+    tilt_lat: float
+    tension_feedforward_n: float
+    tension_ic_n: float
+    thrust_from_alt_ctrl: float
+    gnd_alt_cmd_m: float
+    winch_speed_ms: float
+    aero_T: float
+    aero_v_axial: float
+    aero_v_inplane: float
+    aero_v_i: float
+    aero_Q_spin: float
+    elevation_rad: float
+    el_correction_rad: float
+    coll_saturated: bool
+    comms_ok: bool
+    alt_pid_integral: float
+    roll_sp_rads: float
+    pitch_sp_rads: float
+    roll_rate_err_rads: float
+    pitch_rate_err_rads: float
+    orbit_radius_m: float
+    orbit_azimuth_rad: float
+    orbit_az_rate_rads: float
+    vel_tangential_mps: float
+    pos_downwind_m: float
+    pos_crosswind_m: float
+    vel_downwind_mps: float
+    vel_crosswind_mps: float
+    body_z_err_deg: float
+    body_z_target_az_rad: float
+    body_z_az_gap_deg: float
+
+
+class _PhysicsStep(TypedDict, total=False):
+    tilt_lon: ReadOnly[float]
+    tilt_lat: ReadOnly[float]
+    aero_result: ReadOnly[AeroLoads | None]
+    tether_force: ReadOnly[Sequence[float] | NDArray[np.float64] | None]
+    tether_moment: ReadOnly[Sequence[float] | NDArray[np.float64] | None]
+    omega_body: ReadOnly[Sequence[float] | NDArray[np.float64] | None]
+    accel_specific_world: ReadOnly[Sequence[float] | NDArray[np.float64] | None]
+    accel_world: ReadOnly[Sequence[float] | NDArray[np.float64] | None]
+
+
 class _PhysicsTelemetry(Protocol):
     @property
-    def hub_state(self) -> Mapping[str, np.ndarray]: ...
+    def hub_state(self) -> Mapping[str, NDArray[np.float64]]: ...
 
     @property
     def tether_result(self) -> TetherResult: ...
@@ -322,17 +398,17 @@ class TelRow:
     # ------------------------------------------------------------------
 
     @property
-    def pos_ned(self) -> np.ndarray:
+    def pos_ned(self) -> NDArray[np.float64]:
         """Hub position NED [m], shape (3,)."""
         return np.array([self.pos_x, self.pos_y, self.pos_z])
 
     @property
-    def vel_ned(self) -> np.ndarray:
+    def vel_ned(self) -> NDArray[np.float64]:
         """Hub velocity NED [m/s], shape (3,)."""
         return np.array([self.vel_x, self.vel_y, self.vel_z])
 
     @property
-    def R(self) -> np.ndarray:
+    def R(self) -> NDArray[np.float64]:
         """Body-to-NED rotation matrix, shape (3, 3)."""
         return np.array([
             [self.r00, self.r01, self.r02],
@@ -341,12 +417,12 @@ class TelRow:
         ])
 
     @property
-    def body_z_eq(self) -> np.ndarray:
+    def body_z_eq(self) -> NDArray[np.float64]:
         """Equilibrium body-z setpoint (NED unit vector), shape (3,)."""
         return np.array([self.bz_eq_x, self.bz_eq_y, self.bz_eq_z])
 
     @property
-    def wind_ned(self) -> np.ndarray:
+    def wind_ned(self) -> NDArray[np.float64]:
         """Ambient wind NED [m/s], shape (3,)."""
         return np.array([self.wind_x, self.wind_y, self.wind_z])
 
@@ -355,8 +431,8 @@ class TelRow:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_tel(cls, d: dict) -> TelRow:
-        """Construct from a make_tel() canonical dict."""
+    def from_tel(cls, d: _TelemetryData) -> TelRow:
+        """Construct from a canonical simulation telemetry mapping."""
         pos  = d.get("pos_ned",   [0.0, 0.0, 0.0])
         vel  = d.get("vel_ned",   [0.0, 0.0, 0.0])
         wind = d.get("wind_ned",  [0.0, 0.0, 0.0])
@@ -466,11 +542,11 @@ class TelRow:
     def from_physics(
         cls,
         runner: _PhysicsTelemetry,
-        step_result: dict,
+        step_result: _PhysicsStep,
         collective_rad: float,
-        wind_ned: Sequence[float] | np.ndarray,
+        wind_ned: Sequence[float] | NDArray[np.float64],
         *,
-        body_z_eq: ArrayLike | None = None,
+        body_z_eq: Sequence[float] | NDArray[np.float64] | None = None,
         phase: str = "",
         tension_feedforward_n: float = 0.0,
         tension_ic_n: float = 0.0,
@@ -512,7 +588,7 @@ class TelRow:
         rate_yaw_pdmod: float = float("nan"),
         rate_yaw_srate: float = float("nan"),
         vel_radial_mps: float = 0.0,
-        net_moment: ArrayLike | None = None,
+        net_moment: Sequence[float] | NDArray[np.float64] | None = None,
         mav_att_roll_deg: float = float("nan"),
         mav_att_pitch_deg: float = float("nan"),
         mav_att_yaw_deg: float = float("nan"),
@@ -574,7 +650,7 @@ class TelRow:
         acc = np.asarray(accel_world, dtype=float) if accel_world is not None else np.zeros(3)
         # Body-frame specific force: what the Pixhawk IMU accelerometer measures.
         acc_body = R.T @ acc
-        bzeq = np.asarray(body_z_eq, dtype=float).tolist() if body_z_eq is not None else [0.0, 0.0, 0.0]
+        bzeq = np.asarray(body_z_eq, dtype=float) if body_z_eq is not None else np.zeros(3)
 
         if tether_force is not None:
             tf = np.asarray(tether_force, dtype=float)
@@ -797,7 +873,7 @@ class TelRow:
             mav_att_target_yaw_rate_rads=float(mav_att_target_yaw_rate_rads),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, float | str]:
         return {col: getattr(self, col) for col in COLUMNS}
 
 
@@ -849,7 +925,7 @@ def _f(s: object) -> float | None:
         return None
 
 
-def _row_from_raw(raw: dict) -> TelRow | None:
+def _row_from_raw(raw: Mapping[str | None, str | list[str] | None]) -> TelRow | None:
     # DictReader returns None for columns missing from an incomplete final line.
     # Mediator telemetry is read while it is still being appended, so ignore that
     # transient row instead of filling missing physics fields with zero.

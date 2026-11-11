@@ -52,14 +52,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from dynbem import RotorDefinition, RotorInputs, OyeBEMModel
-from dynbem._dynbem import _OyeBEMModelLinear, _OyeBEMModelTabulated
 from simulation.controller import HeliCyclicController
 from simulation.dynamics import RigidBodyDynamics
 from simulation.param_defaults import thrust_to_coll_rad
+if TYPE_CHECKING:
+    from simulation.physics_core import AeroModel
 
 
 _G_M_S2 = 9.81
@@ -95,13 +97,13 @@ class StepMetrics:
 # Plant identification (open-loop frequency response)
 # ---------------------------------------------------------------------------
 
-def _settle_inflow(
-    aero: _OyeBEMModelLinear | _OyeBEMModelTabulated,
+def _settle_inflow[State](
+    aero: AeroModel[State],
     omega_spin: float,
     R_hub: np.ndarray,
     n_steps: int = 200,
     dt: float = 0.02,
-) -> object:
+) -> State:
     """Pre-settle the dynamic-inflow states so the Bode probe starts from
     a quasi-static operating point and the first cycles aren't transient.
 

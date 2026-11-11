@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from dynbem import RotorInputs
+from simulation.physics_core import PrescribedAeroLoads
 
 from tests.common.mock_ardupilot import _MockArdupilotBase
 from tests.simtests._rotor_helpers import load_default_rotor
@@ -15,8 +16,8 @@ class _NoAero:
         return None
 
     def step(self, inputs: RotorInputs, state: object, dt: float):
-        return SimpleNamespace(
-            F_world=np.zeros(3), m_hub_world=np.zeros(3), Q_spin=0.0,
+        return PrescribedAeroLoads(
+            F_world=np.zeros(3), m_hub_world=np.zeros(3), M_spin=np.zeros(3), Q_spin=0.0,
         ), state
 
 

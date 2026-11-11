@@ -31,7 +31,7 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, TypedDict, cast
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -39,6 +39,19 @@ from lupa import lua54
 
 from groundstation.rawes_diag import diag_values
 from linkhub_client.messages import MavCmd, MavResult, NamedValueFloat, NamedValueInt
+
+
+class GuidedRateTarget(TypedDict):
+    roll_rate: float
+    pitch_rate: float
+    yaw_rate: float
+
+
+class GuidedTarget(GuidedRateTarget):
+    roll_deg: float
+    pitch_deg: float
+    yaw_deg: float
+    climbrate: float | None
 
 # Wire ids of the MAVLink enumerations the Lua mock exchanges with rawes.lua.
 _MAV_CMD_IDS = {MavCmd.USER_1: 31010, MavCmd.USER_2: 31011}
@@ -350,8 +363,10 @@ class RawesLua:
         _get = self._lua.eval("function(v) return v:x(), v:y(), v:z() end")
         assert callable(_get)
         coordinates = _get(v)
-        assert isinstance(coordinates, tuple) and len(coordinates) == 3
-        x, y, z = coordinates
+        assert isinstance(coordinates, tuple)
+        components = cast(tuple[float, ...], coordinates)
+        assert len(components) == 3
+        x, y, z = components
         return [float(x), float(y), float(z)]
 
     # ── Outputs ───────────────────────────────────────────────────────────
@@ -375,7 +390,7 @@ class RawesLua:
         self._mock.srv_out[int(func)] = float(pwm)
 
     @property
-    def guided_target(self) -> dict | None:
+    def guided_target(self) -> GuidedTarget | None:
         """Latest GUIDED absolute attitude target, or None if not set.
 
         Populated by vehicle:set_target_angle_and_rate_and_throttle in the mock.
@@ -394,7 +409,7 @@ class RawesLua:
         }
 
     @property
-    def guided_rate_target(self) -> dict | None:
+    def guided_rate_target(self) -> GuidedRateTarget | None:
         """Latest GUIDED body-rate target, or None if not set."""
         t = self._mock.guided_rate_target
         if t is None:
@@ -486,7 +501,7 @@ class RawesLua:
     def command_acks(self) -> list[dict[str, MavCmd | MavResult | int]]:
         """COMMAND_ACK messages sent by Lua through mavlink.send_chan, decoded
         to the typed ``MavCmd``/``MavResult`` LinkHub clients see."""
-        acks = []
+        acks: list[dict[str, MavCmd | MavResult | int]] = []
         sent = self._mock.mavlink_sent
         for index in range(1, len(sent) + 1):
             entry = sent[index]

@@ -8,20 +8,22 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from simulation.plotting import add_subplot, create_figure
+
 if TYPE_CHECKING:
-    from matplotlib.axes import Axes
+    from simulation.plotting import PlotAxes
 
 
 def plot_flight_report(
-    pos_history:      list,   # [(t, N, E, D), ...]
-    attitude_history: list,   # [(t, roll_deg, pitch_deg, yaw_deg), ...]
-    servo_history:    list,   # [(t, s1, s2, s3, s4_pwm), ...]
-    events:           dict,   # {label: t_relative_to_obs_start}
-    target:           tuple,  # (N, E, D) target position in LOCAL_NED from home
+    pos_history:      list[tuple[float, float, float, float]],   # [(t, N, E, D), ...]
+    attitude_history: list[tuple[float, float, float, float]],   # [(t, roll_deg, pitch_deg, yaw_deg), ...]
+    servo_history:    list[tuple[float, float, float, float, float]],   # [(t, s1, s2, s3, s4_pwm), ...]
+    events:           dict[str, float],   # {label: t_relative_to_obs_start}
+    target:           tuple[float, float, float],  # (N, E, D) target position in LOCAL_NED from home
     out_path: str | Path,                 # Path or str
     telemetry_path: str | Path | None = None,      # Path or None — mediator per-step CSV
     tether_length_m: float = 200.0,
-    anchor_ned: tuple | None = None, # (N, E, D) anchor position in LOCAL_NED from home.
+    anchor_ned: tuple[float, float, float] | None = None, # (N, E, D) anchor position in LOCAL_NED from home.
                               # When provided, space-time panel shows horizontal
                               # distance from anchor vs altitude above anchor.
 ) -> None:
@@ -63,10 +65,10 @@ def plot_flight_report(
     ds      = [r[3] for r in pos_history]
     disps   = [math.sqrt(n**2 + e**2 + d**2) for n, e, d in zip(ns, es, ds)]
 
-    target_n, target_e, target_d = target
+    _target_n, target_e, target_d = target
 
     # Load mediator telemetry CSV if available
-    telem: dict = {}
+    telem: dict[str, list[float]] = {}
     if telemetry_path is not None and Path(telemetry_path).exists():
         try:
             from simulation.telemetry_csv import read_csv as _read_csv
@@ -93,7 +95,7 @@ def plot_flight_report(
             log.warning("Could not load telemetry CSV: %s", exc)
 
     n_panels = 4 + (2 if telem else 0)
-    fig = plt.figure(figsize=(14, 4 * n_panels + 2))
+    native_fig, fig = create_figure(plt, (14, 4 * n_panels + 2))
     fig.suptitle("RAWES Guided Flight Test — Flight Report", fontsize=14, fontweight="bold")
     gs = gridspec.GridSpec(n_panels, 1, hspace=0.45, top=0.97 - 0.02 * n_panels,
                            bottom=0.05, left=0.08, right=0.97)
@@ -108,7 +110,7 @@ def plot_flight_report(
     t_max = max(ts_pos) if ts_pos else 60.0
     x_min = min(min(events.values(), default=0.0) - 2.0, -2.0)
 
-    def _add_events(ax: Axes):
+    def _add_events(ax: PlotAxes) -> None:
         ax.set_xlim(x_min, t_max + 1.0)
         ylo, yhi = ax.get_ylim()
         for label, t in sorted(events.items(), key=lambda x: x[1]):
@@ -121,7 +123,7 @@ def plot_flight_report(
     # ── Panel 1: Space-time diagram ───────────────────────────────────────────
     import numpy as _np
     t_arr = _np.array(ts_pos)
-    ax1 = fig.add_subplot(gs[0])
+    native_ax1, ax1 = add_subplot(fig, gs[0])
 
     if anchor_ned is not None:
         # Show position relative to anchor: horizontal distance vs altitude.
@@ -139,7 +141,7 @@ def plot_flight_report(
 
         sc = ax1.scatter(horiz, alt_from_anc, c=t_arr, cmap="viridis",
                          s=4, linewidths=0, zorder=3)
-        cb = fig.colorbar(sc, ax=ax1, pad=0.01)
+        cb = fig.colorbar(sc, ax=native_ax1, pad=0.01)
         cb.set_label("Time (s)", fontsize=8)
         cb.ax.tick_params(labelsize=7)
 
@@ -163,7 +165,7 @@ def plot_flight_report(
         a_arr = _np.array(alts)
         sc = ax1.scatter(e_arr, a_arr, c=t_arr, cmap="viridis",
                          s=4, linewidths=0, zorder=3)
-        cb = fig.colorbar(sc, ax=ax1, pad=0.01)
+        cb = fig.colorbar(sc, ax=native_ax1, pad=0.01)
         cb.set_label("Time (s)", fontsize=8)
         cb.ax.tick_params(labelsize=7)
         theta_arc = _np.linspace(0, _np.pi / 2, 200)
@@ -187,7 +189,7 @@ def plot_flight_report(
     ax1.axvline(0, color="black", linewidth=0.5, alpha=0.3)
 
     # ── Panel 2: 3-D displacement ─────────────────────────────────────────────
-    ax2 = fig.add_subplot(gs[1])
+    _, ax2 = add_subplot(fig, gs[1])
     ax2.plot(ts_pos, disps, color="#2ca02c", linewidth=1.8, label="3-D displacement (m)")
     ax2.axhline(5.0, color="#e377c2", linestyle="--", linewidth=1.2,
                 label="Pass threshold (5 m)")
@@ -198,7 +200,7 @@ def plot_flight_report(
     _add_events(ax2)
 
     # ── Panel 3: Attitude (physical orbital frame) ───────────────────────────
-    ax3 = fig.add_subplot(gs[2])
+    _, ax3 = add_subplot(fig, gs[2])
     if telem and "rpy_roll" in telem:
         # Prefer mediator ground-truth physical attitude from telemetry
         ax3.plot(telem["t"], telem["rpy_roll"],  color="#1f77b4", linewidth=1.2, label="Roll  (°)  ← tilt_lat")
@@ -228,11 +230,14 @@ def plot_flight_report(
     _COLL_MAX_DEG   = math.degrees(0.35)   # 20.05°
     _PITCH_GAIN_DEG = math.degrees(0.3)    # 17.19°
 
-    ax4  = fig.add_subplot(gs[3])
+    _, ax4 = add_subplot(fig, gs[3])
     ax4b = ax4.twinx()
     if servo_history:
         ts_srv = [r[0] for r in servo_history]
-        coll_deg, tilt_x_deg, tilt_y_deg, s4_pwm = [], [], [], []
+        coll_deg: list[float] = []
+        tilt_x_deg: list[float] = []
+        tilt_y_deg: list[float] = []
+        s4_pwm: list[float] = []
         for _, p1, p2, p3, p4 in servo_history:
             n1 = (p1 - 1500) / 500
             n2 = (p2 - 1500) / 500
@@ -263,7 +268,7 @@ def plot_flight_report(
 
     # ── Panel 5: Aero thrust / hub altitude / collective (from telemetry) ────
     if telem:
-        ax5 = fig.add_subplot(gs[4])
+        _, ax5 = add_subplot(fig, gs[4])
         ax5b = ax5.twinx()
         ax5.plot(telem["t"], telem["T"],         color="#2ca02c", linewidth=1.0, label="Thrust T (N)")
         ax5.plot(telem["t"], telem["F_z"],        color="#1f77b4", linewidth=0.8,
@@ -280,7 +285,7 @@ def plot_flight_report(
         _add_events(ax5)
 
         # ── Panel 6: Rotor spin & torque / wind components ────────────────────
-        ax6 = fig.add_subplot(gs[5])
+        _, ax6 = add_subplot(fig, gs[5])
         ax6b = ax6.twinx()
         ax6.plot(telem["t"], telem["omega_rotor"],  color="#9467bd", linewidth=1.0, label="ω rotor (rad/s)")
         ax6b.plot(telem["t"], telem["v_axial"],  color="#17becf", linewidth=0.8,
@@ -298,5 +303,5 @@ def plot_flight_report(
         _add_events(ax6)
 
     fig.savefig(str(out_path), dpi=120)
-    plt.close(fig)
+    plt.close(native_fig)
     log.info("Flight report saved → %s", out_path)

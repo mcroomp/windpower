@@ -159,6 +159,12 @@ class TetherConvergenceError(RuntimeError):
     """The requested suspended-line equilibrium could not be resolved."""
 
 
+def _validate_segment_count(segments: object) -> int:
+    if isinstance(segments, bool) or not isinstance(segments, int) or segments < 2:
+        raise ValueError("segments must be an integer >= 2")
+    return segments
+
+
 class TallakQuasiStaticTether:
     """Extensible segmented equilibrium inspired by Tallak Tveide's solver.
 
@@ -174,8 +180,7 @@ class TallakQuasiStaticTether:
         self, *, properties: TetherProperties = TetherProperties(),
         segments: int = 16,
     ) -> None:
-        if isinstance(segments, bool) or not isinstance(segments, int) or segments < 2:
-            raise ValueError("segments must be an integer >= 2")
+        segments = _validate_segment_count(segments)
         self.properties = properties
         self.segments = segments
         self._fractions = ((np.arange(segments) + 0.5) / segments)[:, None]

@@ -29,9 +29,21 @@ import socket
 import struct
 
 import numpy as np
+from numpy.typing import NDArray
+from typing import NotRequired, TypedDict
 
 from simulation.servo_pwm import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
 import contextlib
+
+
+class SITLState(TypedDict):
+    pos_ned: NDArray[np.float64]
+    vel_ned: NDArray[np.float64]
+    rpy_rad: NDArray[np.float64]
+    accel_body: NDArray[np.float64]
+    gyro_body: NDArray[np.float64]
+    rpm_rad_s: NotRequired[float]
+    battery_voltage: NotRequired[float | None]
 
 log = logging.getLogger(__name__)
 

@@ -72,7 +72,7 @@ class RigidBodyDynamics:
 
         self._pos: NDArray[np.float64] = np.asarray(pos0,   dtype=float).copy()
         self._vel: NDArray[np.float64] = np.asarray(vel0,   dtype=float).copy()
-        self._R: NDArray[np.float64] = np.eye(3, dtype=float) if R0 is None else np.asarray(R0, dtype=float).copy()
+        self._rotation: NDArray[np.float64] = np.eye(3, dtype=float) if R0 is None else np.asarray(R0, dtype=float).copy()
         self._omega: NDArray[np.float64] = np.zeros(3, dtype=float) if omega0 is None else np.asarray(omega0, dtype=float).copy()
 
         self._step_count = 0
@@ -178,7 +178,7 @@ class RigidBodyDynamics:
         -------
         dict with keys "pos", "vel", "R", "omega".
         """
-        p, v, R, ow = self._pos, self._vel, self._R, self._omega
+        p, v, R, ow = self._pos, self._vel, self._rotation, self._omega
 
         k1 = self._derivs(p,              v,              R,              ow,              F_world, M_world, omega_spin)
         k2 = self._derivs(p+.5*dt*k1[0], v+.5*dt*k1[1], R+.5*dt*k1[2], ow+.5*dt*k1[3], F_world, M_world, omega_spin)
@@ -188,7 +188,7 @@ class RigidBodyDynamics:
         c = dt / 6.0
         self._pos   = p  + c * (k1[0] + 2*k2[0] + 2*k3[0] + k4[0])
         self._vel   = v  + c * (k1[1] + 2*k2[1] + 2*k3[1] + k4[1])
-        self._R     = R  + c * (k1[2] + 2*k2[2] + 2*k3[2] + k4[2])
+        self._rotation = R + c * (k1[2] + 2*k2[2] + 2*k3[2] + k4[2])
         self._omega = ow + c * (k1[3] + 2*k2[3] + 2*k3[3] + k4[3])
 
         # Ground floor: prevent hub from falling through altitude floor.
@@ -205,14 +205,14 @@ class RigidBodyDynamics:
         # Periodic SVD re-orthogonalisation to suppress R drift
         self._step_count += 1
         if self._step_count >= self._reorth:
-            U, _, Vt = np.linalg.svd(self._R)
-            self._R = U @ Vt
+            U, _, Vt = np.linalg.svd(self._rotation)
+            self._rotation = U @ Vt
             self._step_count = 0
 
         return {
             "pos":   self._pos.copy(),
             "vel":   self._vel.copy(),
-            "R":     self._R.copy(),
+            "R":     self._rotation.copy(),
             "omega": self._omega.copy(),
         }
 
@@ -226,9 +226,22 @@ class RigidBodyDynamics:
         return {
             "pos":   self._pos.copy(),
             "vel":   self._vel.copy(),
-            "R":     self._R.copy(),
+            "R":     self._rotation.copy(),
             "omega": self._omega.copy(),
         }
+
+    def set_state(
+        self,
+        pos: NDArray[np.float64],
+        vel: NDArray[np.float64],
+        rotation: NDArray[np.float64],
+        omega: NDArray[np.float64],
+    ) -> None:
+        """Synchronize the integrator with a prescribed kinematic state."""
+        self._pos[:] = pos
+        self._vel[:] = vel
+        self._rotation[:] = rotation
+        self._omega[:] = omega
 
 
 # ---------------------------------------------------------------------------
