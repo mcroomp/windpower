@@ -140,7 +140,8 @@ class TestSlewLimiting:
         """Over enough steps the collective must arrive at the commanded value."""
         m = _make()
         target = -0.10
-        for _ in range(2000):   # 5 s at 400 Hz is more than enough
+        result = m.step(target, 0.0, 0.0, _DT)
+        for _ in range(1999):   # 5 s at 400 Hz is more than enough
             result = m.step(target, 0.0, 0.0, _DT)
         assert math.isclose(result[0], target, abs_tol=1e-6)
 

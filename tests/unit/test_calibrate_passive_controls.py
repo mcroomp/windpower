@@ -471,6 +471,7 @@ def test_passive_target_composes_offsets_from_initial_quaternion():
         yaw_deg=yaw,
     )
 
+    messages: list[tuple[str, float]] = []
     for _ in range(7):
         messages = _adjust_passive_target(target, "roll", 1)
     for _ in range(7):

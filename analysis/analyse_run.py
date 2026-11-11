@@ -582,6 +582,7 @@ def _print_mediator(r: RunReport, fl: FlightLog | None = None) -> None:
     #   (b) RAWES_THR NVF not received — Lua using wrong _ic_thrust
     if damp_rows:
         _ic_om = None
+        _ic_thr: float | None = None
         _ic_col = None
         _ic_tlon = None
         _ic_tlat = None
@@ -596,7 +597,7 @@ def _print_mediator(r: RunReport, fl: FlightLog | None = None) -> None:
 
         print()
         print("  -- Kinematic phase timeseries (omega / collective / servo_s3) --")
-        if _ic_om is not None:
+        if _ic_om is not None and _ic_thr is not None:
             print(
                 f"    IC file: omega_spin={_ic_om:.2f} rad/s  eq_thrust={_ic_thr:.4f}"
             )

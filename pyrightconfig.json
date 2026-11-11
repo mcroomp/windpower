@@ -31,7 +31,7 @@
     "linkhub_client/src"
   ],
   "pythonVersion": "3.14",
-  "typeCheckingMode": "basic",
+  "typeCheckingMode": "standard",
   "reportMissingParameterType": "error",
   "reportMissingImports": "warning",
   "reportMissingModuleSource": "none"

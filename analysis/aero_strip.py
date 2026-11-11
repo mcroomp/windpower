@@ -164,13 +164,15 @@ class StripThrust:
 
         # Glauert induced velocity on whole disk
         v_i = 0.0
+        Q_strips = np.zeros(self.n_strips)
+        CL_vals: list[float] = []
         for _ in range(n_iter):
             v_i = self._glauert_vi(T_total, v_ax, v_ip)
             v_eff = v_ax + v_i
 
             T_strips = np.zeros(self.n_strips)
             Q_strips = np.zeros(self.n_strips)
-            CL_vals  = []
+            CL_vals = []
             for idx, r in enumerate(self.r_i):
                 v_tan   = omega * r
                 v_loc   = math.sqrt(v_tan**2 + v_eff**2)

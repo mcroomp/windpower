@@ -222,6 +222,7 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
     # Run a few steps with zero rate command so the servo settles to trim.
     omega_body_zero = np.zeros(3)
     trim_thrust = coll_rad_to_thrust(-0.05)
+    tlon, tlat = trim.tilt_lon, trim.tilt_lat
     for _ in range(200):
         tlon, tlat, _ = acro.step_from_thrust(
             thrust_cmd=trim_thrust,

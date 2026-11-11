@@ -49,11 +49,20 @@ import time
 import warnings
 import io
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import simulation as _simulation_pkg
 from viz3d.telemetry import TelemetryFrame, CSVSource
 from dynbem import rotor_definition as _rd
+
+if TYPE_CHECKING:
+    from vtkmodules.vtkCommonCore import vtkLogger as _VtkLogger
+    from vtkmodules.vtkRenderingCore import (
+        vtkActor as _VtkActor,
+        vtkPolyDataMapper as _VtkPolyDataMapper,
+        vtkRenderer as _VtkRenderer,
+    )
 
 # Suppress warnings early (before importing VTK/PyVista)
 warnings.filterwarnings("ignore")
@@ -66,6 +75,10 @@ os.environ["VTK_LOGGING_LEVEL"] = "0"
 _stderr_backup = sys.stderr
 sys.stderr = io.StringIO()
 
+vtkRenderer: type[_VtkRenderer] | None = None
+vtkPolyDataMapper: type[_VtkPolyDataMapper] | None = None
+vtkActor: type[_VtkActor] | None = None
+vtkLogger: type[_VtkLogger] | None = None
 try:
     from vtkmodules.vtkRenderingCore import (
         vtkRenderer,
@@ -91,7 +104,7 @@ except ImportError:
     sys.exit(1)
 
 # Suppress VTK/PyVista debug and warning messages
-if _HAS_VTK:
+if vtkLogger is not None:
     with contextlib.suppress(Exception):
         vtkLogger.SetStderrVerbosity(vtkLogger.VERBOSITY_OFF)
 
@@ -726,7 +739,7 @@ class RAWESVisualizer:
         self._pos_history = np.array([_to_viz(f.pos_ned) for f in frames])
         self._spin_angles = self._integrate_spin()
         self._energy = self._integrate_energy()
-        self._inset_ren: vtkRenderer | None = None
+        self._inset_ren: _VtkRenderer | None = None
         self._plotter: pv.Plotter | None = None
 
     # ------------------------------------------------------------------
@@ -1398,7 +1411,7 @@ class RAWESVisualizer:
         always oriented exactly as the real swashplate is in the world.
         _sync_inset_camera() keeps the camera angle matching the main view.
         """
-        if not _HAS_VTK:
+        if vtkRenderer is None:
             return
         ren = vtkRenderer()
         ren.SetViewport(0.72, 0.02, 0.98, 0.30)
@@ -1570,8 +1583,10 @@ class RAWESVisualizer:
 
     def _inset_add(
         self, mesh: pv.PolyData, color: str, opacity: float = 1.0
-    ) -> vtkActor:
+    ) -> _VtkActor:
         """Add a mesh to the inset renderer; return the raw vtkActor."""
+        assert vtkPolyDataMapper is not None
+        assert vtkActor is not None
         mapper = vtkPolyDataMapper()
         mapper.SetInputData(mesh)
         actor = vtkActor()

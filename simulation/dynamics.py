@@ -242,6 +242,7 @@ if __name__ == "__main__":
 
     W = 5.0 * 9.81  # weight [N]
     dt = 2.5e-3
+    s = dyn.state
 
     for _ in range(400):   # 1 second
         s = dyn.step(
@@ -262,6 +263,7 @@ if __name__ == "__main__":
         vel0   = [0.0, 0.0,   0.0],
         omega0 = [0.0, 0.0,   0.0],
     )
+    s2 = dyn2.state
     for _ in range(400):
         s2 = dyn2.step(F_world=np.zeros(3), M_world=np.zeros(3), dt=dt)
 

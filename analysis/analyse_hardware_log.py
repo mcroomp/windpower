@@ -188,17 +188,16 @@ def _plot(data: dict[str, list], path: str) -> None:
     fig = plt.figure(figsize=(14, 13))
     fig.suptitle(f"Hardware log: {os.path.basename(path)}", fontsize=12)
     gs = gridspec.GridSpec(5, 1, hspace=0.50)
+    time_keys = ("rate_t", "pidr_t", "rcou_t", "rcin_t", "hrsc_t", "imu0_t", "imu1_t")
+    t0 = next((data[key][0] for key in time_keys if data[key]), 0.0)
 
     # -- Panel 1: yaw rate ----------------------------------------------------
     ax1 = fig.add_subplot(gs[0])
     if data["rate_t"]:
-        t0 = data["rate_t"][0]
         t  = [x - t0 for x in data["rate_t"]]
         ax1.plot(t, data["rate_ydes"], "b--", lw=0.8, label="YDes (setpoint)")
         ax1.plot(t, data["rate_y"],    "r",   lw=1.0, label="Y (actual)")
     if data["pidr_t"]:
-        if not data["rate_t"]:
-            t0 = data["pidr_t"][0]
         t = [x - t0 for x in data["pidr_t"]]
         ax1.plot(t, data["pidr_err"], "g", lw=0.8, alpha=0.7, label="PIDR Err")
     ax1.set_ylabel("deg/s")

@@ -230,7 +230,7 @@ locked tarball URLs, rather than contacting the public npm registry directly.
 If an older uv reports no download for the pinned Python release, update uv
 using its owning package manager (on Windows, `winget upgrade --id astral-sh.uv`).
 
-Ruff and basic-mode Pyright gate local builds and CI. Their pytest `lint` category
+Ruff and standard-mode Pyright gate local builds and CI. Their pytest `lint` category
 is off by default; enable it with `--run-lint`. See [Python linting](design/testing.md#python-linting) for the
 modernization + simplification profile and standalone commands.
 

@@ -328,6 +328,7 @@ def _run_with_constant_tether_force(
     anchor     = np.zeros(3)
 
     pulse_F = np.zeros(3)
+    pulse_t0 = pulse_t1 = 0.0
     if force_pulse is not None:
         pulse_t0, pulse_t1, pulse_F = force_pulse
         pulse_F = np.asarray(pulse_F, dtype=float)
