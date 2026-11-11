@@ -46,8 +46,9 @@ Use the commands and selection guidance in
 
 ## Type checking
 
-The entire package, including reference scripts, uses strict Pyright checking
-through [pyrightconfig.json](../pyrightconfig.json). From the repository root:
+The `simulation` package (including reference scripts) and `groundstation`
+package use strict Pyright checking through [pyrightconfig.json](../pyrightconfig.json).
+From the repository root:
 
 ```
 uv run pyright simulation

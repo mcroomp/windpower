@@ -141,6 +141,9 @@ workspace folder, go straight to a terminal command (`grep`/`sed`/`rg` via
   settings, and user-file list, then retry one diagnostic serially.
 - If even one serial Pylance request times out, restart Pylance before retrying.
   Do not send more concurrent requests to a server that is already unresponsive.
+- Pylance can be flaky or unavailable. If restarting it does not help, or it is
+  not installed, continue with the repository's CLI Pyright and test commands
+  instead. Do not treat unavailable editor diagnostics as passing checks.
 
 ## Documentation Ownership (Single Source of Truth)
 
@@ -228,7 +231,9 @@ still verified. See `design/sitl_testing.md` for the list.
   tool, infer the missing result, skip the validation, or continue through an
   alternate path merely to make progress. Restore the intended tool and rerun the
   original operation. If the failure cannot be understood and fixed, stop and ask
-  the user to investigate rather than bypassing it.
+  the user to investigate rather than bypassing it. Pylance is the exception
+  described in [Pylance Responsiveness](#pylance-responsiveness); this exception
+  does not waive CLI type-checking or test requirements.
 - **Critical — the agent may run in either Windows or WSL, but every Docker
   operation must run through WSL; never use or probe Docker Desktop's native
   Windows engine.** Do not invoke `wsl` manually. When launched from Windows,
