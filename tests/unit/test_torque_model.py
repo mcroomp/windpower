@@ -23,6 +23,7 @@ Tests
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 
 # simulation/ is two levels up from tests/unit/
@@ -36,8 +37,8 @@ TMAX = 30.0           # [s] used for steady-state checks
 
 
 def _simulate(
-    omega_rotor_fn,   # callable(t: float) -> float
-    throttle_fn,      # callable(state: m.HubState, t: float) -> float
+    omega_rotor_fn: Callable[[float], float],
+    throttle_fn: Callable[[m.HubState, float], float],
     params: m.HubParams | None = None,
     t_end: float = TMAX,
     dt: float = DT,

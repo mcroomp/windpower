@@ -151,7 +151,7 @@ def test_vertical_hover_feasibility():
     (2.0, 100.0),
     (3.0, 150.0),
 ])
-def test_powered_descent_force_balance(v_desc_ms, tether_n):
+def test_powered_descent_force_balance(v_desc_ms: float, tether_n: float):
     """
     Hub descending at v_desc_ms m/s (NED vel_z = +v_desc_ms).
     Winch tether pulls down at tether_n N.

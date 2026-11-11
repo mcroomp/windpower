@@ -11,7 +11,8 @@ import numpy as np
 from numpy.typing import ArrayLike
 from simulation.frames import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
 from simulation.swashplate import SwashplateServoModel
-from dynbem     import RotorInputs
+from dynbem     import RotorDefinition, RotorInputs
+from simulation.physics_core import AeroModel
 from simulation.param_defaults import load_ap_params as _load_ap_params
 from simulation.param_defaults import load_collective_phys_range as _load_col_range
 from arduloop import HeliRateController, HeliParams, RateAxisParams
@@ -510,7 +511,7 @@ class HeliCyclicController:
 
     def __init__(
         self,
-        rotor,
+        rotor: RotorDefinition,
         P:              float = 0.67,
         I:              float = 0.15,  # noqa: E741 - matches the ArduPilot rate-gain parameter suffix
         D:              float = 0.02,
@@ -651,7 +652,7 @@ class HeliCyclicController:
 # ---------------------------------------------------------------------------
 
 def col_min_for_altitude_rad(
-    aero,
+    aero: AeroModel[object],
     xi_deg:        float,
     mass_kg:       float,
     omega:         float,

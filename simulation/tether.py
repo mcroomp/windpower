@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 DEFAULT_TETHER_MODEL = "tallak_quasi_static"
@@ -202,7 +203,9 @@ class TallakQuasiStaticTether:
             tangents = self._tangents
             lengths = ds * (1.0 + self._segment_tensions / p.axial_stiffness_n)
 
-        def segment_loads(directions: np.ndarray, spans: np.ndarray) -> np.ndarray:
+        def segment_loads(
+            directions: NDArray[np.float64], spans: NDArray[np.float64],
+        ) -> NDArray[np.float64]:
             # Interpolate endpoint motion; axial material slip vanishes when
             # projected onto the local normal in this transverse-drag model.
             relative = inputs.wind_ned - velocities
@@ -213,7 +216,7 @@ class TallakQuasiStaticTether:
             )
             return drag + p.linear_mass_kg_m * ds * inputs.gravity_ned
 
-        loads = segment_loads(tangents, lengths)
+        loads: NDArray[np.float64] = segment_loads(tangents, lengths)
         if not np.any(loads):
             if distance <= inputs.rest_length_m:
                 return TetherResult.unloaded(inputs)
@@ -233,15 +236,17 @@ class TallakQuasiStaticTether:
             float(np.linalg.norm(total_load)) * distance / max(8.0 * sag, 1.0),
             0.01,
         )
-        anchor_force = (
+        anchor_force: NDArray[np.float64] = (
             self._anchor_force.copy() if self._anchor_force is not None
             else initial_tension * chord / distance + 0.5 * total_load
         )
         residual_norm = float("inf")
         for iteration in range(1, 81):
-            offsets = np.cumsum(loads, axis=0) - 0.5 * loads
+            offsets: NDArray[np.float64] = np.cumsum(loads, axis=0) - 0.5 * loads
 
-            def geometry(force: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            def geometry(
+                force: NDArray[np.float64],
+            ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
                 tensions = force - offsets
                 magnitudes = np.linalg.norm(tensions, axis=1)
                 if np.any(magnitudes < 1e-12):

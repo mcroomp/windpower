@@ -29,7 +29,7 @@ try:
 except ImportError:
     sys.exit("PyVista not found. Run: uv sync --dev --extra simulation")
 
-from viz3d.telemetry import CSVSource
+from viz3d.telemetry import CSVSource, TelemetrySource
 from viz3d.visualize_3d import RAWESVisualizer, fit_camera
 
 # Ensure simulation/ is on sys.path when run from anywhere
@@ -59,7 +59,7 @@ def _parse_vec3(s: str) -> tuple[float, float, float]:
 
 
 def render(
-    source,
+    source: TelemetrySource,
     out_path: Path,
     fps: int = 20,
     speed: int = 2,

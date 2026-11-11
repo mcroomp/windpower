@@ -11,11 +11,14 @@ from linkhub_client.messages import (
     EkfStatusReport,
     Heartbeat,
     MavAutopilot,
+    MavDataStream,
     MavModeFlag,
+    Message,
     MavResult,
     MavState,
     MavSysStatusSensor,
     MavType,
+    RawMessage,
     ServoOutputRaw,
     Statustext,
     SysStatus,
@@ -61,11 +64,13 @@ def test_hardware_profile_uses_front_elevator_hr3_layout():
     assert {name: _config_target_params(use_all=False)[name] for name in expected} == expected
 
 
-def test_arm_command_uses_normal_arm_and_bounded_disarm(monkeypatch):
+def test_arm_command_uses_normal_arm_and_bounded_disarm(
+    monkeypatch: pytest.MonkeyPatch,
+):
     events = []
 
     class Session:
-        def set_mode(self, mode):
+        def set_mode(self, mode: int):
             events.append(("mode", mode))
 
     monkeypatch.setattr(
@@ -94,11 +99,13 @@ def test_arm_command_uses_normal_arm_and_bounded_disarm(monkeypatch):
     ]
 
 
-def test_arm_command_can_explicitly_bypass_prearm_checks(monkeypatch):
+def test_arm_command_can_explicitly_bypass_prearm_checks(
+    monkeypatch: pytest.MonkeyPatch,
+):
     events = []
 
     class Session:
-        def set_mode(self, mode):
+        def set_mode(self, mode: int):
             events.append(("mode", mode))
 
     monkeypatch.setattr(
@@ -122,7 +129,7 @@ def test_arm_command_can_explicitly_bypass_prearm_checks(monkeypatch):
     ]
 
 
-def test_disarm_command_falls_back_to_force(monkeypatch):
+def test_disarm_command_falls_back_to_force(monkeypatch: pytest.MonkeyPatch):
     events = []
     monkeypatch.setattr(
         calibrate_repl,
@@ -135,7 +142,9 @@ def test_disarm_command_falls_back_to_force(monkeypatch):
     assert events == [False, True]
 
 
-def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(monkeypatch):
+def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(
+    monkeypatch: pytest.MonkeyPatch,
+):
     class Session:
         _target_system = 1
         _target_component = 1
@@ -146,7 +155,7 @@ def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(monkeypatch):
         def vehicle_status(self):
             return {"base_mode": frozenset(), "custom_mode": 1}
 
-        def get_param(self, name):
+        def get_param(self, name: str):
             return {
                 "RAWES_MODE": 0.0,
                 "H_FLYBAR_MODE": 1.0,
@@ -156,15 +165,20 @@ def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(monkeypatch):
                 "SERVO9_MIN": 1000.0,
             }[name]
 
-        def send_message(self, _message):
+        def send_message(self, _message: Message | RawMessage):
             pass
-        def request_data_stream(self, _stream, _rate_hz):
+        def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
             pass
 
         def current_cursor(self):
             return "v1:10"
 
-        def read_messages(self, after, _message_types, **_kwargs):
+        def read_messages(
+            self,
+            after: str,
+            _message_types: str | list[str] | tuple[str, ...] | set[str],
+            **_kwargs: object,
+        ):
             self.cursors.append(after)
             if len(self.cursors) == 1:
                 return MessageBatch((), "v1:11", _CLOCK)
@@ -184,7 +198,9 @@ def test_verify_safe_off_keeps_reading_after_empty_filtered_batch(monkeypatch):
     assert session.cursors == ["v1:10", "v1:11"]
 
 
-def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
+def test_disarm_enters_acro_safe_off_after_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+):
     events = []
 
     class Session:
@@ -202,19 +218,24 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
                 "SERVO9_MIN": 1000.0,
             }
 
-        def send_message(self, _message):
+        def send_message(self, _message: Message | RawMessage):
             pass
-        def request_data_stream(self, _stream, _rate_hz):
+        def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
             pass
 
-        def command(self, *_args, **_kwargs):
+        def command(self, *_args: object, **_kwargs: object):
             events.append("disarm-command")
             return {"result": MavResult.ACCEPTED}
 
         def current_cursor(self):
             return "v1:0"
 
-        def read_messages(self, _after, message_types, **_kwargs):
+        def read_messages(
+            self,
+            _after: str,
+            message_types: str | list[str] | tuple[str, ...] | set[str],
+            **_kwargs: object,
+        ):
             if "SERVO_OUTPUT_RAW" in message_types:
                 return MessageBatch((ServoOutputRaw(servo9_raw=0),), "v1:2", _CLOCK)
             return MessageBatch((Heartbeat(
@@ -225,15 +246,15 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
                 system_status=MavState.STANDBY,
             ),), "v1:1", _CLOCK)
 
-        def set_param(self, name, value):
+        def set_param(self, name: str, value: int | float):
             events.append(("set-param", name, value))
             self.params[name] = value
             return True
 
-        def get_param(self, name):
+        def get_param(self, name: str):
             return self.params[name]
 
-        def set_mode(self, mode):
+        def set_mode(self, mode: int):
             events.append(("set-mode", mode))
 
         def vehicle_status(self):
@@ -251,17 +272,25 @@ def test_disarm_enters_acro_safe_off_after_confirmation(monkeypatch):
     ]
 
 
-def test_arm_rejection_prints_named_result_and_fc_reason(monkeypatch, capsys):
+def test_arm_rejection_prints_named_result_and_fc_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
     class Session:
         generation = 7
 
         def current_cursor(self):
             return "v1:10"
 
-        def command(self, *_args, **_kwargs):
+        def command(self, *_args: object, **_kwargs: object):
             return {"result": MavResult.FAILED}
 
-        def read_messages(self, after, message_types, **_kwargs):
+        def read_messages(
+            self,
+            after: str,
+            message_types: list[str],
+            **_kwargs: object,
+        ):
             assert after == "v1:10"
             assert message_types == ["STATUSTEXT"]
             assert _kwargs["expected_generation"] == 7
@@ -279,7 +308,9 @@ def test_arm_rejection_prints_named_result_and_fc_reason(monkeypatch, capsys):
     assert "[FC] Arm: Motor Interlock Enabled" in output
 
 
-def test_print_status_decodes_typed_heartbeat_ekf_and_sensor_flags(capsys):
+def test_print_status_decodes_typed_heartbeat_ekf_and_sensor_flags(
+    capsys: pytest.CaptureFixture[str],
+):
     motor_outputs = MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS
     replies = {
         "HEARTBEAT": Heartbeat(
@@ -305,15 +336,20 @@ def test_print_status_decodes_typed_heartbeat_ekf_and_sensor_flags(capsys):
         def current_cursor(self):
             return "v1:0"
 
-        def send_message(self, _message):
+        def send_message(self, _message: Message | RawMessage):
             pass
-        def request_data_stream(self, _stream, _rate_hz):
+        def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
             pass
 
-        def get_param(self, _name):
+        def get_param(self, _name: str):
             return None
 
-        def read_messages(self, after, message_types, **_kwargs):
+        def read_messages(
+            self,
+            after: str,
+            message_types: str,
+            **_kwargs: object,
+        ):
             message = replies.get(message_types)
             return MessageBatch(
                 () if message is None else (message,), after, _CLOCK,
@@ -329,7 +365,10 @@ def test_print_status_decodes_typed_heartbeat_ekf_and_sensor_flags(capsys):
     assert "motor outputs          present=True  enabled=True  [WARN] unhealthy" in output
 
 
-def test_wait_for_disarmed_uses_linkhub_vehicle_snapshot(monkeypatch, capsys):
+def test_wait_for_disarmed_uses_linkhub_vehicle_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
     class Session:
         def vehicle_status(self):
             return {"base_mode": frozenset()}
@@ -344,7 +383,9 @@ def test_wait_for_disarmed_uses_linkhub_vehicle_snapshot(monkeypatch, capsys):
     assert "Vehicle already disarmed" in capsys.readouterr().out
 
 
-def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
+def test_disarm_corrects_flybar_mode_before_selecting_acro(
+    monkeypatch: pytest.MonkeyPatch,
+):
     events = []
 
     class Session:
@@ -362,18 +403,23 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
                 "SERVO9_MIN": 1000.0,
             }
 
-        def send_message(self, _message):
+        def send_message(self, _message: Message | RawMessage):
             pass
-        def request_data_stream(self, _stream, _rate_hz):
+        def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
             pass
 
-        def command(self, *_args, **_kwargs):
+        def command(self, *_args: object, **_kwargs: object):
             return {"result": MavResult.ACCEPTED}
 
         def current_cursor(self):
             return "v1:0"
 
-        def read_messages(self, _after, message_types, **_kwargs):
+        def read_messages(
+            self,
+            _after: str,
+            message_types: str | list[str] | tuple[str, ...] | set[str],
+            **_kwargs: object,
+        ):
             if "SERVO_OUTPUT_RAW" in message_types:
                 return MessageBatch((ServoOutputRaw(servo9_raw=0),), "v1:2", _CLOCK)
             return MessageBatch((Heartbeat(
@@ -384,15 +430,15 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
                 system_status=MavState.STANDBY,
             ),), "v1:1", _CLOCK)
 
-        def get_param(self, name):
+        def get_param(self, name: str):
             return self.params[name]
 
-        def set_param(self, name, value):
+        def set_param(self, name: str, value: int | float):
             events.append(("set-param", name, value))
             self.params[name] = value
             return True
 
-        def set_mode(self, mode):
+        def set_mode(self, mode: int):
             events.append(("set-mode", mode))
 
         def vehicle_status(self):
@@ -410,11 +456,13 @@ def test_disarm_corrects_flybar_mode_before_selecting_acro(monkeypatch):
     ]
 
 
-def test_safety_shutdown_skips_disarm_when_already_disarmed(monkeypatch):
+def test_safety_shutdown_skips_disarm_when_already_disarmed(
+    monkeypatch: pytest.MonkeyPatch,
+):
     events = []
 
     class Session:
-        def set_param(self, name, value):
+        def set_param(self, name: str, value: int | float):
             events.append(("set-param", name, value))
             return True
 
@@ -451,16 +499,18 @@ def test_safety_shutdown_skips_disarm_when_already_disarmed(monkeypatch):
     ]
 
 
-def test_safety_shutdown_force_disarms_when_normal_disarm_fails(monkeypatch):
+def test_safety_shutdown_force_disarms_when_normal_disarm_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
     events = []
 
     class Session:
-        def set_param(self, _name, _value):
+        def set_param(self, _name: str, _value: int | float):
             return True
 
-        def send_message(self, _message):
+        def send_message(self, _message: Message | RawMessage):
             pass
-        def request_data_stream(self, _stream, _rate_hz):
+        def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
             pass
 
     monkeypatch.setattr(calibrate_run, "_send_set_servo", lambda *_args: None)
@@ -494,7 +544,9 @@ def test_hr3_manual_mixer_matches_physical_servo_positions():
     assert s3 == pytest.approx(0.0)
 
 
-def test_swash_info_uses_current_collective_params_and_hr3_diagram(capsys):
+def test_swash_info_uses_current_collective_params_and_hr3_diagram(
+    capsys: pytest.CaptureFixture[str],
+):
     class Session:
         _target_system = 1
         _target_component = 1
@@ -502,7 +554,7 @@ def test_swash_info_uses_current_collective_params_and_hr3_diagram(capsys):
         def __init__(self):
             self.requested_params = []
 
-        def get_param(self, name):
+        def get_param(self, name: str):
             self.requested_params.append(name)
             return {
                 "H_SW_TYPE": 3,
@@ -524,15 +576,15 @@ def test_swash_info_uses_current_collective_params_and_hr3_diagram(capsys):
                 "H_SV_MAN": 0,
             }.get(name)
 
-        def send_message(self, _message):
+        def send_message(self, _message: Message | RawMessage):
             pass
-        def request_data_stream(self, _stream, _rate_hz):
+        def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
             pass
 
         def current_cursor(self):
             return "v1:0"
 
-        def read_messages(self, *_args, **_kwargs):
+        def read_messages(self, *_args: object, **_kwargs: object):
             return MessageBatch(
                 (ServoOutputRaw(servo1_raw=1245, servo2_raw=1062, servo3_raw=1000, servo9_raw=1000),),
                 "v1:1", _CLOCK,
@@ -558,7 +610,9 @@ def test_bounded_swash_sweep_never_exceeds_measured_envelope():
     assert all(1257 <= pwm <= 1777 for point in waypoints for pwm in point)
 
 
-def test_fit_swash_range_converges_from_measured_extrema(monkeypatch):
+def test_fit_swash_range_converges_from_measured_extrema(
+    monkeypatch: pytest.MonkeyPatch,
+):
     class Session:
         def __init__(self):
             self.params = {
@@ -570,11 +624,11 @@ def test_fit_swash_range_converges_from_measured_extrema(monkeypatch):
                 "H_CYC_MAX": 1000.0,
             }
 
-        def set_param(self, name, value):
+        def set_param(self, name: str, value: int | float):
             self.params[name] = value
             return True
 
-        def get_param(self, name):
+        def get_param(self, name: str):
             return self.params.get(name)
 
     measurements = iter(((1258, 1777), (1260, 1774)))

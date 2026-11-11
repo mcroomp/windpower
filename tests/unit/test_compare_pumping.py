@@ -9,7 +9,7 @@ def test_comparison_columns_are_canonical():
     assert set(KEY_COLS) <= set(COLUMNS)
 
 
-def test_bucket_averages_and_comparison_output(capsys):
+def test_bucket_averages_and_comparison_output(capsys: pytest.CaptureFixture[str]) -> None:
     rows = [
         {"t_sim": str(t), "phase": "reel_out", **dict.fromkeys(KEY_COLS, str(value))}
         for t, value in [(0.0, 1.0), (0.5, 3.0)]

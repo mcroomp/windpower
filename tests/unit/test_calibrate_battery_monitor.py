@@ -1,3 +1,5 @@
+import pytest
+
 from calibrate.repl import _cmd_battery
 
 
@@ -16,7 +18,9 @@ class _Session:
         return self.current
 
 
-def test_battery_monitor_off_disables_and_warns_reboot_required(capsys):
+def test_battery_monitor_off_disables_and_warns_reboot_required(
+    capsys: pytest.CaptureFixture[str],
+):
     session = _Session(4.0)
 
     _cmd_battery(session, ["monitor", "off"])
@@ -27,7 +31,9 @@ def test_battery_monitor_off_disables_and_warns_reboot_required(capsys):
     assert "reboot-required" in output
 
 
-def test_battery_monitor_on_defaults_to_analog_voltage_and_current(capsys):
+def test_battery_monitor_on_defaults_to_analog_voltage_and_current(
+    capsys: pytest.CaptureFixture[str],
+):
     session = _Session(0.0)
 
     _cmd_battery(session, ["monitor", "on"])
@@ -44,7 +50,9 @@ def test_battery_monitor_on_accepts_explicit_monitor_type():
     assert session.writes == [("BATT_MONITOR", 3)]
 
 
-def test_battery_monitor_rejects_invalid_action_without_writing(capsys):
+def test_battery_monitor_rejects_invalid_action_without_writing(
+    capsys: pytest.CaptureFixture[str],
+):
     session = _Session(4.0)
 
     _cmd_battery(session, ["monitor", "enable"])

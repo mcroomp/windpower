@@ -74,8 +74,13 @@ class SimpleTetheredKite:
 # ---------------------------------------------------------------------------
 
 def make_winch(
-    rest=100.0, kp=0.005, v_max_out=0.40, v_max_in=0.20,
-    accel=1.0, min_len=2.0, max_len=300.0
+    rest: float = 100.0,
+    kp: float = 0.005,
+    v_max_out: float = 0.40,
+    v_max_in: float = 0.20,
+    accel: float = 1.0,
+    min_len: float = 2.0,
+    max_len: float = 300.0,
 ):
     """Return a WinchController with fast accel (1 m/s²) for most tests."""
     return WinchController(
@@ -85,7 +90,7 @@ def make_winch(
     )
 
 
-def run_steps(winch, tension, dt=1/400, n=400):
+def run_steps(winch: WinchController, tension: float, dt: float = 1 / 400, n: int = 400):
     """Run n steps at constant tension. Returns final rest_length."""
     for _ in range(n):
         winch.step(tension, dt)
@@ -323,7 +328,7 @@ class TestCoupledKiteModel:
 
     DT = 1.0 / 400      # 400 Hz physics step
 
-    def _run(self, winch, kite, n_steps):
+    def _run(self, winch: WinchController, kite: SimpleTetheredKite, n_steps: int):
         """Advance coupled simulation for n_steps; return tension history."""
         T_hist = []
         for _ in range(n_steps):

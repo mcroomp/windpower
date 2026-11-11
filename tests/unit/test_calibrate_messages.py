@@ -2,6 +2,8 @@
 from unittest.mock import Mock
 from dataclasses import dataclass
 
+import pytest
+
 import calibrate.messages as messages_module
 from calibrate.messages import read_one
 
@@ -30,12 +32,19 @@ class _Session:
         self._batches = iter(batches)
         self.calls: list[dict] = []
 
-    def read_messages(self, after, message_types, **kwargs):
+    def read_messages(
+        self,
+        after: str,
+        message_types: str | list[str] | tuple[str, ...] | set[str],
+        **kwargs: object,
+    ):
         self.calls.append({"after": after, "types": message_types, **kwargs})
         return next(self._batches)
 
 
-def test_read_one_continues_from_the_advanced_cursor_until_a_match(monkeypatch) -> None:
+def test_read_one_continues_from_the_advanced_cursor_until_a_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(messages_module.time, "monotonic", _Clock(step=0.5))
     heartbeat = object()
     session = _Session(
@@ -57,7 +66,7 @@ def test_read_one_continues_from_the_advanced_cursor_until_a_match(monkeypatch) 
 
 
 def test_read_one_returns_none_with_the_scanned_cursor_after_the_deadline(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(messages_module.time, "monotonic", _Clock(step=1.0))
     session = _Session([_Batch((), f"v1:{n}") for n in range(20, 40)])
@@ -79,7 +88,9 @@ def test_read_one_with_zero_wait_polls_exactly_once() -> None:
     assert len(session.calls) == 1
 
 
-def test_read_one_passes_the_generation_guard_on_every_poll(monkeypatch) -> None:
+def test_read_one_passes_the_generation_guard_on_every_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(messages_module.time, "monotonic", _Clock(step=0.5))
     session = _Session([_Batch((), "v1:11"), _Batch((object(),), "v1:12")])
 

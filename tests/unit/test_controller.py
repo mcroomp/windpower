@@ -19,7 +19,7 @@ from simulation.controller import (
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _Rz(angle_rad):
+def _Rz(angle_rad: float):
     """Rotation matrix about Z axis."""
     c, s = np.cos(angle_rad), np.sin(angle_rad)
     return np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])

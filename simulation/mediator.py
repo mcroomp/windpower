@@ -34,6 +34,10 @@ import socket
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from simulation.planner import TrajectoryPlanner
 
 import numpy as np
 
@@ -115,7 +119,7 @@ def _parse_args():
 # ---------------------------------------------------------------------------
 # Main mediator loop
 # ---------------------------------------------------------------------------
-def run_mediator(args, trajectory=None):
+def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None = None):
     """
     Run the mediator loop.
 
@@ -385,7 +389,7 @@ def run_mediator(args, trajectory=None):
     # Called by run_lockstep once per servo packet. Closes over all subsystems
     # and mutable state declared above. Returns the state dict for send_state().
 
-    def step_fn(servos, t_sim):
+    def step_fn(servos: np.ndarray, t_sim: float):
         nonlocal step, last_log_time, _t_step0
         nonlocal s1, s2, s3, _traj_cmd, _logged_transition
         nonlocal _ff_t0, _blend_logged

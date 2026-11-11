@@ -24,7 +24,9 @@ _DT = 1.0 / 400.0
 class TestServoDirectionsForCyclicCommands:
     """Verify servo positions move correctly for cyclic commands."""
 
-    def _get_servo_positions(self, col_rad, tilt_lon, tilt_lat):
+    def _get_servo_positions(
+        self, col_rad: float, tilt_lon: float, tilt_lat: float,
+    ):
         """Return servo positions for a given collective and cyclic command."""
         # Use the forward mix directly to get servo positions
         col_out = collective_rad_to_out(col_rad, _COL_MIN, _COL_MAX)

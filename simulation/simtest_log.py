@@ -48,7 +48,7 @@ class BadEventLog:
         self._events: list[dict] = []
 
     # ------------------------------------------------------------------ write
-    def record(self, kind: str, t: float, phase: str, alt: float, **extra) -> None:
+    def record(self, kind: str, t: float, phase: str, alt: float, **extra: object) -> None:
         """Append one bad event."""
         self._events.append(dict(kind=kind, t=t, phase=phase, alt=alt, **extra))
 

@@ -127,7 +127,7 @@ def _load_rate_axis(prefix: str, params: dict[str, float]) -> dict[str, float]:
     }
 
 
-def load_rate_pid_params(parm_file=None, axis: str = "RLL"):
+def load_rate_pid_params(parm_file: str | Path | None = None, axis: str = "RLL"):
     """Load a single rate-axis PID parameter set from ArduPilot .parm sources.
 
     Every consumer (unit tests, simtests, and SITL) loads the *same* merged

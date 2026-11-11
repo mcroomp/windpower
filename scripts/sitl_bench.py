@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import FrameType
 
 # ---------------------------------------------------------------------------
 # Path setup — reach simulation/ and tests/sitl/ from any CWD
@@ -171,7 +172,7 @@ def main() -> None:
 
     procs = [sitl_proc, mediator_proc, tail_proc]
 
-    def _cleanup(signum=None, frame=None):
+    def _cleanup(signum: int | None = None, frame: FrameType | None = None):
         print("\n[sitl_bench] Shutting down ...")
         for p in procs:
             with contextlib.suppress(Exception):

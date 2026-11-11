@@ -13,7 +13,9 @@ from envelope.compute_map import compute_grid, V_REEL_OUT, V_REEL_IN
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _tiny_grid(tension_list=None):
+def _tiny_grid(
+    tension_list: list[float] | dict[float, list[float]] | None = None,
+):
     """Compute a minimal 1-angle 1-wind grid fast enough for unit tests."""
     if tension_list is None:
         tension_list = {
@@ -70,7 +72,7 @@ class TestTensionRangeSplit:
 
 class TestTensionMasking:
 
-    def _apply_mask(self, grid, v_tgt):
+    def _apply_mask(self, grid: dict, v_tgt: float):
         """Reproduce the PNG rendering masking logic for a given v_target."""
         v_idx = int(np.argmin(np.abs(grid["v_targets"] - v_tgt)))
         col_rad  = grid["settled_col"][v_idx, 0].copy()   # (na, nt)
@@ -132,7 +134,7 @@ class TestYAxisRange:
     """The PNG renderer must clip each subplot's y-axis to its mode's tension range,
     not the full unified range."""
 
-    def _valid_ylim(self, grid, v_tgt):
+    def _valid_ylim(self, grid: dict, v_tgt: float):
         """Return (ymin, ymax) that the renderer should use for this v_target."""
         vtt = grid["v_target_tensions"]
         tensions = np.array(vtt.get(float(v_tgt), grid["tension_list"]), dtype=float)

@@ -32,14 +32,24 @@ T_SETTLE   = 30.0    # seconds at T_START before ramp begins
 TOL        = 0.15    # v_along must stay within this of v_target
 
 
-def _run_continuation(el=EL, t_start=T_START, t_max=T_MAX,
-                      ramp_rate=RAMP_RATE, v_target=V_TARGET,
-                      wind=WIND, omega_init=OMEGA_INIT,
-                      dt=DT, t_settle=T_SETTLE,
-                      kp_col=0.02, ki_col=0.005,
-                      kp_cyc=0.5,  ki_cyc=0.1,
-                      cyc_clamp_deg=8.6,
-                      col_min=-0.25, col_max=0.20):
+def _run_continuation(
+    el: float = EL,
+    t_start: float = T_START,
+    t_max: float = T_MAX,
+    ramp_rate: float = RAMP_RATE,
+    v_target: float = V_TARGET,
+    wind: float = WIND,
+    omega_init: float = OMEGA_INIT,
+    dt: float = DT,
+    t_settle: float = T_SETTLE,
+    kp_col: float = 0.02,
+    ki_col: float = 0.005,
+    kp_cyc: float = 0.5,
+    ki_cyc: float = 0.1,
+    cyc_clamp_deg: float = 8.6,
+    col_min: float = -0.25,
+    col_max: float = 0.20,
+):
     """
     Run settle phase then ramp phase.
     Returns list of dicts with per-second snapshots.

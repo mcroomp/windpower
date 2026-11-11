@@ -13,6 +13,7 @@ Outputs (saved alongside this script):
 
 import math
 from pathlib import Path
+from typing import TypedDict
 import numpy as np
 import matplotlib
 
@@ -28,8 +29,19 @@ HERE = Path(__file__).parent
 # ---------------------------------------------------------------------------
 
 
-def load_csv(path):
-    rows = []
+class _NacaRow(TypedDict):
+    rotor: str
+    airfoil: str
+    pitch: float
+    mu: float
+    CL: float
+    CT: float
+    LD: float
+    alpha: float
+
+
+def load_csv(path: str | Path) -> list[_NacaRow]:
+    rows: list[_NacaRow] = []
     with open(path) as f:
         reader = csv.DictReader(
             (line for line in f if not line.lstrip().startswith("#")),
@@ -65,7 +77,10 @@ def load_csv(path):
     return rows
 
 
-def select(rows, rotor=None, airfoil=None, pitch=None, mu_range=None):
+def select(
+    rows: list[_NacaRow], rotor: str | None = None, airfoil: str | None = None,
+    pitch: float | None = None, mu_range: tuple[float, float] | None = None,
+):
     out = rows
     if rotor:
         out = [r for r in out if r["rotor"] == rotor]

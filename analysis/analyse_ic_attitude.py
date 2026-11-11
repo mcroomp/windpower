@@ -12,7 +12,7 @@ import numpy as np
 import simulation as _simulation_pkg
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 
-from simulation.telemetry_csv import read_csv  # noqa: E402
+from simulation.telemetry_csv import TelRow, read_csv  # noqa: E402
 
 
 def _angle_deg(a: np.ndarray, b: np.ndarray) -> float:
@@ -23,11 +23,11 @@ def _angle_deg(a: np.ndarray, b: np.ndarray) -> float:
     return float(math.degrees(math.acos(float(np.clip(np.dot(a, b) / (an * bn), -1.0, 1.0)))))
 
 
-def _body_z(row) -> np.ndarray:
+def _body_z(row: TelRow) -> np.ndarray:
     return row.R[:, 2]
 
 
-def _body_z_target(row) -> np.ndarray:
+def _body_z_target(row: TelRow) -> np.ndarray:
     return row.body_z_eq
 
 

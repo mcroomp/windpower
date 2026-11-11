@@ -19,6 +19,7 @@ from .hw import (
 )
 from .run import _RunLog, _observation_loop
 from .util import _fmt, _parse_flags
+from ._observation_types import _ObservationLog, _ObservationSession
 
 
 # ---------------------------------------------------------------------------
@@ -86,18 +87,18 @@ def _cmd_watch(session: LinkHubClient, args: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _watch_servos(session, duration, log):
+def _watch_servos(session: LinkHubClient, duration: float | None, log: _RunLog):
     cols = ["t_s"] + [f"s{i}_us" for i in range(1, 9)]
-    state = {f"s{i}": None for i in range(1, 9)}
+    state: dict[str, object] = {f"s{i}": None for i in range(1, 9)}
 
-    def handle(st, msg, t_rel):
+    def handle(st: object, msg: object, t_rel: float) -> list[object] | None:
         if hasattr(msg, "servo1_raw"):
             for i in range(1, 9):
                 state[f"s{i}"] = getattr(msg, f"servo{i}_raw", None)
             return [f"{t_rel:.4f}"] + [state[f"s{i}"] for i in range(1, 9)]
         return None
 
-    def render(st, t_rel):
+    def render(st: object, t_rel: float) -> list[object]:
         return [f"{t_rel:.1f}"] + [state[f"s{i}"] for i in range(1, 9)]
 
     _observation_loop(
@@ -113,14 +114,14 @@ def _watch_servos(session, duration, log):
     )
 
 
-def _watch_esc(session, duration, log):
+def _watch_esc(session: LinkHubClient, duration: float | None, log: _RunLog):
     # GB4008 bidir DShot telemetry (AUX 1 = SERVO9 -> ESC_TELEMETRY_9_TO_12[0]).
     cols = ["t_s", "erpm", "mech_rpm", "rotor_rpm", "voltage_v", "current_a", "temp_c"]
     esc_name, esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
     idx = (MOTOR_ESC_CHANNEL - 1) % 4
     state: dict[str, float | None] = {"erpm": None, "volt": None, "curr": None, "temp": None}
 
-    def handle(st, msg, t_rel):
+    def handle(st: object, msg: object, t_rel: float) -> list[object] | None:
         if not isinstance(msg, EscTelemetry) or msg.message_name != esc_name:
             return None
         erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
@@ -144,7 +145,7 @@ def _watch_esc(session, duration, log):
             temp,
         ]
 
-    def render(st, t_rel):
+    def render(st: object, t_rel: float) -> list[object]:
         _e, mech, rotor = _rpm_triplet(state["erpm"])
         return [
             f"{t_rel:.1f}",
@@ -181,10 +182,10 @@ def _watch_esc(session, duration, log):
     )
 
 
-def _watch_text(session, duration, log):
+def _watch_text(session: LinkHubClient, duration: float | None, log: _RunLog):
     cols = ["t_s", "severity", "text"]
 
-    def handle(st, msg, t_rel):
+    def handle(st: object, msg: object, t_rel: float) -> list[object] | None:
         # STATUSTEXTs are handled by the engine and surfaced via state["pending_text"]
         # We still log them here so the CSV captures everything.
         if isinstance(msg, Statustext):
@@ -194,7 +195,7 @@ def _watch_text(session, duration, log):
                 return [f"{t_rel:.4f}", str(severity), text]
         return None
 
-    def render(st, t_rel):
+    def render(st: object, t_rel: float) -> list[object]:
         return [f"{t_rel:.1f}"]
 
     _observation_loop(
@@ -210,7 +211,7 @@ def _watch_text(session, duration, log):
     )
 
 
-def _watch_attitude(session, duration, log):
+def _watch_attitude(session: _ObservationSession, duration: float | None, log: _ObservationLog):
     cols = [
         "t_s",
         "mav_att_roll_deg",
@@ -229,7 +230,7 @@ def _watch_attitude(session, duration, log):
         "wz": None,
     }
 
-    def handle(st, msg, t_rel):
+    def handle(st: object, msg: object, t_rel: float) -> list[object] | None:
         decoded = msg
         if isinstance(decoded, Attitude):
             state["roll"] = math.degrees(decoded.roll)
@@ -249,7 +250,7 @@ def _watch_attitude(session, duration, log):
             ]
         return None
 
-    def render(st, t_rel):
+    def render(st: object, t_rel: float) -> list[object]:
         return [
             f"{t_rel:.1f}",
             f"{state['roll']:+.1f}" if state["roll"] is not None else None,
@@ -272,11 +273,11 @@ def _watch_attitude(session, duration, log):
     )
 
 
-def _watch_power(session, duration, log):
+def _watch_power(session: LinkHubClient, duration: float | None, log: _RunLog):
     cols = ["t_s", "vbat_v", "current_a", "power_w"]
     state: dict[str, float | None] = {"vbat": None, "curr": None}
 
-    def handle(st, msg, t_rel):
+    def handle(st: object, msg: object, t_rel: float) -> list[object] | None:
         match msg:
             case BatteryStatus(voltages=voltages, current_battery=current_battery):
                 cells = [v for v in voltages if v != 65535]
@@ -300,7 +301,7 @@ def _watch_power(session, duration, log):
         )
         return [f"{t_rel:.4f}", _fmt(state["vbat"]), _fmt(state["curr"]), _fmt(power)]
 
-    def render(st, t_rel):
+    def render(st: object, t_rel: float) -> list[object]:
         p = (
             state["vbat"] * state["curr"]
             if (state["vbat"] is not None and state["curr"] is not None)

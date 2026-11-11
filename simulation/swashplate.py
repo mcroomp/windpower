@@ -32,6 +32,7 @@ This is the single source of truth for swashplate arithmetic.
 import math
 import yaml
 import numpy as np
+from dynbem import RotorDefinition
 from simulation.param_defaults import load_collective_phys_range as _load_col_range, _resolve_default_rotor_yaml
 
 
@@ -353,7 +354,7 @@ class SwashplateServoModel:
         ))
 
     @classmethod
-    def from_rotor(cls, rotor,
+    def from_rotor(cls, rotor: RotorDefinition,
                    h_col_min: float = 1000.0,
                    h_col_max: float = 2000.0) -> SwashplateServoModel:
         if rotor.control is None:

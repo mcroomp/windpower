@@ -95,8 +95,11 @@ Lint/type errors, warnings, or missing tools fail the enabled lint tests.
 
 For standalone type diagnostics, install development dependencies and the simulation
 extra (`uv sync --dev --extra simulation`), then run `uv run pyright --warnings`.
-The basic-mode configuration in `pyrightconfig.json` gates builds, CI, and opt-in lint tests;
-it has no baseline error allowance. Gates pass the active interpreter explicitly
+The basic-mode configuration in `pyrightconfig.json` also enables
+`reportMissingParameterType` as an error: function parameters must have explicit
+annotations (apart from inferred `self`/`cls` and contextual callbacks).
+It gates builds, CI, and opt-in lint tests with no baseline error allowance.
+Gates pass the active interpreter explicitly
 so Docker checks never resolve packages from a mounted Windows virtual environment.
 Simulation dependencies
 include NeuralFoil for the SG6042 polar analysis.

@@ -35,11 +35,11 @@ Usage
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import math
 import sys
 import time
 from pathlib import Path
-from typing import Any, Protocol, cast
 
 import numpy as np
 
@@ -47,6 +47,7 @@ import simulation
 import dataclasses as _dc
 from viz3d.torque_telemetry import TorqueTelemetryFrame
 from simulation.telemetry_csv import read_csv as _read_csv
+from simulation.telemetry_csv import TelRow
 from simulation.mediator_torque import PROFILES as _MEDIATOR_PROFILES
 from simulation.torque_model import (
     HubParams as _HubParams,
@@ -54,47 +55,10 @@ from simulation.torque_model import (
 )
 
 
-class _TextActorLike(Protocol):
-    def SetInput(self, text: str) -> None: ...
-
-    def GetTextProperty(self) -> Any: ...
-
-
-class _PlotterLike(Protocol):
-    title: str
-    camera_position: Any
-    window_size: tuple[int, int]
-    render_window: Any
-
-    def add_mesh(self, *args, **kwargs) -> Any: ...
-
-    def add_axes(self, *args, **kwargs) -> Any: ...
-
-    def add_key_event(self, *args, **kwargs) -> Any: ...
-
-    def add_text(self, *args, **kwargs) -> _TextActorLike: ...
-
-    def set_background(self, *args, **kwargs) -> Any: ...
-
-    def enable_anti_aliasing(self, *args, **kwargs) -> Any: ...
-
-    def render(self, *args, **kwargs) -> Any: ...
-
-    def show(self, *args, **kwargs) -> Any: ...
-
-    def open_gif(self, *args, **kwargs) -> Any: ...
-
-    def write_frame(self, *args, **kwargs) -> Any: ...
-
-    def close(self, *args, **kwargs) -> Any: ...
-
-    def update(self, *args, **kwargs) -> Any: ...
-
-
 _MODEL_PARAMS = _HubParams()  # default GB4008 params (same as mediator default)
 
 
-def _row_to_frame(r) -> TorqueTelemetryFrame:
+def _row_to_frame(r: TelRow) -> TorqueTelemetryFrame:
     """Convert a TelRow (NED storage) to TorqueTelemetryFrame (ENU display)."""
     import math as _math
 
@@ -223,7 +187,7 @@ def _lerp_frame(
 ) -> TorqueTelemetryFrame:
     """Return a frame linearly interpolated between f1 (alpha=0) and f2 (alpha=1)."""
 
-    def L(a, b):
+    def L(a: float, b: float):
         return a + alpha * (b - a)
 
     return TorqueTelemetryFrame(
@@ -270,7 +234,7 @@ class EventLog:
 
     def __init__(
         self,
-        pl: _PlotterLike,
+        pl: pv.Plotter,
         settle_s: float,
         observe_s: float,
         threshold: float,
@@ -435,7 +399,7 @@ class TorqueScene:
 
     def __init__(
         self,
-        pl: _PlotterLike,
+        pl: pv.Plotter,
         settle_s: float = 40.0,
         observe_s: float = 20.0,
         threshold_degs: float = 1.0,
@@ -472,7 +436,7 @@ class TorqueScene:
             line_width=1,
             opacity=0.4,
         )
-        pl.add_axes(line_width=2, x_color="red", y_color="green", z_color="blue")
+        pv.Plotter.add_axes(pl, line_width=2, x_color="red", y_color="green", z_color="blue")
 
         # Hub body — cylinder centred at (0,0,HUB_HEIGHT/2); rotates with psi
         self._hub_a = pl.add_mesh(
@@ -717,7 +681,7 @@ def play(
     export: str | None = None,
     all_paths: list | None = None,
     file_idx: list | None = None,
-    load_fn=None,
+    load_fn: Callable[[int], tuple[list[TorqueTelemetryFrame], dict[str, float | str]]] | None=None,
 ) -> None:
     if not frames:
         print("No frames.")
@@ -728,8 +692,8 @@ def play(
         f"result={meta.get('result', '?')}"
     )
 
-    pl = cast(_PlotterLike, pv.Plotter(title=title, off_screen=(export is not None)))
-    pl.set_background((0.05, 0.05, 0.08))  # very dark blue-black
+    pl = pv.Plotter(title=title, off_screen=(export is not None))
+    pv.Plotter.set_background(pl, (0.05, 0.05, 0.08))  # very dark blue-black
     pl.camera_position = [
         (0.55, -0.75, 0.80),
         (0.0, 0.0, 0.20),
@@ -853,13 +817,13 @@ def play(
         speed[0] = max(speed[0] / 2, 0.125)
 
     if export is None:
-        pl.add_key_event("space", _cb_space)
-        pl.add_key_event("Right", _cb_right)
-        pl.add_key_event("Left", _cb_left)
-        pl.add_key_event("plus", _cb_plus)
-        pl.add_key_event("minus", _cb_minus)
-        pl.add_key_event("n", _cb_tab)  # n = next file
-        pl.add_key_event("b", _cb_prev)  # b = back (previous file)
+        pv.Plotter.add_key_event(pl, "space", _cb_space)
+        pv.Plotter.add_key_event(pl, "Right", _cb_right)
+        pv.Plotter.add_key_event(pl, "Left", _cb_left)
+        pv.Plotter.add_key_event(pl, "plus", _cb_plus)
+        pv.Plotter.add_key_event(pl, "minus", _cb_minus)
+        pv.Plotter.add_key_event(pl, "n", _cb_tab)  # n = next file
+        pv.Plotter.add_key_event(pl, "b", _cb_prev)  # b = back (previous file)
 
     # FPS counter + controls — pre-created, FPS updated in-place via SetInput
     pl.add_text(
@@ -868,15 +832,12 @@ def play(
         font_size=7,
         color=(0.45, 0.45, 0.45),
     )
-    _fps_actor = cast(
-        _TextActorLike,
-        pl.add_text(
+    _fps_actor = pl.add_text(
             "FPS --.-",
             position=(10, 28),
             font_size=9,
             font="courier",
             color=(0.5, 0.9, 0.5),
-        ),
     )
 
     # File counter (top-centre)

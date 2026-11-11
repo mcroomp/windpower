@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -10,7 +12,9 @@ from tests.sitl.stack_infra import StackConfig, _static_stack
 pytestmark = pytest.mark.sitl
 
 
-def test_linkhub_stress_sitl(tmp_path, request) -> None:
+def test_linkhub_stress_sitl(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
     zeros = np.zeros(3)
     with _static_stack(
         tmp_path,

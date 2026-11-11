@@ -18,6 +18,8 @@ from linkhub_client.messages import (
     MavResult,
     MavSysStatusSensor,
     ServoOutputRaw,
+    Message,
+    RawMessage,
 )
 
 from linkhub_client.client import LinkHubClient, LinkHubGenerationChanged
@@ -44,7 +46,7 @@ def _esc_telem_msg_for_channel(channel: int) -> tuple[str, int]:
     raise ValueError(f"no ESC_TELEMETRY message for output channel {channel}")
 
 
-def _esc_erpm(msg, channel: int) -> float | None:
+def _esc_erpm(msg: EscTelemetry | Message | RawMessage, channel: int) -> float | None:
     """eRPM for 1-based output `channel` from an ESC_TELEMETRY_* msg, else None."""
     if isinstance(msg, EscTelemetry):
         base = msg.first_channel
@@ -108,7 +110,7 @@ def _h3_forward_mix(coll: float, tilt_lon: float, tilt_lat: float):
     For S3 at 0 deg with tlon > 0 (nose-down), its command decreases while the
     two rear commands increase.
     """
-    def _mix(az):
+    def _mix(az: float):
         return coll - math.sin(az) * tilt_lat - math.cos(az) * tilt_lon
     return _mix(_AZ_S1), _mix(_AZ_S2), _mix(_AZ_S3)
 
@@ -338,7 +340,7 @@ def _print_status(session: LinkHubClient) -> None:
 # Drain helper
 # ---------------------------------------------------------------------------
 
-def _drain(session: LinkHubClient, msg_types, duration: float) -> list:
+def _drain(session: LinkHubClient, msg_types: str | list[str] | tuple[str, ...] | set[str], duration: float) -> list:
     """Collect all messages of given types for `duration` wall-clock seconds."""
     msgs = []
     deadline = time.monotonic() + duration

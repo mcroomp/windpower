@@ -26,6 +26,9 @@ import math
 import numpy as np
 import pytest
 
+from simulation.ic import IC
+from simulation.simtest_log import SimtestLog
+from types import SimpleNamespace
 
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
@@ -64,7 +67,12 @@ def wind_azimuth_rad() -> float:
     return float(math.atan2(wind_h[1], wind_h[0]))
 
 
-def _run_simulation(log, steps: int = 4000, *, ic=None):
+def _run_simulation(
+    log: SimtestLog,
+    steps: int = 4000,
+    *,
+    ic: IC | SimpleNamespace | None = None,
+):
     """
     Run the steady-state physics for `steps` iterations starting from the
     settled IC in steady_state_starting.json.  No warmup needed — the IC is
@@ -164,7 +172,7 @@ def _run_simulation(log, steps: int = 4000, *, ic=None):
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-def test_steady_flight(simtest_log):
+def test_steady_flight(simtest_log: SimtestLog):
     """Hub stays aloft, tether taut, axle aligned for 10 s from tether equilibrium IC."""
     STEPS     = 4000    # 10 s at 400 Hz
     DRIFT_MAX = 15.0    # m

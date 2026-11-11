@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from numpy.typing import NDArray
 from simulation.rotor_physics import require_mass_kg
 
 
@@ -30,14 +31,14 @@ from envelope.rotor_helpers import load_default_rotor
 _G = 9.81
 
 
-def tether_hat(elevation_deg: float) -> np.ndarray:
+def tether_hat(elevation_deg: float) -> NDArray[np.float64]:
     """Unit vector from hub toward anchor (East + Down in NED)."""
     el = math.radians(elevation_deg)
     return np.array([0.0, math.cos(el), math.sin(el)])
 
 
 def balance_bz(elevation_deg: float, tension_n: float, mass: float,
-               gravity: float = _G) -> np.ndarray:
+               gravity: float = _G) -> NDArray[np.float64]:
     """Disk normal that opposes combined tether + gravity load."""
     t_hat  = tether_hat(elevation_deg)
     F_teth = tension_n * t_hat
@@ -112,6 +113,10 @@ def simulate_point(
     aero        = create_aero(rotor, model="quasi_static")
     rotor_state = aero.initial_rotor_state()
 
+    omega: float
+    vel: NDArray[np.float64]
+    int_vx: float | np.float64
+    int_vy: float | np.float64
     if ic is not None:
         omega    = float(ic.get("omega",    omega_init))
         vel      = np.array(ic.get("vel",   float(v_along_init) * t_hat), dtype=float)
@@ -130,9 +135,9 @@ def simulate_point(
         int_vx   = 0.0
         int_vy   = 0.0
         int_vcol = 0.0
-    spin_angle = 0.0
+    spin_angle: float = 0.0
 
-    history   = []
+    history: list[dict[str, float]] = []
     log_every = max(1, int(round(1.0 / dt)))
     n_steps   = int(t_end / dt)
     conv_steps = max(1, int(round(conv_window_s / dt)))
@@ -164,7 +169,7 @@ def simulate_point(
         # Cyclic PI: null cross-tether velocity only (project out along-tether)
         # Gains normalized by thrust so bandwidth stays constant across tension levels.
         # Anti-windup: freeze integrator when output is saturated.
-        v_perp   = vel - float(np.dot(vel, t_hat)) * t_hat
+        v_perp: NDArray[np.float64] = vel - float(np.dot(vel, t_hat)) * t_hat
         t_norm   = max(abs(thrust), 1.0)
         kp_eff   = kp_cyc / t_norm
         ki_eff   = ki_cyc / t_norm

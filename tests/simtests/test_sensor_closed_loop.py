@@ -59,7 +59,7 @@ from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_R
 from simulation.controller import (AltitudeHoldController, compute_rate_cmd,
                           damp_bz_eq_lateral, HeliCyclicController)
 from simulation.sensor import PhysicalSensor
-from simulation.simtest_log import BadEventLog
+from simulation.simtest_log import BadEventLog, SimtestLog
 from simulation.rotor_physics import require_mass_kg
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
@@ -196,7 +196,7 @@ def _run(t_sim: float = T_SIM) -> _RunResult:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skip(reason="KNOWN REGRESSION: rotation matrix drift with new IC orientation (orth_err ~1%, det~0.99); pre-existing in physics/control, not solver-caused. Diagnostic needed.")
-def test_sensor_closed_loop(simtest_log):
+def test_sensor_closed_loop(simtest_log: SimtestLog):
     """Flight stable and PhysicalSensor outputs physically consistent for 60 s."""
     r = _run()
     history    = r["history"]

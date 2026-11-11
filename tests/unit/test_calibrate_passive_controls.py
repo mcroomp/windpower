@@ -1,6 +1,7 @@
 from unittest.mock import Mock
 import math
 import time
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from linkhub_client.messages import (
     ExtendedSysState,
     Heartbeat,
     MavAutopilot,
+    MavDataStream,
     MavLandedState,
     MavModeFlag,
     MavResult,
@@ -19,6 +21,8 @@ from linkhub_client.messages import (
     MavType,
     MavVtolState,
     NamedValueFloat,
+    Message,
+    RawMessage,
     SetAttitudeTarget,
     Statustext,
 )
@@ -47,19 +51,27 @@ _CAPTURE_Q = _quat_from_euler_deg(12.0, -7.0, 135.0)
 _CLOCK = SimClock(epoch=1, time_boot_ms=1, quality=None)
 
 
-def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
+def test_passive_runup_wait_uses_configured_rsc_interval(
+    monkeypatch: pytest.MonkeyPatch,
+):
     events = []
 
     class Session:
-        def get_param(self, name):
+        def get_param(self, name: str):
             return {"H_RSC_RAMP_TIME": 0.01, "H_RSC_RUNUP_TIME": 0.02}[name]
 
         def current_cursor(self):
             return "v1:0"
 
         def read_messages(
-            self, _after, _message_types, *, direction, wait, limit,
-            expected_generation=None,
+            self,
+            _after: str,
+            _message_types: str | list[str] | tuple[str, ...] | set[str],
+            *,
+            direction: str,
+            wait: float,
+            limit: int,
+            expected_generation: str | None = None,
         ):
             assert direction == "rx"
             events.append(wait)
@@ -81,8 +93,14 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
             return "v1:0"
 
         def read_messages(
-            self, _after, _message_types, *, direction, wait, limit,
-            expected_generation=None,
+            self,
+            _after: str,
+            _message_types: str | list[str] | tuple[str, ...] | set[str],
+            *,
+            direction: str,
+            wait: float,
+            limit: int,
+            expected_generation: str | None = None,
         ):
             assert direction == "rx"
             return MessageBatch(
@@ -99,7 +117,9 @@ def test_passive_runup_wait_uses_configured_rsc_interval(monkeypatch):
     assert _wait_for_passive_land_clear(Mock(wraps=LandClearSession())) is True
 
 
-def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
+def test_passive_ekf_settle_waits_for_active_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+):
     messages = iter([
         Heartbeat(
             mavtype=MavType.HELICOPTER,
@@ -125,16 +145,21 @@ def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
 
         sent = []
 
-        def send_message(self, message):
+        def send_message(self, message: Message | RawMessage):
             self.sent.append(message)
 
-        def request_data_stream(self, stream, rate_hz):
+        def request_data_stream(self, stream: MavDataStream, rate_hz: int):
             self.sent.append((stream, rate_hz))
 
         def current_cursor(self):
             return "v1:0"
 
-        def read_messages(self, _after, message_types, **_kwargs):
+        def read_messages(
+            self,
+            _after: str,
+            message_types: str | list[str] | tuple[str, ...] | set[str],
+            **_kwargs: object,
+        ):
             self.receive_types = message_types
             message = next(messages, None)
             return MessageBatch(
@@ -156,7 +181,9 @@ def test_passive_ekf_settle_waits_for_active_heartbeat(monkeypatch):
     assert not any(isinstance(message, SetAttitudeTarget) for message in session.sent)
 
 
-def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
+def test_passive_ekf_settle_rejects_recorded_hardware_spin(
+    monkeypatch: pytest.MonkeyPatch,
+):
     class Clock:
         now = 0.0
 
@@ -185,15 +212,15 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
         _target_component = 1
         first = True
 
-        def send_message(self, _message):
+        def send_message(self, _message: Message | RawMessage):
             pass
-        def request_data_stream(self, _stream, _rate_hz):
+        def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
             pass
 
         def current_cursor(self):
             return "v1:0"
 
-        def read_messages(self, *_args, **_kwargs):
+        def read_messages(self, *_args: object, **_kwargs: object):
             if self.first:
                 self.first = False
                 return MessageBatch((heartbeat,), "v1:1", _CLOCK)
@@ -209,7 +236,10 @@ def test_passive_ekf_settle_rejects_recorded_hardware_spin(monkeypatch):
     ) is False
 
 
-def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
+def test_passive_startup_runs_up_in_acro_before_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     events = []
     settle_options = []
 
@@ -242,13 +272,13 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
     assert typed_kwargs["log_dir"] == tmp_path
 
     class TailSession:
-        def __init__(self, tail_type, function):
+        def __init__(self, tail_type: float, function: float):
             self.params = {
                 "H_TAIL_TYPE": tail_type,
                 "SERVO9_FUNCTION": function,
             }
 
-        def get_param(self, name):
+        def get_param(self, name: str):
             return self.params[name]
 
     assert calibrate_run._ensure_passive_tail_setup(Mock(wraps=TailSession(3.0, 36.0)))
@@ -259,30 +289,30 @@ def test_passive_startup_runs_up_in_acro_before_capture(monkeypatch, tmp_path):
         _target_system = 1
         _target_component = 1
 
-        def get_param(self, name):
+        def get_param(self, name: str):
             return {
                 "H_FLYBAR_MODE": 1.0,
                 "GUID_OPTIONS": 8.0,
             }[name]
 
-        def set_param(self, name, value):
+        def set_param(self, name: str, value: int | float):
             events.append(("set-param", name, value))
             return True
 
-        def set_mode(self, mode):
+        def set_mode(self, mode: int):
             events.append(("set-mode", mode))
 
-        def send_message(self, message):
+        def send_message(self, message: Message | RawMessage):
             if isinstance(message, NamedValueFloat):
                 events.append(("send", message.name, message.value))
 
-        def request_data_stream(self, _stream, _rate_hz):
+        def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
             pass
 
         def current_cursor(self):
             return "v1:0"
 
-        def export_mavlog(self, path, after):
+        def export_mavlog(self, path: str, after: str):
             events.append(("export-log", path, after))
             return "v1:1"
 
@@ -698,7 +728,7 @@ def test_passive_anchor_is_captured_in_lua_and_offsets_are_relative():
     assert sim.guided_target["yaw_deg"] == pytest.approx(50.0)
 
 
-def _hold_attitude_r(roll_deg, pitch_deg, yaw_deg):
+def _hold_attitude_r(roll_deg: float, pitch_deg: float, yaw_deg: float):
     roll, pitch, yaw = (math.radians(v) for v in (roll_deg, pitch_deg, yaw_deg))
     cr, sr = math.cos(roll), math.sin(roll)
     cp, sp = math.cos(pitch), math.sin(pitch)
@@ -781,7 +811,7 @@ def test_guided_entry_hold_persists_until_enter_passive_captures_anchor():
     assert sim.guided_target["yaw_deg"] == pytest.approx(-50.0, abs=1e-4)
 
 
-def _guided_target_calls(sim) -> int:
+def _guided_target_calls(sim: RawesLua) -> int:
     value = sim._lua.eval("_mock.guided_target_calls or 0")
     assert isinstance(value, (int, float))
     return int(value)

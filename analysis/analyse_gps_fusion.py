@@ -80,7 +80,7 @@ _RE_PARAM_SET = re.compile(
 class EkfSample:
     __slots__ = ("t", "flags_raw", "flags_set", "hv", "hp")
 
-    def __init__(self, t, flags_raw, flags_set, hv, hp):
+    def __init__(self, t: float, flags_raw: int, flags_set: frozenset[str], hv: float, hp: float):
         self.t = t
         self.flags_raw = flags_raw
         self.flags_set = flags_set  # frozenset of flag-name strings
@@ -154,7 +154,7 @@ def parse_log(path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _flag_transitions(ekf_samples):
+def _flag_transitions(ekf_samples: list[EkfSample]):
     """Return list of (t, flag_name, appeared/disappeared)."""
     transitions = []
     prev = frozenset()
@@ -169,7 +169,7 @@ def _flag_transitions(ekf_samples):
     return transitions
 
 
-def _hp_trend(ekf_samples, after_t=None):
+def _hp_trend(ekf_samples: list[EkfSample], after_t: float | None = None):
     """Return (times, hp_values) optionally filtered to t >= after_t."""
     ts = [
         s.t
@@ -184,14 +184,14 @@ def _hp_trend(ekf_samples, after_t=None):
     return ts, hps
 
 
-def _isnan(x):
+def _isnan(x: float):
     try:
         return x != x
     except Exception:
         return False
 
 
-def _hp_rate(ts, hps):
+def _hp_rate(ts: list[float], hps: list[float]):
     """Linear fit slope (hp/s) over the series."""
     if len(ts) < 2:
         return float("nan")
@@ -211,7 +211,7 @@ def _hp_rate(ts, hps):
 # ---------------------------------------------------------------------------
 
 
-def report(statustext, ekf, attitudes, gps_fused, params_set, log_path):
+def report(statustext: list[tuple[float, str]], ekf: list[EkfSample], attitudes: list[tuple[float, float, float, float]], gps_fused: float | None, params_set: list[tuple[str, str]], log_path: Path):
     W = 72
     print("=" * W)
     print(f"  GPS FUSION ANALYSIS — {log_path.name}")
@@ -425,7 +425,7 @@ def report(statustext, ekf, attitudes, gps_fused, params_set, log_path):
 # ---------------------------------------------------------------------------
 
 
-def plot_ekf_timeline(ekf, statustext, gps_fused, out_path):
+def plot_ekf_timeline(ekf: list[EkfSample], statustext: list[tuple[float, str]], gps_fused: float | None, out_path: Path):
     try:
         import matplotlib
 

@@ -84,7 +84,7 @@ def _thrust(tilt_deg: float, col_rad: float,
 
 
 @pytest.mark.parametrize("tilt_deg", _TILT_ANGLES_MONOTONE)
-def test_collective_monotonically_increases_thrust(tilt_deg):
+def test_collective_monotonically_increases_thrust(tilt_deg: int):
     """Higher collective → strictly more thrust along disk normal."""
     cols = [-0.25, -0.18, -0.10, 0.0, 0.05]
     thrusts = [_thrust(tilt_deg, c) for c in cols]
@@ -97,7 +97,7 @@ def test_collective_monotonically_increases_thrust(tilt_deg):
 
 
 @pytest.mark.parametrize("tilt_deg", _TILT_ANGLES)
-def test_collective_range_produces_thrust_difference(tilt_deg):
+def test_collective_range_produces_thrust_difference(tilt_deg: int):
     """Full collective range must produce a positive thrust change."""
     delta = _thrust(tilt_deg, _COL_MAX) - _thrust(tilt_deg, _COL_MIN)
     assert delta > 5.0, (
@@ -113,12 +113,14 @@ def test_collective_range_produces_thrust_difference(tilt_deg):
 # So the right thing to test at the aero boundary is the moment response.
 
 
-def _moment(tilt_deg, col, tilt_lat=0.0, tilt_lon=0.0):
+def _moment(
+    tilt_deg: int, col: float, tilt_lat: float = 0.0, tilt_lon: float = 0.0,
+):
     return _forces6(tilt_deg, col, tilt_lat, tilt_lon)[3:]
 
 
 @pytest.mark.parametrize("tilt_deg", _TILT_ANGLES)
-def test_roll_cyclic_produces_hub_moment(tilt_deg):
+def test_roll_cyclic_produces_hub_moment(tilt_deg: int):
     """Lateral swashplate tilt must produce a non-trivial hub moment."""
     M0 = _moment(tilt_deg, -0.18, tilt_lat=0.0)
     Mp = _moment(tilt_deg, -0.18, tilt_lat=0.4)
@@ -130,7 +132,7 @@ def test_roll_cyclic_produces_hub_moment(tilt_deg):
 
 
 @pytest.mark.parametrize("tilt_deg", _TILT_ANGLES)
-def test_pitch_cyclic_produces_hub_moment(tilt_deg):
+def test_pitch_cyclic_produces_hub_moment(tilt_deg: int):
     """Longitudinal swashplate tilt must produce a non-trivial hub moment."""
     M0 = _moment(tilt_deg, -0.18, tilt_lon=0.0)
     Mp = _moment(tilt_deg, -0.18, tilt_lon=0.4)
@@ -142,7 +144,7 @@ def test_pitch_cyclic_produces_hub_moment(tilt_deg):
 
 
 @pytest.mark.parametrize("tilt_deg", _TILT_ANGLES)
-def test_roll_and_pitch_cyclic_produce_non_parallel_moments(tilt_deg):
+def test_roll_and_pitch_cyclic_produce_non_parallel_moments(tilt_deg: int):
     """Roll and pitch cyclic must yield non-parallel hub moments."""
     M0 = _moment(tilt_deg, -0.18)
     dMr = _moment(tilt_deg, -0.18, tilt_lat=0.4) - M0
@@ -158,7 +160,7 @@ def test_roll_and_pitch_cyclic_produce_non_parallel_moments(tilt_deg):
 
 
 @pytest.mark.parametrize("tilt_deg", _TILT_ANGLES)
-def test_opposite_cyclic_produces_opposite_moment(tilt_deg):
+def test_opposite_cyclic_produces_opposite_moment(tilt_deg: int):
     """Flipping the cyclic sign must flip the hub-moment direction."""
     M0 = _moment(tilt_deg, -0.18)
     dM_p = _moment(tilt_deg, -0.18, tilt_lat=0.3) - M0
@@ -175,7 +177,7 @@ def test_opposite_cyclic_produces_opposite_moment(tilt_deg):
 
 
 @pytest.mark.parametrize("tilt_deg", _TILT_ANGLES)
-def test_encode_decode_roundtrip_gives_identical_forces(tilt_deg):
+def test_encode_decode_roundtrip_gives_identical_forces(tilt_deg: int):
     """Encoding through the H3-120 swashplate and decoding back must give
     identical aero forces at every disk orientation."""
     col_direct = -0.18

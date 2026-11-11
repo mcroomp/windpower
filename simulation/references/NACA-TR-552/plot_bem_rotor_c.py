@@ -27,6 +27,7 @@ import matplotlib
 from dynbem import rotor_definition as rd
 from dynbem import create_aero
 from matplotlib.lines import Line2D
+from matplotlib.axes import Axes
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -192,7 +193,7 @@ fig.suptitle(
 Y_MIN, Y_MAX = -0.08, 0.35
 X_MIN, X_MAX =  0.0,  0.92
 
-def setup_ax(ax, title):
+def setup_ax(ax: Axes, title: str):
     ax.set_xlim(X_MIN, X_MAX)
     ax.set_ylim(Y_MIN, Y_MAX)
     ax.set_xlabel(r"Advance ratio  $\mu$", fontsize=10)

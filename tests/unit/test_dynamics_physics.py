@@ -40,8 +40,8 @@ N_STEPS_1S = int(round(1.0 / DT))
 
 def _fresh(*, I_spin: float = 0.0,
            R0:       np.ndarray | None = None,
-           omega0=None,
-           pos0=(0.0, 0.0, -50.0),
+           omega0:   list[float] | None = None,
+           pos0: tuple[float, float, float] = (0.0, 0.0, -50.0),
            z_floor: float | None = None) -> RigidBodyDynamics:
     """Build a clean dynamics instance with no floor by default."""
     return RigidBodyDynamics(

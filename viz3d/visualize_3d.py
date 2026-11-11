@@ -39,6 +39,7 @@ Controls (interactive mode):
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import contextlib
 import logging
 import math
@@ -306,7 +307,7 @@ def _human_figure(x: float = 3.0, y: float = 2.0) -> pv.PolyData:
     Head + torso + arms + legs built from spheres and cylinders.
     """
 
-    def cyl(cx, cy, cz, dx, dy, dz, r, h):
+    def cyl(cx: float, cy: float, cz: float, dx: float, dy: float, dz: float, r: float, h: float):
         return pv.Cylinder(
             center=(cx, cy, cz),
             direction=(dx, dy, dz),
@@ -422,7 +423,7 @@ def _ground_grid(extent: float = 200, spacing: float = 10) -> pv.PolyData:
     pts: list[list[float]] = []
     segments: list[int] = []
 
-    def add_line(p0, p1):
+    def add_line(p0: list[float], p1: list[float]):
         i = len(pts)
         pts.append(p0)
         pts.append(p1)
@@ -495,7 +496,7 @@ def _drop_line(pos_viz: np.ndarray, dot_spacing: float = 1.5) -> pv.PolyData:
     return pv.PolyData(pts)
 
 
-def _lerp_frame(f1, f2, alpha: float):
+def _lerp_frame(f1: TelemetryFrame, f2: TelemetryFrame, alpha: float):
     """
     Linearly interpolate between two TelemetryFrames.
 
@@ -1230,7 +1231,7 @@ class RAWESVisualizer:
             self._mesh_trail.points = pts
             self._mesh_trail.lines = seg
 
-    def _render_frame_obj(self, f, spin_angle: float) -> None:
+    def _render_frame_obj(self, f: TelemetryFrame, spin_angle: float) -> None:
         """
         Update ALL dynamic actors in-place for frame object ``f``.
         No new actors, no new shaders — only user_matrix and .points updates.
@@ -1361,7 +1362,7 @@ class RAWESVisualizer:
         if hasattr(self, "_hud_actor"):
             self._hud_actor.SetInput("\n".join(lines))
 
-    def _add_slider(self, plotter: pv.Plotter, on_scrub=None) -> None:
+    def _add_slider(self, plotter: pv.Plotter, on_scrub: Callable[[int], None] | None=None) -> None:
         """
         Add a frame scrub slider.  ``on_scrub``, if provided, is called with
         the integer frame index whenever the slider moves (allows play() to
@@ -1412,7 +1413,7 @@ class RAWESVisualizer:
         cam.SetParallelScale(1.05)
         self._inset_ren = ren
 
-        def _add(mesh, color, opacity=1.0):
+        def _add(mesh: pv.PolyData, color: str, opacity: float=1.0):
             return self._inset_add(mesh, color, opacity)
 
         # Static parts (reference ring, axle, servo tracks) — merged into one actor
@@ -1499,7 +1500,7 @@ class RAWESVisualizer:
                 vtk_m.SetElement(i, j, float(m[i, j]))
         return vtk_m
 
-    def _update_inset_frame(self, f) -> None:
+    def _update_inset_frame(self, f: TelemetryFrame) -> None:
         """
         Orient all swashplate actors by the actual hub rotation so the inset
         diagram matches what the real swashplate looks like in 3D space.

@@ -145,7 +145,7 @@ def _run_attitude_only_at_fixed_equilibrium(
     I_b   = np.diag(I_body)
     I_b_inv = np.linalg.inv(I_b)
 
-    def _skew(w):
+    def _skew(w: np.ndarray):
         return np.array([[ 0,    -w[2],  w[1]],
                          [ w[2],  0,    -w[0]],
                          [-w[1],  w[0],  0  ]])

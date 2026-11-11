@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import math
 import statistics
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -50,7 +51,10 @@ def _read_calibrate_csv(path: Path) -> list[dict[str, str]]:
         ))
 
 
-def _first_time(messages: list[dict], predicate) -> float:
+def _first_time(
+    messages: list[dict],
+    predicate: Callable[[dict[str, object]], bool],
+) -> float:
     for message in messages:
         if predicate(message):
             return float(message["t_rel"])

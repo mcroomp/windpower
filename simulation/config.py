@@ -26,6 +26,7 @@ Example (mediator):
 
 import json
 import copy
+from numpy.typing import ArrayLike
 
 # ---------------------------------------------------------------------------
 # Load warmup-settled initial conditions via the shared IC loader (ic.py) so
@@ -253,7 +254,7 @@ def save(cfg: dict, path: str) -> None:
         fh.write("\n")
 
 
-def make_trajectory(cfg: dict, wind_ned):
+def make_trajectory(cfg: dict, wind_ned: ArrayLike):
     """
     Build a TrajectoryController from the ``cfg["trajectory"]`` section.
 

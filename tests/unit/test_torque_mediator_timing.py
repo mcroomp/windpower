@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -10,7 +11,7 @@ from simulation import mediator_torque
 
 
 def _run_frames(
-    monkeypatch, *, frame_rate: int, profile: str, motor_delay_ms: float = 0.0,
+    monkeypatch: pytest.MonkeyPatch, *, frame_rate: int, profile: str, motor_delay_ms: float = 0.0,
     start_time: float = 25.0, pwm_us: float = 1500.0,
 ):
     dt = 1.0 / frame_rate
@@ -36,13 +37,24 @@ def _run_frames(
         def sim_now(self) -> float:
             return self.time
 
-    def lockstep(iface, step_fn, is_stopped, **kwargs):
+    def lockstep(
+        iface: Interface,
+        step_fn: Callable[[object, float], dict],
+        is_stopped: Callable[[], bool],
+        **kwargs: object,
+    ):
         for index in range(frame_rate // 2):
             iface.time = start_time + index * dt
             states.append(step_fn(None, iface.time))
         return len(states)
 
-    def step(state, omega_rotor, throttle, params, step_dt):
+    def step(
+        state: mediator_torque._m.HubState,
+        omega_rotor: float,
+        throttle: float,
+        params: mediator_torque._m.HubParams,
+        step_dt: float,
+    ):
         steps.append((throttle, step_dt))
         return real_step(state, omega_rotor, throttle, params, step_dt)
 
@@ -56,13 +68,17 @@ def _run_frames(
 
 
 @pytest.mark.parametrize("frame_rate", [400, 1200])
-def test_motor_ode_uses_sitl_timestep(monkeypatch, frame_rate: int) -> None:
+def test_motor_ode_uses_sitl_timestep(
+    monkeypatch: pytest.MonkeyPatch, frame_rate: int,
+) -> None:
     _, steps = _run_frames(monkeypatch, frame_rate=frame_rate, profile="constant")
     assert all(step_dt == pytest.approx(1.0 / frame_rate) for _, step_dt in steps)
 
 
 @pytest.mark.parametrize("frame_rate", [400, 1200])
-def test_prescribed_angle_change_matches_gyro(monkeypatch, frame_rate: int) -> None:
+def test_prescribed_angle_change_matches_gyro(
+    monkeypatch: pytest.MonkeyPatch, frame_rate: int,
+) -> None:
     states, _ = _run_frames(monkeypatch, frame_rate=frame_rate, profile="yaw_slow_ramp")
     for previous, current in zip(states, states[1:]):
         angle_change = current["rpy_rad"][2] - previous["rpy_rad"][2]
@@ -70,7 +86,9 @@ def test_prescribed_angle_change_matches_gyro(monkeypatch, frame_rate: int) -> N
 
 
 @pytest.mark.parametrize("frame_rate", [400, 1200])
-def test_ic_spin_angle_matches_body_gyro(monkeypatch, frame_rate: int) -> None:
+def test_ic_spin_angle_matches_body_gyro(
+    monkeypatch: pytest.MonkeyPatch, frame_rate: int,
+) -> None:
     states, _ = _run_frames(
         monkeypatch, frame_rate=frame_rate, profile="ic", start_time=0.0, pwm_us=1000.0,
     )
@@ -83,7 +101,9 @@ def test_ic_spin_angle_matches_body_gyro(monkeypatch, frame_rate: int) -> None:
 
 
 @pytest.mark.parametrize("frame_rate", [400, 1200])
-def test_motor_delay_is_in_simulation_seconds(monkeypatch, frame_rate: int) -> None:
+def test_motor_delay_is_in_simulation_seconds(
+    monkeypatch: pytest.MonkeyPatch, frame_rate: int,
+) -> None:
     _, steps = _run_frames(
         monkeypatch, frame_rate=frame_rate, profile="constant", motor_delay_ms=300.0,
     )
@@ -92,7 +112,9 @@ def test_motor_delay_is_in_simulation_seconds(monkeypatch, frame_rate: int) -> N
 
 
 @pytest.mark.parametrize("frame_rate", [400, 1200])
-def test_wobble_tilt_rate_matches_attitude_change(monkeypatch, frame_rate: int) -> None:
+def test_wobble_tilt_rate_matches_attitude_change(
+    monkeypatch: pytest.MonkeyPatch, frame_rate: int,
+) -> None:
     states, _ = _run_frames(monkeypatch, frame_rate=frame_rate, profile="wobble")
     for previous, current in zip(states, states[1:]):
         roll, pitch, _ = current["rpy_rad"]

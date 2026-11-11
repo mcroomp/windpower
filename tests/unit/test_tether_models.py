@@ -15,6 +15,7 @@ from simulation.tether import (
     TallakQuasiStaticTether,
     TetherConvergenceError,
     TetherInputs,
+    Tether,
     TetherProperties,
     TetherResult,
     make_tether,
@@ -26,7 +27,7 @@ from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 
 
-def _inputs(**changes) -> TetherInputs:
+def _inputs(**changes: float | np.ndarray) -> TetherInputs:
     return replace(TetherInputs(
         anchor_pos_ned=np.zeros(3),
         anchor_vel_ned=np.zeros(3),
@@ -87,7 +88,7 @@ def test_spring_elastic_energy_derivative_matches_force() -> None:
     TallakQuasiStaticTether(properties=TetherProperties(linear_mass_kg_m=0.0)),
     ConstantTensionTether(100.0),
 ])
-def test_no_distributed_load_has_equal_opposite_endpoint_reactions(model) -> None:
+def test_no_distributed_load_has_equal_opposite_endpoint_reactions(model: Tether) -> None:
     result = model.evaluate(_inputs())
     np.testing.assert_allclose(result.force_on_hub_ned + result.force_on_anchor_ned, 0.0, atol=1e-10)
     np.testing.assert_allclose(result.positions_ned[[0, -1]], [[0, 0, 0], [100.1, 0, 0]], atol=1e-6)
@@ -229,7 +230,7 @@ def test_wind_step_and_payout_warm_start_match_independent_equilibrium() -> None
 
 
 def test_solver_failure_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
-    def failed_solve(matrix, rhs):
+    def failed_solve(matrix: np.ndarray, rhs: np.ndarray):
         raise np.linalg.LinAlgError("test failure")
 
     monkeypatch.setattr("simulation.tether.np.linalg.solve", failed_solve)
@@ -285,7 +286,7 @@ def test_newton_backtracks_oversized_step(
     original_solve = np.linalg.solve
     calls = 0
 
-    def oversized_first_step(matrix, rhs):
+    def oversized_first_step(matrix: np.ndarray, rhs: np.ndarray):
         nonlocal calls
         calls += 1
         step = original_solve(matrix, rhs)
@@ -328,7 +329,11 @@ def test_newton_backtracks_oversized_step(
     ),
 ])
 def test_newton_matches_recorded_scipy_equilibria(
-    position, length, wind, hub_force, anchor_force,
+    position: list[float],
+    length: float,
+    wind: list[float],
+    hub_force: list[float],
+    anchor_force: list[float],
 ) -> None:
     result = TallakQuasiStaticTether().evaluate(_inputs(
         attachment_pos_ned=np.array(position), rest_length_m=length,
@@ -345,7 +350,9 @@ def test_newton_matches_recorded_scipy_equilibria(
     {"attachment_pos_ned": np.zeros(2)}, {"payout_rate_ms": float("inf")},
     {"air_density_kg_m3": -1.0},
 ])
-def test_invalid_physics_inputs_are_rejected(changes) -> None:
+def test_invalid_physics_inputs_are_rejected(
+    changes: dict[str, float | np.ndarray],
+) -> None:
     with pytest.raises(ValueError):
         _inputs(**changes)
 

@@ -11,6 +11,7 @@ Step 3: verify each IC is reproducible — restart simulate_point from that IC a
 import math
 
 import numpy as np
+import pytest
 from simulation.rotor_physics import require_mass_kg
 
 
@@ -155,7 +156,7 @@ def _get_ramp():
 
 # ── tests ──────────────────────────────────────────────────────────────────────
 
-def test_ramp_tracks_to_1000n(capsys):
+def test_ramp_tracks_to_1000n(capsys: pytest.CaptureFixture[str]):
     """Standalone ramp must not diverge and must track v_target throughout."""
     samples, diverged_at = _get_ramp()
 
@@ -179,7 +180,7 @@ def test_ramp_tracks_to_1000n(capsys):
     assert not bad, f"lost tracking at {bad}"
 
 
-def test_ics_are_reproducible(capsys):
+def test_ics_are_reproducible(capsys: pytest.CaptureFixture[str]):
     """Each captured IC must restart cleanly: 5 s sim stays within tolerance."""
     samples, _ = _get_ramp()
     failures = []

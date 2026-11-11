@@ -27,10 +27,29 @@ import argparse
 import json
 import math
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
+from numpy.typing import NDArray
 
 from groundstation.rawes_diag import diag_values
+
+
+class _YawData(TypedDict):
+    att_t: NDArray[np.float64]
+    att_yaw: NDArray[np.float64]
+    att_rate: NDArray[np.float64]
+    srv_t: NDArray[np.float64]
+    srv_pwm: NDArray[np.float64]
+    nvf: dict[str, NDArray[np.float64]]
+    nvf_t: dict[str, NDArray[np.float64]]
+    rpm_t: NDArray[np.float64]
+    rpm1: NDArray[np.float64]
+    pidy_t: NDArray[np.float64]
+    pidy_p: NDArray[np.float64]
+    pidy_i: NDArray[np.float64]
+    pidy_d: NDArray[np.float64]
+    pidy_ff: NDArray[np.float64]
 
 # Bench-calibrated SERVO4 deadband (see repo memory yaw-regulation-lua-ff-clamp.md).
 YAW_DEADBAND_US = 1108.0
@@ -54,7 +73,7 @@ def _boot_ms(d: dict) -> float | None:
     return float(tb) if tb is not None else None
 
 
-def load(path: str) -> dict:
+def load(path: str) -> _YawData:
     att_t, att_yaw, att_rate = [], [], []
     srv_t, srv_pwm = [], []
     nvf: dict[str, list] = {
@@ -151,7 +170,7 @@ def _resample(t_ms: np.ndarray, y: np.ndarray):
     return 1.0 / dt, yr
 
 
-def dominant_freq(t_ms: np.ndarray, y: np.ndarray, fmin=0.2):
+def dominant_freq(t_ms: np.ndarray, y: np.ndarray, fmin: float=0.2):
     """FFT dominant frequency [Hz] of the AC part, ignoring freqs < fmin."""
     fs, yr = _resample(t_ms, y)
     if fs is None or yr is None or len(yr) < 8:
@@ -179,7 +198,7 @@ def zero_cross_freq(t_ms: np.ndarray, y: np.ndarray):
     return crossings / (2.0 * dur)
 
 
-def phase_lag_ms(t_a, a, t_b, b, period_s=None):
+def phase_lag_ms(t_a: NDArray[np.float64], a: NDArray[np.float64], t_b: NDArray[np.float64], b: NDArray[np.float64], period_s: float | None=None):
     """Cross-correlation lag of b relative to a [ms] on a common resampled grid.
     Positive => b lags a.  If *period_s* is given, the search is constrained to
     +/- period/2 so a periodic signal does not alias onto a distant cycle."""
@@ -204,7 +223,7 @@ def phase_lag_ms(t_a, a, t_b, b, period_s=None):
     return lag * (1000.0 / fs_a)
 
 
-def _fmt(x, nd=3):
+def _fmt(x: float | None, nd: int=3):
     return (
         "n/a"
         if x is None or (isinstance(x, float) and math.isnan(x))
@@ -212,7 +231,7 @@ def _fmt(x, nd=3):
     )
 
 
-def _common_grid(t_a_ms, a, t_b_ms, b):
+def _common_grid(t_a_ms: NDArray[np.float64], a: NDArray[np.float64], t_b_ms: NDArray[np.float64], b: NDArray[np.float64]):
     """Resample a(t_a) and b(t_b) onto one uniform grid over their overlap.
     Returns (dt, grid_s, a_on_grid, b_on_grid) or (None,...)."""
     if len(t_a_ms) < 4 or len(t_b_ms) < 4:
@@ -234,7 +253,7 @@ def _common_grid(t_a_ms, a, t_b_ms, b):
     return dt, grid, np.interp(grid, ta, a), np.interp(grid, tb, b)
 
 
-def correction_analysis(t_srv_ms, pwm, t_att_ms, rate):
+def correction_analysis(t_srv_ms: NDArray[np.float64], pwm: NDArray[np.float64], t_att_ms: NDArray[np.float64], rate: NDArray[np.float64]):
     """Decompose the SERVO4 AC command (the correction) against the yaw rate.
 
     With a CONSTANT rotor RPM the reaction torque is constant, so the
@@ -527,7 +546,7 @@ def analyze(
         _plot(D, t0)
 
 
-def _plot(D, t0):
+def _plot(D: _YawData, t0: float):
     try:
         import matplotlib.pyplot as plt
     except Exception as e:

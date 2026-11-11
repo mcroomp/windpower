@@ -136,10 +136,14 @@ class HeliParams:
     ATC_INPUT_TC: float = 0.0
 
     @classmethod
-    def from_ap_dict(cls, params: dict[str, float], **overrides) -> HeliParams:
+    def from_ap_dict(
+        cls, params: dict[str, float], *,
+        loop_rate_hz: float = 400.0, output_limit: float = 1.0,
+    ) -> HeliParams:
         """Build from a flat AP params dict (e.g. from param_defaults.load_ap_params()).
 
-        Pass ``**overrides`` to set non-AP fields like ``loop_rate_hz``.
+        Set loop rate and output limit explicitly; AP-controlled fields come
+        from the parameter dictionary.
         """
         def _f(key: str, default: float = 0.0) -> float:
             return float(params.get(key, default))
@@ -161,5 +165,6 @@ class HeliParams:
             ATC_RATE_Y_MAX    = _f("ATC_RATE_Y_MAX"),
             ATC_INPUT_TC      = _f("ATC_INPUT_TC"),
             CYC_MAX_cd        = _f("H_CYC_MAX", 2500.0),
-            **overrides,
+            loop_rate_hz=loop_rate_hz,
+            output_limit=output_limit,
         )

@@ -209,7 +209,7 @@ class SpinSensor:
         self,
         sigma:    float = 0.0,
         rng_seed: int | None = None,
-        **_ignored,
+        **_ignored: object,
     ):
         self._sigma = float(sigma)
         self._rng   = np.random.default_rng(rng_seed)

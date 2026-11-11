@@ -35,6 +35,8 @@ from __future__ import annotations
 import math
 
 import pytest
+
+from tests.sitl.stack_infra import StackContext
 from tests.sitl.torque.torque_test_utils import (
     run_observation_loop,
     save_telemetry,
@@ -49,7 +51,7 @@ _MAX_PSI_DOT_RAD_S = math.radians(16.0)   # [rad/s]
 pytestmark = pytest.mark.sitl
 
 @pytest.mark.timeout(2400)
-def test_yaw_regulation_sitl(torque_armed):
+def test_yaw_regulation_sitl(torque_armed: StackContext):
     """
     ArduPilot SITL regulates hub yaw using the DDFP Motor4 output.
 

@@ -17,13 +17,17 @@ if sys.platform == "win32":
 
 from .constants import _LOG_DIR
 import contextlib
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from _csv import Writer
 
 
 # ---------------------------------------------------------------------------
 # CSV cell formatter
 # ---------------------------------------------------------------------------
 
-def _fmt(v):
+def _fmt(v: object):
     """CSV cell formatter: '' for None, otherwise the value's natural repr."""
     if v is None:
         return ""
@@ -118,7 +122,7 @@ class _RunLog:
         log.row([0.0, 1, +0.02])
         log.close()
     """
-    def __init__(self, path: str, fh, writer):
+    def __init__(self, path: str, fh: TextIO, writer: Writer):
         self.path = path
         self._fh = fh
         self._w  = writer

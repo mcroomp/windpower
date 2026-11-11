@@ -456,7 +456,7 @@ def _flag_transitions(ekf_flags: list) -> list:
 _W = 72
 
 
-def _rule(char="-"):
+def _rule(char: str="-"):
     print(char * _W)
 
 
@@ -945,7 +945,7 @@ def _print_mediator(r: RunReport, fl: FlightLog | None = None) -> None:
             hdr += f"  {'eq_expect':>10}  {'err_flt':>10}"
         print(hdr)
 
-        def _frow(label, a, b, eq_val=None, warn=5.0):
+        def _frow(label: str, a: float, b: float, eq_val: float | None=None, warn: float=5.0):
             delta = b - a
             tag = "[!!]" if abs(delta) > warn else ""
             row = f"    {label:<20}  {a:>10.1f}  {b:>10.1f}  {delta:>+10.1f}  {tag}"

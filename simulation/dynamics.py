@@ -16,6 +16,7 @@ The caller supplies only aerodynamic + tether forces/moments — no gravity.
 """
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 
 class RigidBodyDynamics:
@@ -48,16 +49,16 @@ class RigidBodyDynamics:
     def __init__(
         self,
         mass:             float,
-        I_body,                       # (3,) principal moments [kg·m²]
-        pos0,                         # (3,) initial position ENU [m]
-        vel0,                         # (3,) initial velocity [m/s]
+        I_body:           ArrayLike,   # (3,) principal moments [kg·m²]
+        pos0:             ArrayLike,   # (3,) initial position ENU [m]
+        vel0:             ArrayLike,   # (3,) initial velocity [m/s]
         R0:               np.ndarray | None = None,
-        omega0                        = None,  # (3,) initial orbital omega world [rad/s]
+        omega0:           ArrayLike | None = None,  # (3,) initial orbital omega world [rad/s]
         g:                float       = 9.81,
         reorth_interval:  int         = 200,
         I_spin:           float       = 0.0,   # spin-axis inertia for gyroscopic coupling [kg·m²]
         z_floor:          float | None = None,  # maximum NED Z (altitude floor) [m]; None = no floor
-    ):
+    ) -> None:
         self.mass    = float(mass)
         self.g       = float(g)
         self._reorth = int(reorth_interval)
@@ -65,13 +66,13 @@ class RigidBodyDynamics:
         self._z_floor = float(z_floor) if z_floor is not None else None
 
         inertia = np.asarray(I_body, dtype=float)
-        self._I_b     = np.diag(inertia)
-        self._I_b_inv = np.diag(1.0 / inertia)
+        self._I_b: NDArray[np.float64] = np.diag(inertia)
+        self._I_b_inv: NDArray[np.float64] = np.diag(1.0 / inertia)
 
-        self._pos   = np.asarray(pos0,   dtype=float).copy()
-        self._vel   = np.asarray(vel0,   dtype=float).copy()
-        self._R     = np.eye(3, dtype=float) if R0 is None else np.asarray(R0, dtype=float).copy()
-        self._omega = np.zeros(3, dtype=float) if omega0 is None else np.asarray(omega0, dtype=float).copy()
+        self._pos: NDArray[np.float64] = np.asarray(pos0,   dtype=float).copy()
+        self._vel: NDArray[np.float64] = np.asarray(vel0,   dtype=float).copy()
+        self._R: NDArray[np.float64] = np.eye(3, dtype=float) if R0 is None else np.asarray(R0, dtype=float).copy()
+        self._omega: NDArray[np.float64] = np.zeros(3, dtype=float) if omega0 is None else np.asarray(omega0, dtype=float).copy()
 
         self._step_count = 0
         self._F_grav = np.array([0.0, 0.0, self.g * self.mass])  # constant; avoid per-step allocation
@@ -81,7 +82,7 @@ class RigidBodyDynamics:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _skew(w: np.ndarray) -> np.ndarray:
+    def _skew(w: NDArray[np.float64]) -> NDArray[np.float64]:
         """3×3 skew-symmetric cross-product matrix of vector w."""
         return np.array([
             [ 0.0,   -w[2],  w[1]],
@@ -91,14 +92,14 @@ class RigidBodyDynamics:
 
     def _derivs(
         self,
-        pos:      np.ndarray,
-        vel:      np.ndarray,
-        R:        np.ndarray,
-        omega_w:  np.ndarray,
+        pos:      NDArray[np.float64],
+        vel:      NDArray[np.float64],
+        R:        NDArray[np.float64],
+        omega_w:  NDArray[np.float64],
         F_ext:    np.ndarray,   # external force in world frame (no gravity)
         M_ext:    np.ndarray,   # external moment in world frame (orbital moments only)
         omega_spin: float = 0.0,  # rotor spin rate [rad/s] for gyroscopic coupling
-    ):
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
         """
         State derivatives for [pos, vel, R, omega_orbital_world].
 
@@ -153,7 +154,7 @@ class RigidBodyDynamics:
         M_world:    np.ndarray,   # (3,) orbital moments in NED world frame [N·m] (no M_spin)
         dt:         float,
         omega_spin: float = 0.0,  # rotor spin rate [rad/s] — for gyroscopic coupling only
-    ) -> dict:
+    ) -> dict[str, NDArray[np.float64]]:
         """
         Advance the rigid-body state by dt seconds using RK4.
 
@@ -211,7 +212,7 @@ class RigidBodyDynamics:
         }
 
     @property
-    def state(self) -> dict:
+    def state(self) -> dict[str, NDArray[np.float64]]:
         """Current state without advancing (read-only snapshot)."""
         return {
             "pos":   self._pos.copy(),

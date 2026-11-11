@@ -20,6 +20,8 @@ import math
 import numpy as np
 import pytest
 
+from linkhub_client.messages import Message, RawMessage
+from simulation.telemetry_csv import TelRow
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
 from linkhub_client.messages import (
     NamedValueFloat,
@@ -57,7 +59,7 @@ def _get_ic_thrust(ic: dict) -> float:
     )
 
 
-def _axle_deg(row) -> float:
+def _axle_deg(row: TelRow) -> float:
     # body_z is the 3rd column of R body->NED
     body_z = np.array([float(row.r02), float(row.r12), float(row.r22)], dtype=float)
     pos = np.array([float(row.pos_x), float(row.pos_y), float(row.pos_z)], dtype=float)
@@ -114,7 +116,7 @@ def test_lua_flight_ic_passive_sitl(guided_nogps_armed_lua_full: StackContext):
         pytest.fail("kinematic_exit event disappeared after transition wait")
     t_obs_start = float(kinematic_exit["t_sim"])
 
-    def _handle(msg, t_rel):
+    def _handle(msg: Message | RawMessage | None, t_rel: float):
         if msg is None:
             return None
         decoded = decode_message(msg)
