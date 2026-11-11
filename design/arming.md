@@ -76,6 +76,10 @@ Disarm behavior is:
 5. Apply and verify the complete safe-off invariant.
 
 Cleanup must run after partial startup failures as well as successful runs.
+The LinkHub UI/CLI shared safe-off path also requests the external Bluetooth
+rotor motor's controlled stop. Motor ramp-down runs concurrently with vehicle
+safe-off so it does not delay disarming; cleanup waits for both. Motor-stop
+failures are reported and do not prevent vehicle cleanup.
 This is a required cleanup path, not a hard wall-clock guarantee: HTTP
 connection/operation timeouts can delay mode release and disarm. A CLI observation
 duration is not an independent vehicle-side armed watchdog.

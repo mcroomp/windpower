@@ -224,7 +224,10 @@ and setup inputs remain named values. The
 owns the exact split.
 The standalone `stop` command and its `disarm` alias apply that same safe-off
 sequence, so either can recover a run started by another CLI or browser
-process. `arm [--force]` sends and confirms a direct arm request; `--force`
+process. This also requests the Bluetooth rotor motor's controlled stop,
+concurrently with vehicle cleanup; motor-stop errors are reported without
+preventing disarming. See the [safe-off owner](../design/arming.md#ground-side-arm-and-disarm).
+`arm [--force]` sends and confirms a direct arm request; `--force`
 explicitly bypasses ArduPilot pre-arm checks and is only appropriate for
 secured bench hardware.
 

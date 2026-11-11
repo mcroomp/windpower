@@ -958,6 +958,7 @@ export class PassiveController {
         this.write(`${label}: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
     };
+    const motorStop = attempt("Bluetooth rotor motor stop", () => this.api.stopMotor());
     await attempt("RAWES_MODE=0", () => this.setParameter("RAWES_MODE", 0));
     const status = await this.api.status().catch(() => null);
     if (isArmed(status)) {
@@ -973,6 +974,7 @@ export class PassiveController {
         throw new Error(`expected 36, found ${result.value}`);
       }
     });
+    await motorStop;
   }
 
   private resetLocalState(): void {

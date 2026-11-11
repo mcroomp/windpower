@@ -6,9 +6,14 @@ import { MavModeFlag, MavParamType, MavState } from "../src/generated/protocol";
 import { mavEnum } from "../src/mav";
 import { parseRunCollective, PassiveController } from "../src/passive";
 import { TelemetryStore } from "../src/telemetry";
-import type { LinkHubStatus, MessageRecord } from "../src/types";
+import type { LinkHubStatus, MessageRecord, MotorStatus } from "../src/types";
 
 const controllers: PassiveController[] = [];
+const stoppedMotor: MotorStatus = {
+  available: true, connected: true, device: "test", device_id: "motor-1",
+  running: false, speed_percent: 0, target_speed_percent: 0, stopping: false,
+  direction: "forward", command_expires_in_ms: null, error: null,
+};
 
 afterEach(async () => {
   for (const controller of controllers.splice(0)) {
@@ -20,6 +25,7 @@ afterEach(async () => {
 function setup() {
   vi.useFakeTimers();
   const api = new LinkHubApi();
+  vi.spyOn(api, "stopMotor").mockResolvedValue(stoppedMotor);
   const status: LinkHubStatus = {
     connected: true, ready: true, connection: "test", port: null, baud: null,
     clock_epoch: 0, target_system: 1, target_component: 1, base_mode: "",
@@ -82,6 +88,52 @@ function setup() {
   );
   return { api, status, params, setParameter, setParameters, mode, arm, send, output, controller, runner, feedServos };
 }
+
+describe("shared safe-off", () => {
+  it.each(["stop", "disarm"])("%s stops the Bluetooth motor and disarms the vehicle", async (command) => {
+    const { api, runner, status, arm, params, output } = setup();
+    status.base_mode = MavModeFlag.SAFETY_ARMED;
+
+    await runner.execute(command);
+
+    expect(api.stopMotor).toHaveBeenCalledExactlyOnceWith();
+    expect(arm).toHaveBeenCalledExactlyOnceWith(false, true);
+    expect(params.get("RAWES_MODE")).toBe(0);
+    expect(output).toContain("Bluetooth rotor motor stop: OK");
+  });
+
+  it("disarms without waiting for the motor ramp-down, but waits for both before completing", async () => {
+    const { api, runner, status, arm, controller } = setup();
+    status.base_mode = MavModeFlag.SAFETY_ARMED;
+    let finishStop = () => {};
+    vi.mocked(api.stopMotor).mockImplementation(() => new Promise((resolve) => {
+      finishStop = () => resolve(stoppedMotor);
+    }));
+
+    const stopping = runner.execute("stop");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(arm).toHaveBeenCalledExactlyOnceWith(false, true);
+    expect(controller.phase).toBe("stopping");
+    finishStop();
+    await stopping;
+    expect(controller.phase).toBe("idle");
+  });
+
+  it("reports motor-stop failures and still completes vehicle safe-off", async () => {
+    const { api, runner, status, arm, params, output } = setup();
+    status.base_mode = MavModeFlag.SAFETY_ARMED;
+    vi.mocked(api.stopMotor).mockRejectedValue(new Error("Bluetooth unavailable"));
+
+    await runner.execute("stop");
+
+    expect(output).toContain("Bluetooth rotor motor stop: Bluetooth unavailable");
+    expect(output).not.toContain("Bluetooth rotor motor stop: OK");
+    expect(arm).toHaveBeenCalledExactlyOnceWith(false, true);
+    expect(params.get("H_YAW_TRIM")).toBe(0);
+    expect(api.setMode).toHaveBeenCalledExactlyOnceWith(1);
+  });
+});
 
 describe("run collective", () => {
   it("parses bounded collective and duration without armed/passive options", () => {
