@@ -56,7 +56,7 @@ class _DataFlashHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def log_message(self, _format: str, *_args: object) -> None:
+    def log_message(self, format: str, *_args: object) -> None:
         pass
 
 

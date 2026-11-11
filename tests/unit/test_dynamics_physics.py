@@ -65,6 +65,7 @@ def test_free_fall_matches_g():
     F0  = np.zeros(3)
     M0  = np.zeros(3)
     t   = 1.0
+    s = dyn.state
     for _ in range(int(round(t / DT))):
         s = dyn.step(F0, M0, DT)
     # z = z0 + 0.5*g*t^2 ; v_z = g*t
@@ -81,6 +82,7 @@ def test_force_exactly_cancels_gravity_holds_altitude():
     """F = -m·g·ẑ_world (i.e. F[2] = -m·g) holds the hub for arbitrarily long."""
     dyn   = _fresh()
     F_up  = np.array([0.0, 0.0, -MASS * G])   # NED: upward in world frame
+    s = dyn.state
     for _ in range(N_STEPS_1S * 5):           # 5 s
         s = dyn.step(F_up, np.zeros(3), DT)
     assert s["pos"][2] == pytest.approx(-50.0, abs=1e-6)
@@ -94,6 +96,7 @@ def test_no_spin_no_torque_holds_attitude():
     """ω₀ = 0 and τ = 0 ⇒ R stays at identity forever."""
     dyn = _fresh()
     F_up = np.array([0.0, 0.0, -MASS * G])
+    s = dyn.state
     for _ in range(N_STEPS_1S * 2):
         s = dyn.step(F_up, np.zeros(3), DT)
     np.testing.assert_allclose(s["R"], np.eye(3), atol=1e-9)
@@ -106,6 +109,7 @@ def test_constant_body_rate_about_z_rotates_R_correctly():
     dyn = _fresh(omega0=[0.0, 0.0, Ω_z])
     F_up = np.array([0.0, 0.0, -MASS * G])
     t = 0.5
+    s = dyn.state
     for _ in range(int(round(t / DT))):
         s = dyn.step(F_up, np.zeros(3), DT)
     # body_x should have rotated by Ω_z·t about +Z (i.e. yaw by +0.5 rad)
@@ -255,6 +259,7 @@ def test_no_spin_yields_no_precession_only_roll_about_torque_axis():
     F_up = np.array([0.0, 0.0, -MASS * G])
     M    = np.array([0.0, M_amp, 0.0])
     t = 0.05
+    s = dyn.state
     for _ in range(int(round(t / DT))):
         s = dyn.step(F_up, M, DT, omega_spin=0.0)
     # Without gyroscopic coupling and Ixx = Iyy = 5, ω about +y grows at M/Iyy.

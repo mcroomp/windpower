@@ -214,6 +214,8 @@ class TestEndToEndRollCorrection:
         
         # Run controller to generate cyclic (should be negative to roll left)
         dt = 1.0 / 400.0
+        tilt_lon_cmd = _IC.trim_tilt_lon
+        tilt_lat_cmd = _IC.trim_tilt_lat
         for _ in range(50):
             tilt_lon_cmd, tilt_lat_cmd, _ = heli.step_from_thrust(
                 float(_IC.eq_thrust), rate_sp, 0.0, omega_body_right_roll, dt,

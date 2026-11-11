@@ -48,10 +48,13 @@ def load_data(path: Path) -> dict[str, np.ndarray]:
     Blank cells become NaN."""
     with open(path) as f:
         # Skip metadata
+        header: str | None = None
         for line in f:
             if not line.startswith("#"):
                 header = line
                 break
+        if header is None:
+            raise ValueError(f"{path} contains metadata but no CSV header row")
         rdr = csv.reader(f)
         cols = [c.strip() for c in header.strip().split(",")]
         rows: list[list[str]] = list(rdr)
