@@ -10,14 +10,27 @@ call :ensure_tool uv astral-sh.uv
 if errorlevel 1 exit /b 1
 call :ensure_node
 if errorlevel 1 exit /b 1
-echo [INFO] Installing uv-managed Python 3.14.10 ...
-call uv python install 3.14.10
+set "PYTHON_VERSION="
+set /p PYTHON_VERSION=<"%REPO%\.python-version"
+if not defined PYTHON_VERSION (
+    echo ERROR: .python-version must specify the supported Python minor.
+    exit /b 1
+)
+set "UV_PYTHON_INSTALL_DIR=%REPO%\.tools\python"
+echo [INFO] Upgrading repository-local Python %PYTHON_VERSION% ...
+call uv python install --upgrade --no-bin --no-registry "%PYTHON_VERSION%"
 if errorlevel 1 (
-    echo ERROR: uv could not install Python 3.14.10.
+    echo ERROR: uv could not upgrade Python %PYTHON_VERSION%.
+    exit /b 1
+)
+set "PYTHON_EXE="
+for /f "delims=" %%P in ('uv python find --managed-python --system --no-project "%PYTHON_VERSION%"') do set "PYTHON_EXE=%%P"
+if not defined PYTHON_EXE (
+    echo ERROR: The repository-local Python installation could not be located.
     exit /b 1
 )
 echo [INFO] Synchronizing the project environment ...
-call uv sync --project "%REPO%" --python 3.14.10 --managed-python --locked --dev --extra simulation
+call uv sync --project "%REPO%" --python "%PYTHON_EXE%" --managed-python --locked --dev --extra simulation
 if errorlevel 1 (
     echo ERROR: uv sync failed.
     exit /b 1
@@ -97,31 +110,22 @@ if not defined NODE_MAJOR (
     echo ERROR: .node-version must specify the supported Node.js major.
     exit /b 1
 )
-where node >nul 2>nul
-if not errorlevel 1 goto :verify_node
-where winget >nul 2>nul
+call powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\scripts\setup_node.ps1" -RepoRoot "%REPO%" -NodeMajor "%NODE_MAJOR%"
 if errorlevel 1 (
-    echo ERROR: WinGet is required to install Node.js. Install or update App Installer.
+    echo ERROR: Repository-local Node.js setup failed.
     exit /b 1
 )
-set "NODE_INSTALL_VERSION="
-for /f "delims=" %%V in ('winget show --id OpenJS.NodeJS.LTS --exact --source winget --versions --accept-source-agreements ^| findstr /r "^%NODE_MAJOR%\.[0-9][0-9]*\.[0-9]"') do if not defined NODE_INSTALL_VERSION set "NODE_INSTALL_VERSION=%%V"
-if not defined NODE_INSTALL_VERSION (
-    echo ERROR: WinGet did not list a Node.js %NODE_MAJOR%.x release.
-    exit /b 1
-)
-call :install_package OpenJS.NodeJS.LTS --version %NODE_INSTALL_VERSION%
-if errorlevel 1 exit /b 1
-:verify_node
-call node -e "if (process.versions.node.split('.')[0] !== process.argv[1]) process.exit(1)" "%NODE_MAJOR%"
+set "PATH=%REPO%\.tools\node;%PATH%"
+call "%REPO%\.tools\node\node" -e "if (process.versions.node.split('.')[0] !== process.argv[1]) process.exit(1)" "%NODE_MAJOR%"
 if errorlevel 1 (
-    echo ERROR: Node.js %NODE_MAJOR%.x is required. Select that version on PATH and rerun setup.cmd.
+    echo ERROR: The repository-local Node.js version could not be verified.
     exit /b 1
 )
-where npm >nul 2>nul
-if not errorlevel 1 exit /b 0
-echo ERROR: npm is missing from the shared Node.js installation.
-exit /b 1
+if not exist "%REPO%\.tools\node\npm.cmd" (
+    echo ERROR: npm is missing from the repository-local Node.js installation.
+    exit /b 1
+)
+exit /b 0
 
 :install_package
 where winget >nul 2>nul
