@@ -321,6 +321,94 @@ Summarised from the investigations below:
   timeout had this cause; retain the exact request and journal evidence if
   another intermittent failure occurs.
 
+### 2026-10-27 verified automatic DroneBridge UDP cleanup
+
+- The operator authorized working around the missing DELETE response by
+  querying the client list afterward, retaining the exclusive clear-all policy.
+  LinkHub now supports the opt-in `--dronebridge-url` lifecycle described in
+  [LinkHub architecture](design/linkhub.md#exclusive-dronebridge-udp-lifecycle).
+- The development binary's managed `test-connection` registered through UDP,
+  logged the expected two-second cleanup response timeout, then confirmed
+  `udp_connected=0`, `udp_clients=[]` and exited successfully.
+- Two isolated service cycles on HTTP port 9001 both reached ready with
+  flight-controller target `1/1`. Bridge client-list reads confirmed registrations
+  `192.168.9.148:49667` and `192.168.9.148:63281`, respectively.
+- Both services were stopped using calibration's production `_stop_process()`
+  helper (Windows Ctrl+Break). Each logged the expected timeout warning,
+  verified an empty client list, and exited with code 0. Independent reads
+  confirmed an empty list after each stop.
+- Canonical journal runs `257f31ba-7cfe-4efb-b485-de510675c2b7` and
+  `e17d6b72-6bc4-4ba5-9d49-2902e977884f` live under
+  `simulation/logs/linkhub_udp_lifecycle_check/`. Native `linkhub query types`
+  confirmed each cleanly flushed journal contains one TX GCS heartbeat and
+  three RX frames. No flight-controller commands, parameter writes, firmware
+  uploads, or reboots were performed; complete safe-off was not checked.
+- All 70 LinkHub application tests and eight focused Python process-lifecycle
+  tests passed. The existing main LinkHub service was not stopped or replaced.
+
+### 2026-10-27 DroneBridge UDP cleanup API investigation
+
+- The operator selected exclusive UDP-client ownership, authorizing clear-all
+  cleanup rather than targeted removal. DroneBridge exposes
+  `POST /api/settings/clients/udp` to add a client and
+  `DELETE /api/settings/clients/clear_udp` to clear all clients, including the
+  saved target; no per-client HTTP removal route was found.
+- One authorized DELETE to `192.168.9.143` timed out after five seconds with
+  no HTTP response bytes. A subsequent read of `/api/system/stats` succeeded
+  and confirmed `udp_connected=0`, `udp_clients=[]`.
+- `/api/system/info` identified the installed firmware as 2.4.1 stable,
+  build 23. At investigation time, v2.4.1 was the latest published release.
+  Its `settings_clients_clear_udp_get()` handler and the current upstream
+  master handler clear the list but return without sending an HTTP response.
+- The initial investigation paused lifecycle automation at that API failure;
+  the subsequently authorized and verified handling is recorded above.
+  No firmware upload, reboot, or flight-controller command was performed.
+
+### 2026-10-27 DroneBridge UDP connection verification
+
+- The initial no-argument calibration scan found no serial ports and stopped
+  its automatically started LinkHub. No native USB connection was available
+  during that scan.
+- With the operator's authorization to test the bridge at `192.168.9.143`,
+  the development LinkHub binary's UDP connection check sent one GCS heartbeat
+  to port 14550 and received a heartbeat from bridge component `1/68`.
+- An isolated LinkHub on HTTP port 9001 then used
+  `udp:192.168.9.143:14550`. It reached `ready` with flight-controller target
+  `1/1`, disarmed ACRO, no dropped frames, and no transport errors.
+- Canonical journal run `ec61c185-2799-473d-b89b-7aed9dff69e5`, under
+  `simulation/logs/linkhub_udp_connection_check/`, was flushed and inspected
+  with `linkhub query types` and `armed`. The first 26 seconds contained
+  166 MAVLink frames; all 27 TX frames were GCS heartbeats. No commands,
+  parameter writes, bridge configuration changes, or actuator operations
+  were performed. The complete safe-off invariant was not checked.
+- This PC's LAN IP for the bridge was `192.168.9.148`. A manual DroneBridge
+  UDP client entry for a local listener would therefore use
+  `192.168.9.148:14550`; remote-peer mode registered automatically without
+  that manual entry. The isolated verification service was stopped afterward.
+- All 62 LinkHub application tests passed, including UDP transport and
+  existing TCP regressions. Current setup instructions and UDP semantics
+  are owned by [LinkHub README](linkhub/README.md) and
+  [LinkHub architecture](design/linkhub.md#udp-transport).
+
+### 2026-10-27 hardware neutral-trim update
+
+- The operator authorized live trim writes and confirmed the hardware was
+  secured with clearance for swash movement.
+- Connected through the Python HTTP client at `http://127.0.0.1:8999`;
+  LinkHub reported `serial:COM4:115200`, target `1/1`.
+- The shared safe-off check passed before writing. Set `SERVO1_TRIM`,
+  `SERVO2_TRIM`, and `SERVO3_TRIM` from 1517 to 1378 and confirmed each
+  parameter by readback. Saved hardware defaults match.
+- Applied the canonical safe-off helper after the writes; verification
+  confirmed disarmed ACRO, mode 0, flybar passthrough, automated swash,
+  DDFP mapped at output 9, zero yaw trim, and output 9 off.
+- Five fresh servo-output samples all showed S1/S2/S3 at 1378 us and output
+  9 at 1000 us. Collective endpoints remained 1200/1557 us and cyclic
+  authority 1000 cdeg.
+- This was a stationary neutral check only. No armed test, full-travel sweep,
+  blade-pitch measurement, Lua upload, or reboot was performed. Mechanical
+  clearance across the collective/cyclic envelope remains unverified.
+
 ### 2026-10-22 disarmed cyclic neutral-pulse diagnosis
 
 - Auto-detected through the existing LinkHub at `http://127.0.0.1:8999`,

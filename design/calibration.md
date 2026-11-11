@@ -118,7 +118,8 @@ and vehicle +X both point toward the centre of gravity (`AHRS_ORIENTATION=0`).
 Hardware overrides live in
 [`hardware/rawes_hardware_defaults.parm`](../hardware/rawes_hardware_defaults.parm).
 
-Swashplate PWM range is 1000 µs (min) … 1500 µs (neutral) … 2000 µs (max), but
+Swashplate PWM uses a nominal 1000 µs (min) … 1500 µs (mixer reference) …
+2000 µs (max) range; actual neutral outputs depend on the servo trims.
 ArduPilot's heli mixer overwrites `SERVOn_MIN/MAX` on every output tick. Use
 `swash range <min_us> <max_us>` to write `H_COL_MIN/H_COL_MAX`, which is the
 actual travel limiter the heli mixer respects.
@@ -236,12 +237,8 @@ During `run passive --rotor-motor`, keyboard controls are:
 Every exit path sends the safe-stop command before disconnecting Bluetooth and
 performing the normal vehicle shutdown.
 
-The Bluetooth helper can also be exercised independently:
-
-```bash
-uv run python -m calibrate.bldc_ble
-uv run python -m calibrate.bldc_ble --run-seconds 5 --speed 10 --direction cw
-```
+For standalone graphical motor control, use the
+[LinkHub UI motor panel](../linkhub-ui/README.md#bluetooth-motor-panel).
 
 ## `watch <stream> [--duration N]`
 

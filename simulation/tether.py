@@ -317,7 +317,9 @@ class TallakQuasiStaticTether:
             new_loads = segment_loads(tangents, lengths)
             if float(np.max(np.linalg.norm(new_loads - loads, axis=1))) < 1e-7:
                 break
-            loads = 0.5 * (loads + new_loads)
+            # A sagging line needs relaxation; a stretched line converges
+            # directly without repeatedly halving a small load correction.
+            loads = new_loads if distance >= inputs.rest_length_m else 0.5 * (loads + new_loads)
         else:
             raise TetherConvergenceError("Tallak tether distributed-load iteration failed after 80 iterations")
 

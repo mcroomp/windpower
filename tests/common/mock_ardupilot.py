@@ -26,7 +26,7 @@ from simulation.physics_core import HubObservation
 from groundstation.pumping_planner import TensionCommand
 from simulation.param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range
 from simulation.telemetry_csv import TelRow, write_csv
-from simulation.winch import WinchController, GovernedWinchController
+from simulation.winch import WinchController, GovernedWinchController, TorqueWinchController
 
 if TYPE_CHECKING:
     from simulation.rawes_lua_harness import RawesLua
@@ -170,7 +170,7 @@ class _MockArdupilotBase:
         # telemetry (winch_speed_ms, ...) is centralized the same way as the
         # backend-specific _telemetry_overrides() instead of every test
         # needing to thread it through its own tel_fn.
-        self.winch: WinchController | GovernedWinchController | None = None
+        self.winch: WinchController | GovernedWinchController | TorqueWinchController | None = None
         self._telemetry: list = []
         self._log_step = 0
         self._guided_ctrl: GuidedAttitudeController | None = None
@@ -233,10 +233,10 @@ class _MockArdupilotBase:
         """Backend-specific telemetry field overrides."""
         return {}
 
-    def log(self, runner: PhysicsRunner, sr: dict) -> None:
+    def log(self, runner: PhysicsRunner, sr: dict, *, force: bool = False) -> None:
         if self.tel_fn is None or self._tel_every is None:
             return
-        if self._log_step % self._tel_every == 0:
+        if force or self._log_step % self._tel_every == 0 or sr.get("ground_contact", False):
             # Extract current body attitude (actual) from runner
             obs = runner.observe()
             R = obs.R
@@ -335,9 +335,10 @@ class _MockArdupilotBase:
                 extra_kwargs.update(self.winch.log_fields())
 
             collective_rad = self._col_min + self._last_thrust * (self._col_max - self._col_min)
-            self._telemetry.append(
-                TelRow.from_physics(runner, sr, collective_rad, self._wind, **extra_kwargs)
-            )
+            row = TelRow.from_physics(runner, sr, collective_rad, self._wind, **extra_kwargs)
+            if sr.get("ground_contact", False):
+                row.note = "ground_contact"
+            self._telemetry.append(row)
         self._log_step += 1
 
     def write_telemetry(self, path: Path | str) -> None:
@@ -695,7 +696,7 @@ class _PumpingPythonMode:
         self._alt_i = max(i_min, min(i_max, self._alt_i + self._ki_alt * alt_err * dt))
 
         # Rate-stability gate (mirrors rawes.lua vz_gate)
-        rate_mag = float(np.linalg.norm(obs.gyro))
+        rate_mag = float(np.linalg.norm(obs.gyro[:2]))
         vz_gate  = max(self.VZ_GATE_MIN, min(1.0, 1.0 - rate_mag / self.VZ_GATE_RATE_RADS))
 
         alt_p     = self._kp_alt * alt_err

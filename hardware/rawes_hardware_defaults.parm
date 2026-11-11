@@ -29,13 +29,12 @@ SERVO1_REVERSED    1
 SERVO2_REVERSED    1
 SERVO3_REVERSED    1
 
-# Measured final-output safe travel is 1257..1777 us. These collective-only
-# limits reserve cyclic headroom; native oscillation verified 1260..1774 us.
-SERVO1_TRIM      1517
-SERVO2_TRIM      1517
-SERVO3_TRIM      1517
-H_COL_MIN        1342
-H_COL_MAX        1657
+# Hardware collective limits; cyclic authority is configured separately below.
+SERVO1_TRIM      1378
+SERVO2_TRIM      1378
+SERVO3_TRIM      1378
+H_COL_MIN        1200
+H_COL_MAX        1557
 # Measured blade-pitch endpoints for the current rotor setup.
 H_COL_ANG_MIN      -2
 H_COL_ANG_MAX      12

@@ -8,7 +8,8 @@ PhysicsRunner is a thin wrapper around PhysicsCore (simulation/physics_core.py).
 
 PhysicsCore owns all physics constants (k_yaw, T_AERO_OFFSET) and
 the integration loop (dynamics, aero, tether, spin ODE, angular damping).
-Callers own planners, TensionPI, WinchController — at their own rates.
+Callers own planners and winch commands. A supplied TorqueWinchController
+is advanced with the tether by PhysicsCore, not separately by the caller.
 
 MockArdupilot
 -------------
@@ -50,6 +51,7 @@ from dynbem import (
 from simulation.physics_core import PhysicsCore, HubObservation
 from simulation.ic import IC
 from simulation.tether import DEFAULT_TETHER_MODEL, Tether, TetherResult
+from simulation.winch import TorqueWinchController
 from simulation.controller import HeliCyclicController
 from simulation.param_defaults import load_collective_phys_range as _load_col_range
 
@@ -88,7 +90,8 @@ class PhysicsRunner:
                      | _VpmRotorTabulated
                      | None
                  ) = None,
-                 tether_model: str = DEFAULT_TETHER_MODEL, tether_override: Tether | None = None):
+                 tether_model: str = DEFAULT_TETHER_MODEL, tether_override: Tether | None = None,
+                 winch: TorqueWinchController | None = None):
         """
         Parameters
         ----------
@@ -99,10 +102,12 @@ class PhysicsRunner:
         z_floor       : NED Z floor for dynamics (default -1.0 m = 1 m altitude floor)
         aero_model    : aero model key passed to create_aero() (default "quasi_static" = no inflow state)
         aero_override : if provided, used directly instead of create_aero()
+        winch         : optional torque drum coupled to the tether; do not also
+                        prescribe rest_length/payout_rate_ms or step it externally
         """
         self._core = PhysicsCore(rotor, ic, wind, z_floor=z_floor,
                                  aero_model=aero_model, aero_override=aero_override,
-                                 tether_model=tether_model, tether_override=tether_override)
+                                 tether_model=tether_model, tether_override=tether_override, winch=winch)
         self._col_min, self._col_max = _load_col_range()
         self._tilt_lon_trim = float(getattr(ic, "trim_tilt_lon", 0.0))
         self._tilt_lat_trim = float(getattr(ic, "trim_tilt_lat", 0.0))

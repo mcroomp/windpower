@@ -1,359 +1,363 @@
-"""
-test_ground_liftoff.py -- rawes.lua takeoff mode climbs, then hands off to steady flight.
+"""Tensioned Lua takeoff to at least 50 m payout and a steady-flight orientation.
 
-Physical scenario
------------------
-  - Hub starts at altitude 1 m (NED pos = [0, 0, -1]), directly above the anchor.
-  - Anchor at the mock EKF origin, i.e. NED offset [0, 0, 0] (see rawes_modes.send_anchor_ned).
-  - Rotor disk starts horizontal: body_z = [0, 0, +1] (NED; FRD body_z points toward anchor).
-  - Wind: constant 10 m/s crosswind (East component).  The hub is free to
-    drift downwind during the vertical climb -- MODE_TAKEOFF holds attitude
-    only, it does not correct lateral drift.
-  - rawes.lua mode=2 (TAKEOFF): holds a fixed level attitude (body_z=[0,0,1])
-    and climbs toward RAWES_ALT via the altitude-PID collective loop.
-  - The ground station (this test) monitors altitude.  Once it reaches
-    TAKEOFF_MIN_ALT_M, it switches RAWES_MODE to MODE_STEADY, commands
-    RAWES_TEN=100 N / RAWES_ALT for a 30 deg elevation at a 100 m tether
-    length, and *tightens* the winch (previously free-spooling) so it reels
-    out under tension control from wherever the hub happens to be to the
-    full 100 m operating length.
-  - Real elastic tether (default SpringDamperTether) -- during the takeoff climb the
-    tether is kept deliberately slack (free-spooled) by tracking the hub's
-    actual distance from the anchor; at this short rest length the tether's
-    elastic stiffness (k = EA / L) is high enough that any real resistance
-    during the initial climb would spike tension well past the tether's
-    breaking load within a single physics step.  Only once the ground
-    station tightens the winch (after the climb) does the tether resist.
-  - Floor at altitude 0 m: hub cannot go underground.
-
-Coordinate frame: NED -- X=North, Y=East, Z=Down.  Altitude = -pos_z.
+The rotor starts pre-spun, not motor-driven. The elastic tether is preloaded
+and governed throughout launch; there is no slack/free-spool phase.
 """
 from types import SimpleNamespace
 import math
 
 import numpy as np
 import pytest
+from dynbem import RotorInputs, create_aero
+from scipy.optimize import brentq
 
+from groundstation.rawes_modes import MODE_STEADY, MODE_TAKEOFF, send_anchor_ned
+from groundstation.winch_protocol import WinchCommand
+from linkhub_client.messages import NamedValueFloat
+from simulation.param_defaults import thrust_to_coll_rad
+from simulation.controller import compute_bz_altitude_hold
+from simulation.frames import build_orb_frame
 from simulation.rawes_lua_harness import RawesLua
+from simulation.rotor_physics import require_mass_kg
 from simulation.simtest_log import SimtestLog
+from simulation.tether import TetherProperties
+from simulation.winch import TorqueWinchController
+from simulation.winch_node import Anemometer, GovernedWinchNode
+from tests.common.mock_ardupilot import MockArdupilot
+from tests.simtests._rotor_helpers import load_default_rotor
 from tests.simtests.simtest_runner import PhysicsRunner
 
-from tests.common.mock_ardupilot import MockArdupilot
-from simulation.winch import GovernedWinchController
-from linkhub_client.messages import NamedValueFloat
-from groundstation.rawes_modes import MODE_STEADY, MODE_TAKEOFF, send_anchor_ned
-from tests.simtests._rotor_helpers import load_default_rotor
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(900)]
 
-pytestmark = [
-    pytest.mark.simtest,
-    pytest.mark.timeout(300),
-    pytest.mark.skip(reason="Temporarily disabled while liftoff/reel-out behavior is being investigated"),
-]
-
-
-# ── Physical constants ────────────────────────────────────────────────────────
 _ROTOR = load_default_rotor()
-
-DT                = 2.5e-3          # 400 Hz
-LUA_PERIOD        = 0.020           # 50 Hz Lua tick
-LUA_EVERY         = round(LUA_PERIOD / DT)
-WIND_NED          = np.array([0.0, 10.0, 0.0])   # 10 m/s crosswind (East); drift is expected
-OMEGA_START_RAD_S = 40.0          # fixed rotor start speed [rad/s]
-AERO_MODEL        = "quasi_static"    # use default quasi-static aero model
-
-TARGET_THRUST     = 1.0             # RAWES_THR IC-seed sent during MODE_TAKEOFF -- an aggressive
-                                     # climb-out trim is needed here to sustain rotor RPM (a
-                                     # hover-equilibrium seed lets the rotor slowly spin down and
-                                     # the climb stall well short of TAKEOFF_MIN_ALT_M).
-TARGET_ROLL_RAD   = 0.0             # RAWES_ROFF command sent each tick
-TARGET_PITCH_RAD  = 0.0             # RAWES_POFF command sent each tick
-
-TAKEOFF_ALT_TARGET_M = 11.0   # RAWES_ALT commanded during MODE_TAKEOFF -- kept close to the transition
-                               # threshold so the altitude PID is already decelerating (small alt_err,
-                               # small vertical speed) by the time the ground switches to MODE_STEADY;
-                               # a much higher target (e.g. 20 m) leaves the hub climbing at full speed
-                               # right through the transition, which the winch cannot match (see
-                               # WINCH_V_MAX_OUT below) and produces a tether snap-load / bounce.
-TAKEOFF_MIN_ALT_M    = 10.0   # ground switches RAWES_MODE -> STEADY once this altitude is reached
-LIFTOFF_ALT_M        = 2.0    # early liftoff sanity checkpoint [m]
-
-TETHER_LEN_TARGET_M = 100.0                                                          # final operating tether length [m]
-TETHER_TEN_TARGET_N = 100.0                                                          # steady-flight tension target [N]
-ELEV_TARGET_DEG     = 30.0                                                           # target elevation once fully reeled out
-STEADY_ALT_TARGET_M = TETHER_LEN_TARGET_M * math.sin(math.radians(ELEV_TARGET_DEG))  # = 50 m
-
-FREE_SPOOL_MARGIN_M = 0.10   # keep the tether just slack during the takeoff climb [m]
-
-# Winch gains (GovernedWinchController) -- same proven values as the pumping-cycle
-# tests (test_pump_cycle_unified.py): a cruise-velocity feedforward plus a small
-# tension-trim governor, jerk-limited so the motion is smooth.  The feedforward
-# term is fed the hub's actual radial (anchor-relative) closing speed each step
-# (see test body) so the winch pays out at the hub's own separation rate instead
-# of waiting for tension to build before reacting.
-WINCH_V_MAX_OUT   = 2.0      # max pay-out speed [m/s]
-WINCH_V_MAX_IN    = 0.5      # max reel-in speed [m/s]
-WINCH_KP_TENSION  = 4.0e-4   # governor trim gain [(m/s)/N]
-WINCH_ACCEL_MS2   = 2.0      # acceleration limit [m/s^2]
-WINCH_JERK_MS3    = 10.0     # jerk limit [m/s^3] (S-curve smoothing)
-WINCH_TENSION_TAU = 0.08     # load-cell low-pass time constant [s]
-
-CLIMB_RATE_MPS = 0.5   # target sustained climb rate during MODE_STEADY reel-out [m/s] --
-                        # ramping the altitude reference at a fixed rate (rather than
-                        # capping it at the tether-implied altitude for the *current*
-                        # rest length) keeps a small, persistent altitude error alive so
-                        # the altitude PID keeps commanding a gentle climb.  Without this,
-                        # the hub settles at the current rest length's equilibrium
-                        # altitude (zero error -> zero climb), the winch's velocity
-                        # feedforward (driven by the hub's own velocity) sees nothing to
-                        # react to, and the tether never reels out further.
-
-LIFTOFF_TIMEOUT    = 20.0     # must reach LIFTOFF_ALT_M within this many sim-seconds [s]
-TRANSITION_TIMEOUT = 60.0     # must reach TAKEOFF_MIN_ALT_M within this many sim-seconds [s]
-TOTAL_RUNTIME      = 180.0    # total simulated seconds (climb + winch reel-out to 100 m) [s]
+_MASS_KG = require_mass_kg(_ROTOR)
+DT = 1.0 / 400.0
+LUA_EVERY = round(0.020 / DT)
+PLANNER_EVERY = round(0.1 / DT)
+WIND_NED = np.array([0.0, 10.0, 0.0])
+OMEGA_START_RAD_S = 40.0
+LAUNCH_TENSION_N = 100.0
+LIFTOFF_ALT_M = 2.0
+TAKEOFF_ALT_TARGET_M = 3.0
+TAKEOFF_THRUST_SEED = 0.8
+TAKEOFF_LEAN_RAD = math.radians(50.0)
+HANDOFF_MIN_LENGTH_M = 8.0
+HANDOFF_AXIS_TOL_DEG = 8.0
+TETHER_ELEVATION_RAD = math.radians(25.0)
+LIFTOFF_TIMEOUT = 20.0
+TRANSITION_TIMEOUT = 60.0
+TOTAL_RUNTIME = 150.0
+MIN_TETHER_LENGTH_M = 50.0
+WINCH_MAX_LENGTH_M = 100.0
+WINCH_CRUISE_OUT = 0.8
+STEADY_TIMEOUT_S = 45.0
+STEADY_MIN_TILT_DEG = 30.0
+STEADY_AXIS_TOL_DEG = 5.0
+STEADY_MAX_RATE_RADS = 0.5
+STEADY_SETTLE_S = 0.2
 
 
-# ── IC construction ───────────────────────────────────────────────────────────
+def _altitude_target(paid_out_m: float):
+    return max(
+        TAKEOFF_ALT_TARGET_M,
+        min(paid_out_m, MIN_TETHER_LENGTH_M) * math.sin(TETHER_ELEVATION_RAD),
+    )
+
+
+@pytest.mark.parametrize(
+    ("paid_out_m", "expected"),
+    [(1.0, 3.0), (6.0, 3.0), (50.0, 50.0 * math.sin(math.radians(25.0))),
+     (60.0, 50.0 * math.sin(math.radians(25.0)))],
+)
+def test_altitude_command_follows_tether_elevation_not_vertical_payout(paid_out_m: float, expected: float):
+    assert _altitude_target(paid_out_m) == pytest.approx(expected)
+
+
+def _handoff_ready(R: np.ndarray, pos: np.ndarray, gyro: np.ndarray, paid_out_m: float):
+    if paid_out_m < HANDOFF_MIN_LENGTH_M:
+        return False
+    length = float(np.linalg.norm(pos))
+    elevation = math.asin(float(np.clip(-pos[2] / length, -1.0, 1.0)))
+    goal = compute_bz_altitude_hold(pos, elevation, LAUNCH_TENSION_N, _MASS_KG)
+    return (
+        goal[2] <= math.cos(math.radians(STEADY_MIN_TILT_DEG))
+        and float(np.dot(R[:, 2], goal)) >= math.cos(math.radians(HANDOFF_AXIS_TOL_DEG))
+        and float(np.linalg.norm(gyro)) <= STEADY_MAX_RATE_RADS
+    )
+
+
+def test_handoff_requires_inclined_geometry_not_just_climb_height():
+    pos = np.array([0.0, 8.0, -3.0])
+    elevation = math.atan2(3.0, 8.0)
+    goal = compute_bz_altitude_hold(pos, elevation, LAUNCH_TENSION_N, _MASS_KG)
+    R = build_orb_frame(goal)
+    assert _handoff_ready(R, pos, np.zeros(3), 8.5)
+    assert not _handoff_ready(np.eye(3), pos, np.zeros(3), 8.5)
+    assert not _handoff_ready(R, pos, np.zeros(3), 7.999)
+    assert not _handoff_ready(R, pos, np.array([0.6, 0.0, 0.0]), 8.5)
+    assert not _handoff_ready(np.eye(3), np.array([0.0, 0.0, -17.0]), np.zeros(3), 17.0)
+
+
+def _steady_orientation_reached(
+    R: np.ndarray, target: np.ndarray | list[float] | None,
+    gyro: np.ndarray, paid_out_m: float,
+) -> bool:
+    if target is None:
+        return False
+    target = np.asarray(target, dtype=float)
+    if not np.isfinite(target).all() or np.linalg.norm(target) < 0.5:
+        return False
+    target = target / np.linalg.norm(target)
+    return (
+        paid_out_m >= MIN_TETHER_LENGTH_M
+        and target[2] <= math.cos(math.radians(STEADY_MIN_TILT_DEG))
+        and float(np.dot(R[:, 2], target)) >= math.cos(math.radians(STEADY_AXIS_TOL_DEG))
+        and float(np.linalg.norm(gyro)) <= STEADY_MAX_RATE_RADS
+    )
+
+
+@pytest.mark.parametrize(
+    ("roll_deg", "goal_deg", "rate", "paid_out_m", "reached"),
+    [
+        (0.0, 0.0, 0.0, 50.0, False),
+        (20.0, 20.0, 0.0, 50.0, False),
+        (40.0, 40.0, 0.0, 50.0, True),
+        (36.0, 40.0, 0.0, 50.0, True),
+        (34.0, 40.0, 0.0, 50.0, False),
+        (40.0, 40.0, 0.6, 50.0, False),
+        (40.0, 40.0, 0.0, 49.999, False),
+        (40.0, 40.0, 0.0, 60.0, True),
+    ],
+)
+def test_steady_orientation_requires_length_tilt_tracking_and_low_rates(
+    roll_deg: float, goal_deg: float, rate: float, paid_out_m: float, reached: bool,
+):
+    roll = math.radians(roll_deg)
+    goal = math.radians(goal_deg)
+    R = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, math.cos(roll), -math.sin(roll)],
+        [0.0, math.sin(roll), math.cos(roll)],
+    ])
+    target = np.array([0.0, -math.sin(goal), math.cos(goal)])
+    assert _steady_orientation_reached(R, target, np.array([rate, 0.0, 0.0]), paid_out_m) == reached
+
 
 def _build_ic() -> SimpleNamespace:
-    """
-    Hub at altitude 1 m, horizontal disk.  Anchor at NED origin.
+    aero = create_aero(_ROTOR, model="quasi_static")
 
-    eq_thrust from IC file if available; omega_spin is forced to OMEGA_START_RAD_S.
-    """
-    try:
-        from tests.simtests.simtest_ic import load_ic as _load_ic
-        _ic = _load_ic()
-        eq_thrust   = float(_ic.eq_thrust)
-    except FileNotFoundError:
-        from simulation.param_defaults import load_collective_phys_range as _lr
-        col_min, col_max = _lr()
-        eq_thrust   = (-0.18 - col_min) / (col_max - col_min)
+    def vertical_force(thrust: float) -> float:
+        inputs = RotorInputs(
+            collective_rad=thrust_to_coll_rad(thrust),
+            tilt_lon=0.0, tilt_lat=0.0, R_hub=np.eye(3),
+            v_hub_world=np.zeros(3), wind_world=WIND_NED,
+            omega_rad_s=OMEGA_START_RAD_S, rho_kg_m3=1.225,
+        )
+        result, _ = aero.step(inputs, aero.initial_rotor_state(), DT)
+        return float(result.F_world[2]) + _MASS_KG * 9.81 + LAUNCH_TENSION_N
 
+    initial_alt = 1.0
+    if _ROTOR.control is None or _ROTOR.control.axle_attachment_length_m is None:
+        raise ValueError("Rotor axle attachment length is required")
+    attachment_length = initial_alt - _ROTOR.control.axle_attachment_length_m
     return SimpleNamespace(
-        pos         = np.array([0.0, 0.0, -1.0]),  # altitude = 1 m
-        vel         = np.zeros(3),
-        R0          = np.eye(3),                    # horizontal disk; body_z = [0,0,1]
-        rest_length = 1.0,
-        eq_thrust   = eq_thrust,
-        omega_spin  = OMEGA_START_RAD_S,
+        pos=np.array([0.0, 0.0, -initial_alt]),
+        vel=np.zeros(3), R0=np.eye(3),
+        rest_length=attachment_length * (
+            1.0 - LAUNCH_TENSION_N / TetherProperties().axial_stiffness_n
+        ),
+        eq_thrust=brentq(vertical_force, 0.0, 1.0),
+        omega_spin=OMEGA_START_RAD_S,
     )
 
 
-# ── Test ──────────────────────────────────────────────────────────────────────
+def _failure_reason(
+    t: float, altitude: float, tension: float,
+    liftoff_t: float | None, transition_t: float | None,
+) -> str | None:
+    if not math.isfinite(altitude) or not math.isfinite(tension):
+        return f"Non-finite flight state at t={t:.2f} s"
+    if altitude <= 0.0:
+        return f"Hub hit the ground at t={t:.2f} s"
+    if tension <= 0.0:
+        return f"Tether went slack at t={t:.2f} s"
+    if tension >= TetherProperties().break_load_n:
+        return f"Tether load {tension:.1f} N reached breaking load at t={t:.2f} s"
+    if liftoff_t is None and t >= LIFTOFF_TIMEOUT:
+        return f"No liftoff within {LIFTOFF_TIMEOUT:.1f} simulated seconds"
+    if transition_t is None and t >= TRANSITION_TIMEOUT:
+        return f"No takeoff transition within {TRANSITION_TIMEOUT:.1f} simulated seconds"
+    return None
+
+
+@pytest.mark.parametrize(
+    ("t", "altitude", "tension", "liftoff_t", "transition_t", "reason"),
+    [
+        (0.1, 0.0, 120.0, None, None, "hit the ground"),
+        (3.0, 0.0, 120.0, 0.3, 2.5, "hit the ground"),
+        (0.1, float("nan"), 120.0, None, None, "Non-finite"),
+        (0.1, 1.0, float("nan"), None, None, "Non-finite"),
+        (0.1, 1.0, 0.0, None, None, "went slack"),
+        (0.1, 1.0, -1.0, None, None, "went slack"),
+        (0.1, 1.0, 620.0, None, None, "breaking load"),
+        (LIFTOFF_TIMEOUT, 1.0, 120.0, None, None, "No liftoff"),
+        (TRANSITION_TIMEOUT, 5.0, 120.0, 0.3, None, "No takeoff transition"),
+        (LIFTOFF_TIMEOUT - DT, 1.0, 120.0, None, None, None),
+        (TRANSITION_TIMEOUT - DT, 5.0, 120.0, 0.3, None, None),
+        (100.0, 50.0, 100.0, 0.3, 2.5, None),
+        (100.0, 50.0, 50.0, 0.3, 2.5, None),
+        (100.0, 50.0, 99.9, 0.3, 2.5, None),
+    ],
+)
+def test_ground_liftoff_failure_limits(
+    t: float, altitude: float, tension: float,
+    liftoff_t: float | None, transition_t: float | None, reason: str | None,
+):
+    failure = _failure_reason(t, altitude, tension, liftoff_t, transition_t)
+    if reason is None:
+        assert failure is None
+    else:
+        assert failure is not None and reason in failure
+
 
 def test_ground_liftoff(simtest_log: SimtestLog):
-    """
-    Hub at altitude 1 m, level disk, 10 m/s crosswind.  rawes.lua MODE_TAKEOFF
-    holds level attitude and climbs (altitude-PID collective) while the
-    tether free-spools (kept slack).  Once altitude >= TAKEOFF_MIN_ALT_M, the
-    ground station switches RAWES_MODE to MODE_STEADY, commands RAWES_TEN /
-    RAWES_ALT for a 30 deg elevation at a 100 m tether length, and tightens
-    the winch to reel out to that length while holding ~100 N tension.
-    """
     ic = _build_ic()
-
     sim = RawesLua(mode=MODE_TAKEOFF)
-    sim.armed        = True
-    sim.healthy      = True
-    sim.vehicle_mode = 4           # GUIDED
-    sim.pos_ned      = ic.pos.tolist()
-    sim.vel_ned      = ic.vel.tolist()
-    sim.R            = ic.R0
-    sim.gyro         = [0.0, 0.0, 0.0]
-
-    runner = PhysicsRunner(
-        _ROTOR, ic, WIND_NED,
-        aero_model=AERO_MODEL,
-        z_floor     = 0.0,
+    sim.armed = True
+    sim.healthy = True
+    sim.vehicle_mode = 4
+    winch = TorqueWinchController(
+        rest_length=ic.rest_length, reflected_mass_kg=0.2, speed_damping_ns_m=20.0,
+        min_length=0.5, max_length=WINCH_MAX_LENGTH_M,
     )
-    # Real elastic tether (default SpringDamperTether) -- the tether must physically
-    # reel out to TETHER_LEN_TARGET_M, so no constant-force stand-in here.
+    node = GovernedWinchNode(winch, Anemometer())
+    node.exchange(WinchCommand(cruise_v=0.0, tension_target=LAUNCH_TENSION_N))
+    runner = PhysicsRunner(
+        _ROTOR, ic, WIND_NED, z_floor=0.0, winch=winch, tether_model="spring_damper",
+    )
+    node.update_sensors(runner.anchor_tension, WIND_NED)
+    lua = MockArdupilot.for_lua(sim, initial_thrust=ic.eq_thrust, wind=WIND_NED, dt=DT)
+    lua.winch = winch
+    phase = "takeoff"
+    lua.tel_fn = lambda r, sr: {"phase": phase, "gnd_alt_cmd_m": _altitude_target(node.rest_length)}
+    send_anchor_ned(sim, 0.0, 0.0, 0.0)
 
-    lua         = MockArdupilot.for_lua(sim, initial_thrust=ic.eq_thrust, wind=WIND_NED, dt=DT)
-    lua.tel_fn  = lambda r, sr: {}   # all fields now come centrally from _telemetry_overrides()/winch
-    total_steps = int(TOTAL_RUNTIME / DT)
-
-    liftoff_t    = None
+    liftoff_t = None
     transition_t = None
-    max_alt      = ic.pos[2] * -1.0   # start altitude
-    floor_hit    = False
-    floor_hit_t  = None
+    payout_reached_t = None
+    orientation_reached_t = None
+    steady_t = None
+    capture_thrust = ic.eq_thrust
+    abort_reason = None
+    min_tension = runner.tension_now
+    max_tension = runner.tension_now
+    max_alt = runner.altitude
 
-    rest_length = float(ic.rest_length)
-    winch       = None   # created once the ground station tightens the tether (see below)
-
-    # One-time snapshot of the actual thrust being commanded at the instant
-    # of transition (see below) -- seeds RAWES_THR for the rest of the flight
-    # so the MODE_STEADY capture (ic_thrust_or_default(), applied with no
-    # slew in run_flight()) picks up a continuous value instead of jumping
-    # straight to the takeoff's aggressive TARGET_THRUST.
-    capture_thrust_seed = TARGET_THRUST
-    alt_at_transition    = None   # altitude ramp start point (captured at transition)
-
-    send_anchor_ned(sim, 0.0, 0.0, 0.0)   # anchor at the mock EKF origin
-
-    def _inject(s: RawesLua, r: PhysicsRunner) -> None:
+    def inject(s: RawesLua, r: PhysicsRunner) -> None:
         if transition_t is None:
-            s.send_message(NamedValueFloat(name="RAWES_ALT", value=TAKEOFF_ALT_TARGET_M))
-            s.send_message(NamedValueFloat(name="RAWES_THR", value=TARGET_THRUST))
+            thrust = TAKEOFF_THRUST_SEED
+            wind = node.telemetry().wind_ned
+            if math.hypot(wind[0], wind[1]) < 1.0:
+                raise RuntimeError("Wind-capture takeoff requires a valid horizontal anemometer reading")
+            for name, value in (
+                ("RAWES_LEAN", TAKEOFF_LEAN_RAD), ("RAWES_AZ", math.atan2(wind[1], wind[0])),
+            ):
+                s.send_message(NamedValueFloat(name=name, value=value))
         else:
-            # Ramp the altitude target at a fixed climb rate from the
-            # transition altitude toward the fully-reeled-out target (capped
-            # there) -- see CLIMB_RATE_MPS above for why a rest_length-tied
-            # cap stalls the reel-out instead.
-            assert alt_at_transition is not None
-            alt_cmd = min(
-                STEADY_ALT_TARGET_M,
-                alt_at_transition + CLIMB_RATE_MPS * (r.t_sim - transition_t),
-            )
-            s.send_message(NamedValueFloat(name="RAWES_ALT", value=alt_cmd))
-            s.send_message(NamedValueFloat(name="RAWES_TEN", value=TETHER_TEN_TARGET_N))
-            s.send_message(NamedValueFloat(name="RAWES_THR", value=capture_thrust_seed))
-        s.send_message(NamedValueFloat(name="RAWES_ROFF", value=TARGET_ROLL_RAD))
-        s.send_message(NamedValueFloat(name="RAWES_POFF", value=TARGET_PITCH_RAD))
+            thrust = capture_thrust
+        for name, value in (
+            ("RAWES_ALT", _altitude_target(node.rest_length)), ("RAWES_THR", thrust),
+            ("RAWES_TEN", LAUNCH_TENSION_N),
+        ):
+            s.send_message(NamedValueFloat(name=name, value=value))
 
-    for i in range(total_steps):
-        t = i * DT
+    sr = None
+    for i in range(round(TOTAL_RUNTIME / DT)):
+        if i % PLANNER_EVERY == 0:
+            node.exchange(WinchCommand(
+                cruise_v=WINCH_CRUISE_OUT if liftoff_t is not None else 0.0,
+                tension_target=LAUNCH_TENSION_N,
+            ))
         if i % LUA_EVERY == 0:
-            lua.tick(t, runner, inject=_inject)
-
-        if winch is None:
-            # Free-spool: keep the rest length just ahead of the hub's actual
-            # distance from the anchor so the tether stays slack (no elastic
-            # resistance) while MODE_TAKEOFF is climbing on pure vertical
-            # thrust -- see module docstring for why a taut short tether here
-            # would spike tension past breaking load.
-            dist = float(np.linalg.norm(runner.hub_state["pos"]))
-            rest_length = max(rest_length, dist + FREE_SPOOL_MARGIN_M)
-        else:
-            # Velocity feedforward: cruise the winch at the hub's own radial
-            # (anchor-relative) closing speed so pay-out tracks the hub as it
-            # recedes, instead of waiting for tension to build before
-            # reacting -- a purely tension-reactive winch starts every
-            # transition at zero speed and cannot keep up with a hub already
-            # climbing at several m/s, which snap-loads the (very stiff,
-            # short) tether taut.  The tension governor still trims this
-            # cruise speed to hold TETHER_TEN_TARGET_N.
-            hub_pos = runner.hub_state["pos"]
-            hub_vel = runner.hub_state["vel"]
-            dist    = max(float(np.linalg.norm(hub_pos)), 0.1)
-            v_rad   = float(np.dot(hub_vel, hub_pos) / dist)
-            cruise_v = max(0.0, min(WINCH_V_MAX_OUT, v_rad))
-            winch.set_command(cruise_v, TETHER_TEN_TARGET_N)
-            winch.step(runner.anchor_tension, DT)
-            rest_length = winch.rest_length
-
-        sr = lua.step(runner, DT, rest_length=rest_length)
+            lua.tick(i * DT, runner, inject=inject)
+        node.update_sensors(runner.anchor_tension, WIND_NED)
+        sr = lua.step(runner, DT)
         lua.log(runner, sr)
 
         alt = runner.altitude
-        if alt > max_alt:
-            max_alt = alt
+        tension = runner.tension_now
+        min_tension = min(min_tension, sr["tension_min"])
+        max_tension = max(max_tension, sr["tension_max"])
+        max_alt = max(max_alt, alt)
+        if payout_reached_t is None and node.rest_length >= MIN_TETHER_LENGTH_M:
+            payout_reached_t = runner.t_sim
         if liftoff_t is None and alt >= LIFTOFF_ALT_M:
             liftoff_t = runner.t_sim
-        if transition_t is None and alt >= TAKEOFF_MIN_ALT_M:
+            phase = "wind-capture"
+        obs = runner.observe()
+        if transition_t is None and _handoff_ready(obs.R, obs.pos, obs.gyro, node.rest_length):
             transition_t = runner.t_sim
-            alt_at_transition   = alt
-            capture_thrust_seed = lua.thrust   # actual thrust the instant before the mode switch
+            capture_thrust = lua.thrust
             sim.set_param("RAWES_MODE", MODE_STEADY)
-            # Tighten the winch: start from the current (free-spooled) rest
-            # length and reel further out to the full operating length while
-            # holding the target tension.
-            winch = GovernedWinchController(
-                rest_length     = rest_length,
-                v_max_out       = WINCH_V_MAX_OUT,
-                v_max_in        = WINCH_V_MAX_IN,
-                kp_tension      = WINCH_KP_TENSION,
-                accel_limit_ms2 = WINCH_ACCEL_MS2,
-                jerk_limit_ms3  = WINCH_JERK_MS3,
-                tension_tau_s   = WINCH_TENSION_TAU,
-                min_length      = float(ic.rest_length),
-                max_length      = TETHER_LEN_TARGET_M + 20.0,
-            )
-            lua.winch = winch   # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()
-        # Ground floor (z_floor=0.0 passed to PhysicsRunner above) clamps the
-        # hub at altitude 0 rather than letting it go underground.  Once the
-        # ground station has tightened the winch this should not happen --
-        # reaching the floor after transition indicates a genuine loss of
-        # control, not an expected end state.
-        if alt <= 0.0:
-            floor_hit   = True
-            floor_hit_t = runner.t_sim
+            phase = "reel-out"
+        abort_reason = (
+            _failure_reason(runner.t_sim, alt, sr["tension_min"], liftoff_t, transition_t)
+            or _failure_reason(runner.t_sim, alt, sr["tension_max"], liftoff_t, transition_t)
+        )
+        if abort_reason is not None:
             break
+        if transition_t is not None and sim.fns.el_initialized():
+            goal = [sim.fns.diag_nvf(key) for key in ("BZG_N", "BZG_E", "BZG_D")]
+            if all(value is not None for value in goal) and _steady_orientation_reached(
+                obs.R, goal, obs.gyro, node.rest_length,
+            ):
+                if orientation_reached_t is None:
+                    orientation_reached_t = runner.t_sim
+                if runner.t_sim - orientation_reached_t >= STEADY_SETTLE_S:
+                    steady_t = runner.t_sim
+                    phase = "steady"
+                    break
+            else:
+                orientation_reached_t = None
+            if payout_reached_t is not None and runner.t_sim - payout_reached_t >= STEADY_TIMEOUT_S:
+                abort_reason = (
+                    f"No steady-flight orientation within {STEADY_TIMEOUT_S:.1f} s "
+                    f"of reaching {MIN_TETHER_LENGTH_M:.1f} m payout"
+                )
+                break
+        if i % round(10.0 / DT) == 0:
+            print(
+                f"t={runner.t_sim:.1f}s alt={alt:.2f}m spin={runner.omega_spin:.2f}rad/s "
+                f"length={node.rest_length:.2f}m tension={tension:.1f}N",
+                flush=True,
+            )
+            lua.write_telemetry(simtest_log.log_dir / "telemetry.csv")
 
-    t_final        = runner.t_sim
-    omega_final    = runner.omega_spin
-    final_tension  = runner.tension_now
-    final_tlen     = float(np.linalg.norm(runner.hub_state["pos"]))
-    final_elev_deg = math.degrees(math.asin(
-        max(-1.0, min(1.0, runner.altitude / max(final_tlen, 0.1)))))
-
-    print()
-    print(f"  t_final       : {t_final:.1f} s")
-    print(f"  max_altitude  : {max_alt:.3f} m")
-    print(f"  omega_spin    : {omega_final:.2f} rad/s  (started {ic.omega_spin:.2f})")
-    if floor_hit:
-        print(f"  floor_hit_t   : {floor_hit_t:.2f} s  (grounded; stopped early)")
-    if liftoff_t is not None:
-        print(f"  liftoff_t     : {liftoff_t:.2f} s  [PASS]")
-    else:
-        print(f"  liftoff_t     : did not reach {LIFTOFF_ALT_M} m  [FAIL]")
-    if transition_t is not None:
-        print(f"  transition_t  : {transition_t:.2f} s  (MODE_TAKEOFF -> MODE_STEADY)  [PASS]")
-    else:
-        print(f"  transition_t  : did not reach {TAKEOFF_MIN_ALT_M} m  [FAIL]")
-    print(f"  final_tlen    : {final_tlen:.2f} m  (target {TETHER_LEN_TARGET_M:.1f} m)")
-    print(f"  final_tension : {final_tension:.1f} N  (target {TETHER_TEN_TARGET_N:.1f} N)")
-    print(f"  final_elev    : {final_elev_deg:.1f} deg  (target {ELEV_TARGET_DEG:.1f} deg)")
-
+    assert sr is not None
+    if abort_reason is None and steady_t is None:
+        abort_reason = (
+            f"Did not establish steady-flight orientation with at least "
+            f"{MIN_TETHER_LENGTH_M:.1f} m payout within {TOTAL_RUNTIME:.1f} simulated seconds"
+        )
+    if not lua.telemetry or lua.telemetry[-1].t_sim != runner.t_sim:
+        lua.log(runner, sr, force=True)
+    lua.telemetry[-1].note = abort_reason or "steady_orientation_50m"
+    final_length = float(np.linalg.norm(runner.hub_state["pos"]))
     lines = [
-        f"t_final       : {t_final:.1f} s",
-        f"max_altitude  : {max_alt:.3f} m",
-        f"omega_spin    : {omega_final:.2f} rad/s  (started {ic.omega_spin:.2f})",
-        (
-            f"floor_hit_t   : {floor_hit_t:.2f} s  (grounded; stopped early)"
-            if floor_hit
-            else "floor_hit_t   : never grounded"
-        ),
-        (
-            f"liftoff_t     : {liftoff_t:.2f} s  [PASS]"
-            if liftoff_t is not None
-            else f"liftoff_t     : did not reach {LIFTOFF_ALT_M} m  [FAIL]"
-        ),
-        (
-            f"transition_t  : {transition_t:.2f} s  (MODE_TAKEOFF -> MODE_STEADY)  [PASS]"
-            if transition_t is not None
-            else f"transition_t  : did not reach {TAKEOFF_MIN_ALT_M} m  [FAIL]"
-        ),
-        f"final_tlen    : {final_tlen:.2f} m  (target {TETHER_LEN_TARGET_M:.1f} m)",
-        f"final_tension : {final_tension:.1f} N  (target {TETHER_TEN_TARGET_N:.1f} N)",
-        f"final_elev    : {final_elev_deg:.1f} deg  (target {ELEV_TARGET_DEG:.1f} deg)",
+        f"t_final={runner.t_sim:.3f}s max_altitude={max_alt:.3f}m",
+        f"liftoff_t={liftoff_t} transition_t={transition_t}",
+        f"payout_reached_t={payout_reached_t} steady_t={steady_t}",
+        f"final_length={final_length:.3f}m final_altitude={runner.altitude:.3f}m",
+        f"paid_out_length={node.rest_length:.3f}m",
+        f"tension_min={min_tension:.3f}N tension_max={max_tension:.3f}N",
+        f"stopped={abort_reason or 'scenario complete'}",
     ]
-    for level, msg in sim.messages[:10]:
-        lines.append(f"  [GCS {level}] {msg}")
-
     lua.write_telemetry(simtest_log.log_dir / "telemetry.csv")
     simtest_log.write(lines, "ground_liftoff")
+    print("\n".join(lines), flush=True)
 
-    assert liftoff_t is not None, (
-        f"Hub did not reach {LIFTOFF_ALT_M} m altitude within {LIFTOFF_TIMEOUT} s "
-        f"(max altitude reached: {max_alt:.4f} m)"
-    )
-    assert liftoff_t < LIFTOFF_TIMEOUT, (
-        f"Liftoff at {liftoff_t:.2f} s exceeds timeout {LIFTOFF_TIMEOUT} s"
-    )
-    assert transition_t is not None, (
-        f"Hub did not reach the {TAKEOFF_MIN_ALT_M} m takeoff threshold within "
-        f"{TRANSITION_TIMEOUT} s (max altitude reached: {max_alt:.2f} m)"
-    )
-    assert transition_t < TRANSITION_TIMEOUT, (
-        f"Takeoff->steady transition at {transition_t:.2f} s exceeds timeout {TRANSITION_TIMEOUT} s"
-    )
-    assert not floor_hit, (
-        f"Hub crashed to the floor at t={floor_hit_t:.2f} s after transitioning to steady flight "
-        f"-- expected sustained tethered flight, not a fall"
-    )
-    assert final_tlen >= 0.9 * TETHER_LEN_TARGET_M, (
-        f"Tether did not reel out to the {TETHER_LEN_TARGET_M:.1f} m target "
-        f"(reached {final_tlen:.2f} m)"
-    )
+    assert abort_reason is None, abort_reason
+    assert liftoff_t is not None and liftoff_t < LIFTOFF_TIMEOUT
+    assert transition_t is not None and transition_t < TRANSITION_TIMEOUT
+    assert node.rest_length >= MIN_TETHER_LENGTH_M, "Less than 50 m of tether paid out"
+    assert steady_t is not None, "Steady-flight orientation was not established"

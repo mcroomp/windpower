@@ -39,8 +39,8 @@ def test_hardware_config_does_not_import_simulation_or_scipy():
             "from calibrate.params import _config_target_params\n"
             "for use_all in (False, True):\n"
             "    params = _config_target_params(use_all=use_all)\n"
-            "    assert params['SERVO1_TRIM'] == 1517\n"
-            "    assert params['H_COL_MIN'] == 1342\n"
+            "    assert params['SERVO1_TRIM'] == 1378\n"
+            "    assert params['H_COL_MIN'] == 1200\n"
             "for name in sys.modules:\n"
             "    assert name != 'simulation.param_defaults', name\n"
             "    assert name.split('.')[0] not in ('arduloop', 'scipy'), name\n",

@@ -533,6 +533,11 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
             payout_rate_ms=_winch_node.telemetry().speed_ms,
             yaw_throttle=None,
         )
+        if core.terminated:
+            _tel_note = "ground_contact"
+            ev.write("ground_contact", t_sim=core.t_sim,
+                     pos_ned=core.hub_state["pos"].tolist())
+            log.error("Ground contact at t=%.3f s -- terminating simulation", core.t_sim)
         _damp_alpha = float(result.get("damp_alpha", 0.0))
 
         # Unified phase label for telemetry CSV.
@@ -589,7 +594,7 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
         )
 
         # ── Telemetry CSV ─────────────────────────────────────────────────
-        if _telemetry_writer is not None and (step % _telemetry_stride == 0):
+        if _telemetry_writer is not None and (step % _telemetry_stride == 0 or core.terminated):
             _rpy = sensor_data["rpy"]
             _ti  = core.tether_result
             _aero_v_i = 0.0
@@ -709,7 +714,7 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
 
     # -- Run lockstep ---------------------------------------------------------
     try:
-        run_lockstep(sitl, step_fn, is_stopped, log=log, ev=ev)
+        run_lockstep(sitl, step_fn, lambda: is_stopped() or core.terminated, log=log, ev=ev)
     except KeyboardInterrupt:
         log.info("KeyboardInterrupt received — shutting down.")
     except Exception as exc:
