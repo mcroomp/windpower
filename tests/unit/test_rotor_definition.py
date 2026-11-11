@@ -10,11 +10,12 @@ import pytest
 
 
 from dynbem import rotor_definition as rd
+from dynbem.rotor_definition import ValidationIssue
 from simulation.rotor_physics import require_mass_kg, resolve_i_spin_kgm2
 from tests.common.aero_probe import load_rotor
 
 
-def _errors(issues):
+def _errors(issues: list[ValidationIssue]):
     return [i for i in issues if i.level == "ERROR"]
 
 

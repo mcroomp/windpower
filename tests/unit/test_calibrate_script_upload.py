@@ -23,7 +23,7 @@ def upload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return session, source
 
 
-def test_existing_scripts_directory_skips_mkdir(upload):
+def test_existing_scripts_directory_skips_mkdir(upload: tuple[Mock, Path]):
     session, source = upload
 
     params._upload_script(session, str(source))
@@ -34,7 +34,7 @@ def test_existing_scripts_directory_skips_mkdir(upload):
     session.restart.assert_called_once_with(session)
 
 
-def test_absent_scripts_directory_is_created_before_upload(upload):
+def test_absent_scripts_directory_is_created_before_upload(upload: tuple[Mock, Path]):
     session, source = upload
     session.list_files.return_value = []
 
@@ -47,7 +47,7 @@ def test_absent_scripts_directory_is_created_before_upload(upload):
     ]
 
 
-def test_scripts_path_must_be_a_directory(upload):
+def test_scripts_path_must_be_a_directory(upload: tuple[Mock, Path]):
     session, source = upload
     session.list_files.return_value = [
         {"name": "scripts", "is_dir": False, "size": 42}
@@ -62,7 +62,10 @@ def test_scripts_path_must_be_a_directory(upload):
 
 
 @pytest.mark.parametrize("operation", ["list_files", "create_directory", "upload_file"])
-def test_upload_failures_propagate_without_restart(upload, operation):
+def test_upload_failures_propagate_without_restart(
+    upload: tuple[Mock, Path],
+    operation: str,
+):
     session, source = upload
     session.list_files.return_value = []
     getattr(session, operation).side_effect = LinkHubError(f"{operation} failed")
@@ -77,7 +80,9 @@ def test_upload_failures_propagate_without_restart(upload, operation):
         session.upload_file.assert_not_called()
 
 
-def test_missing_local_script_fails_before_remote_operations(upload):
+def test_missing_local_script_fails_before_remote_operations(
+    upload: tuple[Mock, Path],
+):
     session, source = upload
     source.unlink()
 
@@ -87,7 +92,10 @@ def test_missing_local_script_fails_before_remote_operations(upload):
     assert session.method_calls == []
 
 
-def test_restart_verification_failure_propagates(upload, capsys):
+def test_restart_verification_failure_propagates(
+    upload: tuple[Mock, Path],
+    capsys: pytest.CaptureFixture[str],
+):
     session, source = upload
     session.restart.side_effect = LinkHubError("Restart not verified")
 
@@ -98,7 +106,12 @@ def test_restart_verification_failure_propagates(upload, capsys):
 
 
 @pytest.mark.parametrize("failure", [LinkHubError("FTP failed"), OSError("read failed")])
-def test_one_shot_upload_errors_exit_nonzero(upload, monkeypatch, capsys, failure):
+def test_one_shot_upload_errors_exit_nonzero(
+    upload: tuple[Mock, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: LinkHubError | OSError,
+):
     session, source = upload
     session.upload_file.side_effect = failure
     monkeypatch.setattr(
@@ -117,7 +130,11 @@ def test_one_shot_upload_errors_exit_nonzero(upload, monkeypatch, capsys, failur
     session.close.assert_called_once()
 
 
-def test_repl_reports_upload_failure_and_accepts_next_command(upload, monkeypatch, capsys):
+def test_repl_reports_upload_failure_and_accepts_next_command(
+    upload: tuple[Mock, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
     session, source = upload
     session.upload_file.side_effect = LinkHubError("FTP failed")
     commands = iter([f"script upload {source}", "script list", "quit"])
@@ -132,7 +149,7 @@ def test_repl_reports_upload_failure_and_accepts_next_command(upload, monkeypatc
 
 
 @pytest.mark.parametrize("args", [[], ["upload"], ["list", "extra"], ["remove"], ["other"]])
-def test_invalid_script_commands_raise_usage_error(args):
+def test_invalid_script_commands_raise_usage_error(args: list[str]):
     with pytest.raises(ValueError, match="script"):
         repl._cmd_script(Mock(spec=LinkHubClient), args)
 
@@ -141,7 +158,10 @@ def test_invalid_script_commands_raise_usage_error(args):
     ("list_files", ["list"]),
     ("remove_file", ["remove", "rawes.lua"]),
 ])
-def test_other_script_operation_errors_propagate(operation, args):
+def test_other_script_operation_errors_propagate(
+    operation: str,
+    args: list[str],
+):
     session = Mock(spec=LinkHubClient)
     getattr(session, operation).side_effect = LinkHubError("FTP failed")
 

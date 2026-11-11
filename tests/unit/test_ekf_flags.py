@@ -37,7 +37,7 @@ class _Gcs:
         self.result = result
         self.sent: list[tuple[MavCmd, list[float]]] = []
 
-    def command(self, command, params, *, timeout):
+    def command(self, command: MavCmd, params: list[float], *, timeout: float):
         self.sent.append((command, params))
         return {"command": command, "result": self.result}
 

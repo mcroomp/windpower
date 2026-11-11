@@ -34,10 +34,11 @@ import math
 import numpy as np
 import pytest
 
-
-from tests.simtests.simtest_runner import PhysicsRunner
-from tests.common.mock_ardupilot import MockArdupilot
 from simulation.rawes_lua_harness import RawesLua
+from simulation.simtest_log import SimtestLog
+from tests.simtests.simtest_runner import PhysicsRunner
+
+from tests.common.mock_ardupilot import MockArdupilot
 from simulation.winch import GovernedWinchController
 from linkhub_client.messages import NamedValueFloat
 from groundstation.rawes_modes import MODE_STEADY, MODE_TAKEOFF, send_anchor_ned
@@ -140,7 +141,7 @@ def _build_ic() -> SimpleNamespace:
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-def test_ground_liftoff(simtest_log):
+def test_ground_liftoff(simtest_log: SimtestLog):
     """
     Hub at altitude 1 m, level disk, 10 m/s crosswind.  rawes.lua MODE_TAKEOFF
     holds level attitude and climbs (altitude-PID collective) while the
@@ -191,7 +192,7 @@ def test_ground_liftoff(simtest_log):
 
     send_anchor_ned(sim, 0.0, 0.0, 0.0)   # anchor at the mock EKF origin
 
-    def _inject(s, r):
+    def _inject(s: RawesLua, r: PhysicsRunner) -> None:
         if transition_t is None:
             s.send_message(NamedValueFloat(name="RAWES_ALT", value=TAKEOFF_ALT_TARGET_M))
             s.send_message(NamedValueFloat(name="RAWES_THR", value=TARGET_THRUST))
@@ -200,6 +201,7 @@ def test_ground_liftoff(simtest_log):
             # transition altitude toward the fully-reeled-out target (capped
             # there) -- see CLIMB_RATE_MPS above for why a rest_length-tied
             # cap stalls the reel-out instead.
+            assert alt_at_transition is not None
             alt_cmd = min(
                 STEADY_ALT_TARGET_M,
                 alt_at_transition + CLIMB_RATE_MPS * (r.t_sim - transition_t),

@@ -12,10 +12,11 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import numpy as np
+from linkhub_client.client import LinkHubClient
 from simulation.frames import build_gps_yaw_frame
 from groundstation.rawes_modes import (
     MOCK_ORIGIN_LAT_DEG as HOME_LAT_DEG,
@@ -112,7 +113,7 @@ class ParamSetup:
 
     def apply(
         self,
-        gcs,
+        gcs: LinkHubClient,
         log: logging.Logger | None = None,
         set_timeout: float = 5.0,
     ) -> None:
@@ -129,7 +130,7 @@ class ParamSetup:
 
     def verify(
         self,
-        gcs,
+        gcs: LinkHubClient,
         log: logging.Logger | None = None,
         tol: float = 1e-4,
         read_timeout: float = 30.0,
@@ -204,7 +205,7 @@ class ParamSetup:
         """Return a new ParamSetup with extra *params* merged in (they win)."""
         return ParamSetup({**self._params, **params})
 
-    def without(self, names) -> ParamSetup:
+    def without(self, names: Iterable[str]) -> ParamSetup:
         """Return a new ParamSetup with *names* removed (no-op if absent)."""
         drop = set(names)
         return ParamSetup({k: v for k, v in self._params.items() if k not in drop})
@@ -767,7 +768,7 @@ def _launch_mediator_static(
     with constant sensor values.  No physics, no threading in the test.
     Useful for static SITL diagnostics and minimal bring-up checks.
     """
-    def _fmt(arr) -> list[str]:
+    def _fmt(arr: np.ndarray) -> list[str]:
         return [str(float(v)) for v in arr]
 
     cmd = [

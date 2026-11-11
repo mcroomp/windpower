@@ -27,8 +27,11 @@ import csv
 import argparse
 from pathlib import Path
 from collections import defaultdict
+from collections.abc import Callable
+from analysis._telemetry_types import _NumericColumn, _TelemetryRow
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 import simulation
 
@@ -40,7 +43,7 @@ FLOOR_ALT_M = 1.5
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _xi_deg(bz_ned):
+def _xi_deg(bz_ned: ArrayLike):
     """Elevation angle of body_z from horizontal plane [deg]. xi=90 = vertical disk."""
     bz = np.asarray(bz_ned)
     if np.linalg.norm(bz) < 1e-9:
@@ -50,14 +53,14 @@ def _xi_deg(bz_ned):
     )
 
 
-def _f(v, fmt):
+def _f(v: float, fmt: str):
     return format(v, fmt) if not math.isnan(v) else " " * len(format(0, fmt))
 
 
 # ── Load ───────────────────────────────────────────────────────────────────────
 
 
-def load_telemetry(csv_path):
+def load_telemetry(csv_path: str | Path):
     rows = []
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
@@ -78,7 +81,7 @@ def load_telemetry(csv_path):
 # ── Phase timeline ─────────────────────────────────────────────────────────────
 
 
-def _phase_transitions(rows):
+def _phase_transitions(rows: list[_TelemetryRow]):
     events = []
     if not rows:
         return events
@@ -122,7 +125,7 @@ def _phase_transitions(rows):
 # ── Slack events ───────────────────────────────────────────────────────────────
 
 
-def _slack_events(rows, window=5):
+def _slack_events(rows: list[_TelemetryRow], window: int=5):
     events = []
     n = len(rows)
     i = 0
@@ -135,7 +138,7 @@ def _slack_events(rows, window=5):
             before = rows[max(0, i - window) : i]
             after = rows[j : min(n, j + window)]
 
-            def mc(rlist, col):
+            def mc(rlist: list[_TelemetryRow], col: _NumericColumn):
                 vals = [
                     r[col]
                     for r in rlist
@@ -168,7 +171,7 @@ def _slack_events(rows, window=5):
 # ── Tension spikes ─────────────────────────────────────────────────────────────
 
 
-def _spike_events(rows, threshold=BREAK_LOAD_N, window=5):
+def _spike_events(rows: list[_TelemetryRow], threshold: float=BREAK_LOAD_N, window: int=5):
     events = []
     n = len(rows)
     i = 0
@@ -198,7 +201,7 @@ def _spike_events(rows, threshold=BREAK_LOAD_N, window=5):
 # ── Main diagnostic ────────────────────────────────────────────────────────────
 
 
-def diagnose(csv_path, bucket_s=5.0):
+def diagnose(csv_path: str | Path, bucket_s: float=5.0):
     rows = load_telemetry(csv_path)
     if not rows:
         print("No telemetry rows found.")
@@ -237,7 +240,7 @@ def diagnose(csv_path, bucket_s=5.0):
         grp = buckets[bk]
         phase = grp[len(grp) // 2].get("phase", "")
 
-        def avg(key):
+        def avg(key: str):
             vals = [
                 r[key]
                 for r in grp
@@ -245,7 +248,7 @@ def diagnose(csv_path, bucket_s=5.0):
             ]
             return float(np.mean(vals)) if vals else float("nan")
 
-        def frac(pred):
+        def frac(pred: Callable[[_TelemetryRow], bool]):
             return sum(1 for r in grp if pred(r)) / max(len(grp), 1)
 
         alt = float(-avg("pos_z"))
@@ -297,7 +300,7 @@ def diagnose(csv_path, bucket_s=5.0):
     )
     print("  " + "-" * 72)
     for t0, t1, ph, rl0, rl1, a0, a1 in transitions:
-        def fv(v):
+        def fv(v: float):
             return f"{v:7.2f}" if not math.isnan(v) else "    nan"
         print(
             f"  {ph:<12}  {t0:>7.2f}  {t1:>7.2f}  {t1 - t0:>6.2f}  "
@@ -322,9 +325,9 @@ def diagnose(csv_path, bucket_s=5.0):
         )
         print("  " + "-" * 90)
         for e in show:
-            def fv(v):
+            def fv(v: float):
                 return f"{v:7.1f}" if not math.isnan(v) else "    nan"
-            def fw(v):
+            def fw(v: float):
                 return f"{v:7.3f}" if not math.isnan(v) else "    nan"
             print(
                 f"  {e['phase']:<12}  {e['t_start']:>7.3f}  {e['duration_s'] * 1000:>7.1f}  "
@@ -349,7 +352,7 @@ def diagnose(csv_path, bucket_s=5.0):
         )
         print("  " + "-" * 60)
         for e in spike_events[:30]:
-            def fv(v):
+            def fv(v: float):
                 return f"{v:7.2f}" if not math.isnan(v) else "    nan"
             print(
                 f"  {e['phase']:<12}  {e['t_start']:>7.3f}  {e['t_end']:>7.3f}  "

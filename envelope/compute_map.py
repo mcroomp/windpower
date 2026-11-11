@@ -21,6 +21,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
 from simulation.rotor_physics import require_mass_kg
 
 
@@ -29,7 +30,9 @@ from simulation.rotor_physics import require_mass_kg
 # ── Tension-band sweep worker ─────────────────────────────────────────────────
 
 
-def _ramp_full_column(args: tuple) -> list:
+def _ramp_full_column(
+    args: tuple[int, int, int, float, float, float, list[float], float, list[float]],
+) -> list[tuple[int, float, float, bool]]:
     """
     Ramp one column from T_min to T_max, sampling at each grid tension.
 
@@ -57,9 +60,9 @@ def _ramp_full_column(args: tuple) -> list:
     t_hat   = tether_hat(angle)
 
     # Fresh start: omega=28 (operational), vel=0, col=0
-    omega    = 28.0
-    spin_angle = 0.0
-    vel      = np.zeros(3)
+    omega: float = 28.0
+    spin_angle: float = 0.0
+    vel: NDArray[np.float64] = np.zeros(3)
     col_now  = 0.0
     c_lon    = c_lat = 0.0
     int_vx   = int_vy = int_vcol = 0.0
@@ -79,7 +82,7 @@ def _ramp_full_column(args: tuple) -> list:
     total_s     = t_settle + abs(t_end_tension - t_start_tension) / ramp_rate + 5.0
     total_steps = int(total_s / dt)
 
-    results = []
+    results: list[tuple[int, float, float, bool]] = []
     t_ramp_start = None
     tension = t_start_tension
     next_sample_idx = 0
@@ -135,7 +138,7 @@ def _ramp_full_column(args: tuple) -> list:
         if not np.all(np.isfinite(vel)):
             break
 
-        v_perp  = vel - float(np.dot(vel, t_hat)) * t_hat
+        v_perp: NDArray[np.float64] = vel - float(np.dot(vel, t_hat)) * t_hat
         t_norm  = max(abs(thrust), 1.0)
         c_lon_r = -(kp_cyc / t_norm * v_perp[0] + ki_cyc / t_norm * int_vx)
         c_lat_r = -(kp_cyc / t_norm * v_perp[1] + ki_cyc / t_norm * int_vy)

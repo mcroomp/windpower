@@ -42,6 +42,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import ArrayLike
+from collections.abc import Mapping, Sequence
+from typing import Protocol
+from simulation.tether import TetherResult
 
 from simulation.telemetry_columns import (
     COLUMNS,
@@ -51,6 +55,26 @@ from simulation.telemetry_columns import (
 # ---------------------------------------------------------------------------
 # TelRow
 # ---------------------------------------------------------------------------
+
+class _PhysicsTelemetry(Protocol):
+    @property
+    def hub_state(self) -> Mapping[str, np.ndarray]: ...
+
+    @property
+    def tether_result(self) -> TetherResult: ...
+
+    @property
+    def tension_now(self) -> float: ...
+
+    @property
+    def omega_spin(self) -> float: ...
+
+    @property
+    def t_sim(self) -> float: ...
+
+    @property
+    def rest_length(self) -> float: ...
+
 
 @dataclass
 class TelRow:
@@ -441,12 +465,12 @@ class TelRow:
     @classmethod
     def from_physics(
         cls,
-        runner,
+        runner: _PhysicsTelemetry,
         step_result: dict,
         collective_rad: float,
-        wind_ned,
+        wind_ned: Sequence[float] | np.ndarray,
         *,
-        body_z_eq=None,
+        body_z_eq: ArrayLike | None = None,
         phase: str = "",
         tension_feedforward_n: float = 0.0,
         tension_ic_n: float = 0.0,
@@ -488,7 +512,7 @@ class TelRow:
         rate_yaw_pdmod: float = float("nan"),
         rate_yaw_srate: float = float("nan"),
         vel_radial_mps: float = 0.0,
-        net_moment=None,
+        net_moment: ArrayLike | None = None,
         mav_att_roll_deg: float = float("nan"),
         mav_att_pitch_deg: float = float("nan"),
         mav_att_yaw_deg: float = float("nan"),

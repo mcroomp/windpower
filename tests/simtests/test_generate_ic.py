@@ -29,6 +29,7 @@ import pytest
 
 
 import simulation
+from simulation.simtest_log import SimtestLog
 from dynbem            import create_aero, RotorInputs, relax_inflow, solve_trim_cyclic, step_omega
 from simulation.frames import build_orb_frame
 from simulation.tether import SpringDamperTether, TetherInputs, TetherProperties
@@ -165,7 +166,9 @@ def _compute_ic() -> dict:
         raise ValueError("rotor.control.axle_attachment_length_m must be set")
     attachment_offset = float(_ROTOR.control.axle_attachment_length_m)
 
-    def _spin_equilibrium(R_hub, col_c, omega_seed):
+    def _spin_equilibrium(
+        R_hub: np.ndarray, col_c: float, omega_seed: float
+    ):
         """Autorotation spin ODE equilibrium at a fixed orientation/collective."""
         aero = create_aero(_ROTOR, model="quasi_static")
         st   = aero.initial_rotor_state()
@@ -184,7 +187,7 @@ def _compute_ic() -> dict:
                 om = max(omega_min, min(80.0, om))
         return om
 
-    def _aero_force(R_hub, col_c, om):
+    def _aero_force(R_hub: np.ndarray, col_c: float, om: float):
         """World-frame aero force at a fixed orientation/collective/spin."""
         aero = create_aero(_ROTOR, model="quasi_static")
         st   = aero.initial_rotor_state()
@@ -197,7 +200,7 @@ def _compute_ic() -> dict:
         res, _ = aero.step(inp, st, dt_eq)
         return res.F_world
 
-    def _solve_orientation(col_c):
+    def _solve_orientation(col_c: float):
         """Damped fixed point on body_z that nulls the perpendicular residual.
 
         Returns (T_along, omega, body_z, R_hub) at convergence, where T_along is
@@ -352,7 +355,7 @@ def _save_ic(path: Path, ic: dict) -> None:
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
-def test_create_ic(simtest_log):
+def test_create_ic(simtest_log: SimtestLog):
     """
     Write the static-tether IC at the wind-aligned design orientation to
     steady_state_starting.json.
@@ -411,7 +414,7 @@ def test_create_ic(simtest_log):
     _save_ic(_JSON_PATH, ic)
 
 
-def test_ic_matches_lua_bz_formula(simtest_log):
+def test_ic_matches_lua_bz_formula(simtest_log: SimtestLog):
     """
     Generated IC body_z must be the force-balanced disk orientation: tilted off
     the tether just enough to cancel the perpendicular gravity component at the
@@ -556,7 +559,7 @@ def _run_steady(pos0: np.ndarray, vel0: np.ndarray, R0: np.ndarray,
     )
 
 
-def _print_steady(log, m: dict, label: str) -> None:
+def _print_steady(log: SimtestLog, m: dict, label: str) -> None:
     lines = [
         f"tether length : mean={m['mean_tlen']:.3f} m   max_dev={m['max_tlen_dev']:.3f} m",
         f"altitude      : mean={m['mean_alt']:.2f} m   range={m['alt_range']:.2f} m  (min={m['min_alt']:.2f}  max={m['max_alt']:.2f})",
@@ -572,7 +575,7 @@ def _print_steady(log, m: dict, label: str) -> None:
     print(f"  [{label}] telemetry -> {m['csv_path']}")
 
 
-def test_ic_force_balance(simtest_log):
+def test_ic_force_balance(simtest_log: SimtestLog):
     """
     The IC must be a genuine physics fixed point at coll_eq_rad.
     At static equilibrium (vel=0, coll=coll_eq_rad, R0=force-balanced),
@@ -638,7 +641,7 @@ def test_ic_force_balance(simtest_log):
     )
 
 
-def test_ic_steady_flight(simtest_log):
+def test_ic_steady_flight(simtest_log: SimtestLog):
     """
     Load the saved IC and run 30 s of altitude-holding Python physics from
     the force-balanced R0 at coll_eq_rad collective.
@@ -674,7 +677,7 @@ def test_ic_steady_flight(simtest_log):
     )
 
 
-def test_ic_r0_kinematic(simtest_log):
+def test_ic_r0_kinematic(simtest_log: SimtestLog):
     """
     Verify that starting from R0_kinematic (same disk normal as the IC, but
     body_x North-aligned for GPS/RELPOSNED lock) and zero initial velocity,

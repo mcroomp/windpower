@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 
 import numpy as np
+from numpy.typing import NDArray
 import pyvista as pv
 from matplotlib.colors import ListedColormap
 from vtkmodules.vtkCommonCore import vtkCommand
@@ -77,8 +78,8 @@ def rotor_rpm_for_display(
     return commanded_motor_rpm(motor_pwm) / GEAR_RATIO
 
 
-def quaternion_to_rotation(q: tuple[float, float, float, float]) -> np.ndarray:
-    values = np.asarray(q, dtype=float)
+def quaternion_to_rotation(q: tuple[float, float, float, float]) -> NDArray[np.float64]:
+    values: NDArray[np.float64] = np.asarray(q, dtype=float)
     norm = float(np.linalg.norm(values))
     if norm <= 1e-9:
         raise ValueError("Quaternion length is zero")
@@ -196,7 +197,7 @@ def _flight_direction_arrow() -> pv.PolyData:
     return pv.PolyData(points, np.array([7, 0, 1, 2, 3, 4, 5, 6]))
 
 
-def _translation_z(distance: float) -> np.ndarray:
+def _translation_z(distance: float) -> NDArray[np.float64]:
     transform = np.eye(4, dtype=float)
     transform[2, 3] = distance
     return transform
@@ -206,7 +207,7 @@ def component_transforms(
     R_ned: np.ndarray,
     pos_ned: np.ndarray,
     rotor_spin_angle: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Return instrument-bay, rotor, and axle transforms in the display frame."""
     R_viz = _T_NED_ENU @ np.asarray(R_ned, dtype=float)
     pos_viz = _T_NED_ENU @ np.asarray(pos_ned, dtype=float)
@@ -703,7 +704,7 @@ class PassiveLiveView:
 
     @staticmethod
     def _hud_text(data: PassiveViewData) -> str:
-        def rpy(values) -> str:
+        def rpy(values: tuple[float | None, float | None, float | None]) -> str:
             return "  ".join(
                 "  n/a" if value is None else f"{value:+6.1f}"
                 for value in values

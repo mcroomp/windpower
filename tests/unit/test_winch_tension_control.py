@@ -58,7 +58,7 @@ STEPS_OUT   = int(DELTA_L / V_MAX_OUT / DT) + STEPS_RAMP * 2 + 200
 STEPS_IN    = int(DELTA_L / V_MAX_IN  / DT) + STEPS_RAMP * 2 + 200
 
 
-def _make(rest=REST_INIT, min_length=2.0, max_length=300.0):
+def _make(rest: float = REST_INIT, min_length: float = 2.0, max_length: float = 300.0):
     return WinchController(
         rest_length     = rest,
         kp_tension      = KP,
@@ -70,12 +70,14 @@ def _make(rest=REST_INIT, min_length=2.0, max_length=300.0):
     )
 
 
-def _run(w, n, tension):
+def _run(w: WinchController, n: int, tension: float):
     for _ in range(n):
         w.step(tension, DT)
 
 
-def _reel_out(w, delta=DELTA_L, tension=T_TARGET + 100):
+def _reel_out(
+    w: WinchController, delta: float = DELTA_L, tension: float = T_TARGET + 100,
+):
     """Drive winch out by delta metres at a tension above target."""
     w.set_target(w.rest_length + delta, T_TARGET)
     _run(w, STEPS_OUT, tension)

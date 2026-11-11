@@ -13,7 +13,7 @@ _READY = "RAWES: mode 0 (none)  disarmed"
 
 
 @pytest.fixture
-def restart(monkeypatch):
+def restart(monkeypatch: pytest.MonkeyPatch):
     session = Mock(spec=LinkHubClient)
     session.is_armed = False
     session.get_param.side_effect = lambda name: {"SCR_ENABLE": 1, "RAWES_MODE": 0}[name]
@@ -24,7 +24,14 @@ def restart(monkeypatch):
     now = 0.0
     sequence = 100
 
-    def read(_session, _cursor, _types, *, wait, expected_generation):
+    def read(
+        _session: LinkHubClient,
+        _cursor: str,
+        _types: str | list[str] | tuple[str, ...] | set[str] | None,
+        *,
+        wait: float,
+        expected_generation: str | None,
+    ):
         nonlocal now, sequence
         now += wait
         sequence += 1
@@ -40,7 +47,10 @@ def restart(monkeypatch):
     return session, pending, reader
 
 
-def test_restart_sends_explicit_command_and_verifies_fresh_firmware_events(restart, capsys):
+def test_restart_sends_explicit_command_and_verifies_fresh_firmware_events(
+    restart: tuple[Mock, list[str], Mock],
+    capsys: pytest.CaptureFixture[str],
+):
     session, _, reader = restart
 
     hw._restart_scripting(session)
@@ -58,7 +68,11 @@ def test_restart_sends_explicit_command_and_verifies_fresh_firmware_events(resta
 
 
 @pytest.mark.parametrize("result", [MavResult.DENIED, MavResult.FAILED, MavResult.UNSUPPORTED])
-def test_restart_rejection_is_not_success(restart, result, capsys):
+def test_restart_rejection_is_not_success(
+    restart: tuple[Mock, list[str], Mock],
+    result: MavResult,
+    capsys: pytest.CaptureFixture[str],
+):
     session, _, reader = restart
     session.command.return_value = {"result": result}
 
@@ -70,7 +84,11 @@ def test_restart_rejection_is_not_success(restart, result, capsys):
 
 
 @pytest.mark.parametrize("missing", [_RESTARTED, _LOADED, _READY])
-def test_acknowledgement_without_all_reload_events_times_out(restart, missing, capsys):
+def test_acknowledgement_without_all_reload_events_times_out(
+    restart: tuple[Mock, list[str], Mock],
+    missing: str,
+    capsys: pytest.CaptureFixture[str],
+):
     session, pending, reader = restart
     pending.remove(missing)
 
@@ -81,7 +99,9 @@ def test_acknowledgement_without_all_reload_events_times_out(restart, missing, c
     assert sum(entry.kwargs["wait"] for entry in reader.call_args_list) == 10.0
 
 
-def test_load_and_mode_messages_before_restart_do_not_verify_reload(restart):
+def test_load_and_mode_messages_before_restart_do_not_verify_reload(
+    restart: tuple[Mock, list[str], Mock],
+):
     session, pending, _ = restart
     pending[:] = [_LOADED, _READY, _RESTARTED]
 
@@ -89,7 +109,9 @@ def test_load_and_mode_messages_before_restart_do_not_verify_reload(restart):
         hw._restart_scripting(session)
 
 
-def test_restart_recovers_an_already_stopped_engine(restart):
+def test_restart_recovers_an_already_stopped_engine(
+    restart: tuple[Mock, list[str], Mock],
+):
     session, pending, _ = restart
     pending.insert(0, "Scripting: stopped")
 
@@ -99,7 +121,10 @@ def test_restart_recovers_an_already_stopped_engine(restart):
 
 
 @pytest.mark.parametrize("enabled", [0, None])
-def test_disabled_or_unreadable_scripting_requires_reboot(restart, enabled):
+def test_disabled_or_unreadable_scripting_requires_reboot(
+    restart: tuple[Mock, list[str], Mock],
+    enabled: int | None,
+):
     session, _, reader = restart
     session.get_param.side_effect = lambda name: enabled if name == "SCR_ENABLE" else 0
 
@@ -110,7 +135,7 @@ def test_disabled_or_unreadable_scripting_requires_reboot(restart, enabled):
     reader.assert_not_called()
 
 
-def test_restart_refuses_armed_vehicle(restart):
+def test_restart_refuses_armed_vehicle(restart: tuple[Mock, list[str], Mock]):
     session, _, _ = restart
     session.is_armed = True
 
@@ -120,7 +145,7 @@ def test_restart_refuses_armed_vehicle(restart):
     session.command.assert_not_called()
 
 
-def test_restart_requires_safe_off_mode(restart):
+def test_restart_requires_safe_off_mode(restart: tuple[Mock, list[str], Mock]):
     session, _, _ = restart
     session.get_param.side_effect = lambda name: 1
 
@@ -130,7 +155,9 @@ def test_restart_requires_safe_off_mode(restart):
     session.command.assert_not_called()
 
 
-def test_generation_change_aborts_verification(restart):
+def test_generation_change_aborts_verification(
+    restart: tuple[Mock, list[str], Mock],
+):
     session, _, reader = restart
     reader.side_effect = LinkHubGenerationChanged("v1:test:1", "v1:test:2")
 
@@ -138,7 +165,9 @@ def test_generation_change_aborts_verification(restart):
         hw._restart_scripting(session)
 
 
-def test_command_transport_failure_does_not_poll(restart):
+def test_command_transport_failure_does_not_poll(
+    restart: tuple[Mock, list[str], Mock],
+):
     session, _, reader = restart
     session.command.side_effect = LinkHubError("link lost")
 

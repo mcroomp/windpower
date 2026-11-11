@@ -8,6 +8,7 @@ then transforms data coordinates to image pixel coordinates for accurate overlay
 import math
 import csv
 from pathlib import Path
+from typing import TypedDict
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -20,8 +21,17 @@ HERE = Path(__file__).parent
 # Load CSV
 # ---------------------------------------------------------------------------
 
-def load_csv(path):
-    rows = []
+class _NacaRow(TypedDict):
+    rotor: str
+    pitch: float
+    mu: float
+    CL: float
+    CT: float
+    LD: float
+
+
+def load_csv(path: str | Path) -> list[_NacaRow]:
+    rows: list[_NacaRow] = []
     with open(path) as f:
         reader = csv.DictReader(
             (line for line in f if not line.lstrip().startswith("#")),
@@ -41,7 +51,7 @@ def load_csv(path):
                 continue
     return rows
 
-def get_curve(rows, rotor, pitch, tol=0.26):
+def get_curve(rows: list[_NacaRow], rotor: str, pitch: float, tol: float = 0.26):
     data = sorted(
         [r for r in rows if r["rotor"] == rotor and abs(r["pitch"] - pitch) < tol],
         key=lambda r: r["mu"]
@@ -94,7 +104,7 @@ X_DATA_MIN, X_DATA_MAX = 0.0,   0.90
 Y_DATA_MIN, Y_DATA_MAX = -0.10, 0.30
 
 # Transform: data → pixel
-def data_to_px(mu, CL):
+def data_to_px(mu: float, CL: float):
     px = x_axis_col + (mu  - X_DATA_MIN) / (X_DATA_MAX - X_DATA_MIN) * (x_right_col - x_axis_col)
     py = y_axis_row  - (CL  - Y_DATA_MIN) / (Y_DATA_MAX - Y_DATA_MIN) * (y_axis_row  - y_top_row)
     return px, py

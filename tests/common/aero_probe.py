@@ -18,7 +18,20 @@ from pathlib import Path
 import numpy as np
 
 import simulation
-from dynbem import RotorInputs, create_aero, rotor_definition as _rd
+from dynbem import (
+    RotorInputs,
+    RotorDefinition,
+    _OyeBEMModelLinear,
+    _OyeBEMModelTabulated,
+    _PittPetersModelLinear,
+    _PittPetersModelTabulated,
+    _QuasiStaticBEMLinear,
+    _QuasiStaticBEMTabulated,
+    _VpmRotorLinear,
+    _VpmRotorTabulated,
+    create_aero,
+    rotor_definition as _rd,
+)
 
 
 _ROTOR_DEFS = Path(simulation.__file__).resolve().parent / "rotor_definitions"
@@ -29,7 +42,7 @@ def load_rotor(name: str = "beaupoil_2026"):
     return _rd.load(str(_ROTOR_DEFS / f"{name}.yaml"))
 
 
-def make_probe(rotor=None):
+def make_probe(rotor: RotorDefinition | None = None):
     """Build the default quasi-static aero model for probing."""
     if rotor is None:
         rotor = load_rotor()
@@ -37,7 +50,16 @@ def make_probe(rotor=None):
 
 
 def probe_steady(
-    aero,
+    aero: (
+        _QuasiStaticBEMLinear
+        | _QuasiStaticBEMTabulated
+        | _PittPetersModelLinear
+        | _PittPetersModelTabulated
+        | _OyeBEMModelLinear
+        | _OyeBEMModelTabulated
+        | _VpmRotorLinear
+        | _VpmRotorTabulated
+    ),
     *,
     collective_rad: float,
     tilt_lon: float = 0.0,

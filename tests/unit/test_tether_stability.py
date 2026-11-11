@@ -106,7 +106,7 @@ def _compute_equilibrium_collective(
 
     _MAX_TETHER_TENSION_N = 496.0
 
-    def _probe(coll_rad):
+    def _probe(coll_rad: float):
         r = probe_steady(aero, collective_rad=coll_rad,
                          R_hub=R_hub, v_hub_world=np.zeros(3),
                          omega_rotor=omega, wind_world=wind)

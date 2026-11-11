@@ -21,7 +21,7 @@ Exported names (imported by conftest.py via ``from stack_infra import *``):
 """
 import contextlib
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import json
 import logging
 import math
@@ -68,10 +68,12 @@ from linkhub_client.messages import (
     EkfStatusReport,
     GlobalPositionInt,
     LocalPositionNed,
+    Message,
     NamedValueFloat,
     ParamRequestRead,
     Statustext,
     SetAttitudeTarget,
+    RawMessage,
 )
 from linkhub_client.client import LinkHubClient
 from groundstation.ekf_flags import flags_to_mask
@@ -367,7 +369,7 @@ class StackContext:
     def wait_drain(
         self,
         *,
-        until=None,
+        until: Callable[[str | None], bool] | None = None,
         timeout: float = 3.0,
         drain_s: float = 0.0,
         check_procs: bool = False,
@@ -521,7 +523,7 @@ class SitlContext:
 
 @contextlib.contextmanager
 def _sitl_stack(
-    tmp_path, *,
+    tmp_path: Path, *,
     test_name:          str = "",
     extra_boot_params:  dict[str, float] | None = None,
     base_params:        ParamSetup | None = None,
@@ -690,7 +692,7 @@ def _sitl_stack(
 
 @contextlib.contextmanager
 def _static_stack(
-    tmp_path,
+    tmp_path: Path,
     *,
     pos:        _np.ndarray,
     vel:        _np.ndarray,
@@ -768,7 +770,7 @@ def _static_stack(
 # ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
-def _acro_stack(tmp_path, *, extra_config=None,
+def _acro_stack(tmp_path: Path, *, extra_config: dict | None = None,
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
                 extra_boot_params: dict[str, float] | None = None,
                 rawes_params: dict[str, float] | None = None,
@@ -958,11 +960,11 @@ def _install_lua_scripts(*names: str) -> None:
 
 def _arm_sequence(
     gcs: LinkHubClient,
-    log,
+    log: logging.Logger,
     *,
     armon_ms: int | None = None,
-    procs_alive=None,
-    fail=None,
+    procs_alive: Callable[[], None] | None = None,
+    fail: Callable[[str], None] | None = None,
     mode_timeout: float = _MODE_TIMEOUT,
     arm_timeout: float = _ARM_TIMEOUT,
     target_mode: int = GUIDED_NOGPS,
@@ -1100,7 +1102,9 @@ def _arm_sequence(
 # Setup sequence
 # ---------------------------------------------------------------------------
 
-def _dump_params_to_log(gcs, log_dir: Path, log) -> None:
+def _dump_params_to_log(
+    gcs: LinkHubClient, log_dir: Path, log: logging.Logger
+) -> None:
     """Fetch all ArduPilot params and write params.json to log_dir."""
     log.info("[params] Fetching full param dump for log ...")
     try:
@@ -1114,7 +1118,7 @@ def _dump_params_to_log(gcs, log_dir: Path, log) -> None:
 
 def _run_acro_setup(
     ctx: StackContext,
-    _procs_alive,
+    _procs_alive: Callable[[], None],
     boot_setup: ParamSetup | None = None,
     rawes_params: dict[str, float] | None = None,
     arm_at_sim_s: float | None = None,
@@ -1656,7 +1660,9 @@ def dump_startup_diagnostics(ctx: StackContext) -> None:
 # Shared helpers (importable by tests)
 # ---------------------------------------------------------------------------
 
-def wait_for_acro_stability(gcs, log, timeout: float = 5.0) -> bool:
+def wait_for_acro_stability(
+    gcs: LinkHubClient, log: logging.Logger, timeout: float = 5.0
+) -> bool:
     """
     Drain MAVLink until a finite ATTITUDE message arrives or timeout.
     Returns True if a clean ATTITUDE was received.
@@ -1678,7 +1684,7 @@ def wait_for_acro_stability(gcs, log, timeout: float = 5.0) -> bool:
     return False
 
 
-def drain_statustext(gcs, log) -> list[str]:
+def drain_statustext(gcs: LinkHubClient, log: logging.Logger) -> list[str]:
     """Drain all buffered STATUSTEXT messages; return them as a list."""
     texts = []
     cursor = gcs.current_cursor()
@@ -1696,7 +1702,7 @@ def drain_statustext(gcs, log) -> list[str]:
 def observe(
     ctx: StackContext,
     duration_s: float,
-    on_message,
+    on_message: Callable[[Message | RawMessage | None, float], bool | None],
     *,
     msg_types: list[str],
     label: str = "observation",
@@ -1734,7 +1740,7 @@ def observe(
             break
 
 
-def get_arducopter_crash_info(ctx) -> str:
+def get_arducopter_crash_info(ctx: StackContext | SitlContext) -> str:
     """
     Extract ArduPilot crash details from arducopter.log if present.
 
@@ -1762,7 +1768,9 @@ def get_arducopter_crash_info(ctx) -> str:
         return ""
 
 
-def assert_procs_alive(ctx, label: str = "observation") -> None:
+def assert_procs_alive(
+    ctx: StackContext, label: str = "observation"
+) -> None:
     """
     pytest.fail() immediately if either mediator or SITL process has exited.
 
@@ -1804,7 +1812,13 @@ def assert_no_mediator_criticals(mediator_log: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _read_one(gcs, after: str, message_types, *, wait: float):
+def _read_one(
+    gcs: LinkHubClient,
+    after: str,
+    message_types: str | list[str] | tuple[str, ...] | set[str] | None,
+    *,
+    wait: float,
+):
     batch = gcs.read_messages(
         after,
         message_types,
@@ -1816,8 +1830,8 @@ def _read_one(gcs, after: str, message_types, *, wait: float):
 
 
 def _wait_params_ready(
-    gcs,
-    log,
+    gcs: LinkHubClient,
+    log: logging.Logger,
     timeout: float = 15.0,
     *,
     param_name: str = "MAV_SYSID",
@@ -2008,7 +2022,7 @@ def _torque_stack(
     omega_rotor: float,
     profile: str = "constant",
     tail_channel: int = 8,
-    extra_params=(),
+    extra_params: ParamSetup | tuple[()] = (),
     test_name: str = "",
     install_scripts: tuple = (),
     boot_params: dict | None = None,

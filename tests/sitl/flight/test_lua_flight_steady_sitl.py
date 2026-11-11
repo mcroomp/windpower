@@ -56,8 +56,9 @@ not EKF LOCAL_POSITION_NED (which can lag physics crashes by tens of seconds).
 import logging
 import math
 import numpy as np
-
 import pytest
+
+from linkhub_client.messages import Message, RawMessage
 
 from groundstation.rawes_diag import diag_values
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, enter_passive_params, send_rawes_command
@@ -229,7 +230,7 @@ def test_lua_flight_steady_sitl(guided_nogps_armed_lua_full: StackContext):
         "pos_samples":       [],   # (t_abs, x, y, z) from LOCAL_POSITION_NED
     }
 
-    def _handle(msg, t_rel):
+    def _handle(msg: Message | RawMessage | None, t_rel: float):
         now = gcs.sim_now()
         if msg is not None:
             decoded = decode_message(msg)

@@ -43,7 +43,7 @@ T_END    = 30.0
 DT       = 0.02
 
 
-def _run(v_target, col_init=0.0):
+def _run(v_target: float, col_init: float = 0.0):
     return simulate_point(
         col           = col_init,
         elevation_deg = EL,
@@ -61,7 +61,12 @@ def _run(v_target, col_init=0.0):
     )
 
 
-def _converged(history, key="v_along", window=10.0, tol=0.1):
+def _converged(
+    history: list[dict],
+    key: str = "v_along",
+    window: float = 10.0,
+    tol: float = 0.1,
+):
     final = [h[key] for h in history if h["t"] >= history[-1]["t"] - window]
     return len(final) >= 3 and (max(final) - min(final)) < tol
 

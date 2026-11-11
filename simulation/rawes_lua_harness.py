@@ -30,8 +30,11 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
+from collections.abc import Mapping, Sequence
+from typing import Protocol
 
 import numpy as np
+from numpy.typing import ArrayLike
 from lupa import lua54
 
 from groundstation.rawes_diag import diag_values
@@ -84,6 +87,11 @@ _PARAM_ALIAS = {
 
 # ── _ChOut proxy ──────────────────────────────────────────────────────────────
 
+class _ChannelMock(Protocol):
+    @property
+    def ch_out(self) -> Mapping[int, float | None]: ...
+
+
 class _ChOut:
     """Dict-like view of RC channel override outputs.
 
@@ -92,7 +100,7 @@ class _ChOut:
         sim.ch_out[8]   -> motor interlock PWM or None
     """
 
-    def __init__(self, mock):
+    def __init__(self, mock: _ChannelMock):
         self._mock = mock
 
     def __getitem__(self, n: int):
@@ -100,9 +108,9 @@ class _ChOut:
         return int(v) if v is not None else None
 
     def __repr__(self):
-        items = {n: int(self._mock.ch_out[n])
+        items = {n: int(value)
                  for n in range(1, 17)
-                 if self._mock.ch_out[n] is not None}
+                 if (value := self._mock.ch_out[n]) is not None}
         return f"ChOut({items})"
 
 
@@ -136,7 +144,7 @@ class RawesLua:
     # Base tick rate: rawes.lua BASE_PERIOD_MS = 10 ms (100 Hz)
     _TICK_MS = 10
 
-    def __init__(self, **params):
+    def __init__(self, **params: float):
         self._lua = lua54.LuaRuntime(unpack_returned_tuples=False)
         self._lua.execute(_MOCK_LUA)
         self._mock = self._lua.globals()["_mock"]
@@ -201,7 +209,7 @@ class RawesLua:
         return [float(g.x), float(g.y), float(g.z)]
 
     @gyro.setter
-    def gyro(self, xyz):
+    def gyro(self, xyz: Sequence[float] | np.ndarray):
         self._mock.gyro.x = float(xyz[0])
         self._mock.gyro.y = float(xyz[1])
         self._mock.gyro.z = float(xyz[2])
@@ -213,7 +221,7 @@ class RawesLua:
         return [float(a.x), float(a.y), float(a.z)]
 
     @accel.setter
-    def accel(self, xyz):
+    def accel(self, xyz: Sequence[float] | np.ndarray):
         self._mock.accel.x = float(xyz[0])
         self._mock.accel.y = float(xyz[1])
         self._mock.accel.z = float(xyz[2])
@@ -227,7 +235,7 @@ class RawesLua:
         return [float(p.x), float(p.y), float(p.z)]
 
     @pos_ned.setter
-    def pos_ned(self, xyz):
+    def pos_ned(self, xyz: Sequence[float] | np.ndarray | None):
         """Set to [x, y, z] to simulate GPS fusion, or None to drop GPS."""
         if xyz is None:
             self._lua.execute("_mock.pos_ned = nil")
@@ -242,7 +250,7 @@ class RawesLua:
         return [float(v.x), float(v.y), float(v.z)]
 
     @vel_ned.setter
-    def vel_ned(self, xyz):
+    def vel_ned(self, xyz: Sequence[float] | np.ndarray):
         self._mock.vel_ned.x = float(xyz[0])
         self._mock.vel_ned.y = float(xyz[1])
         self._mock.vel_ned.z = float(xyz[2])
@@ -258,7 +266,7 @@ class RawesLua:
         ])
 
     @R.setter
-    def R(self, mat):
+    def R(self, mat: ArrayLike):
         """Set body-to-NED rotation (3x3 numpy array or nested list)."""
         flat = np.asarray(mat, dtype=float).flatten()
         for i, v in enumerate(flat):
@@ -334,7 +342,7 @@ class RawesLua:
             f"(function() local v=Vector3f(); v:x({x}); v:y({y}); v:z({z}); return v end)()"
         )
 
-    def vec_to_list(self, v) -> list[float]:
+    def vec_to_list(self, v: object) -> list[float]:
         """Convert a Lua Vector3f returned by fns.* into a Python [x, y, z] list.
 
         Uses a Lua-side accessor to preserve colon-call semantics (v:x() not v.x()).
@@ -437,7 +445,7 @@ class RawesLua:
         lua_str = "".join(f"\\x{b:02x}" for b in raw)
         self._lua.execute(f'table.insert(_mock.mavlink_inbox, "{lua_str}")')
 
-    def send_message(self, msg) -> None:
+    def send_message(self, msg: NamedValueFloat | NamedValueInt) -> None:
         """Inject a supported MAVLink dataclass into the Lua mavlink inbox.
 
         Supported today: NamedValueFloat and NamedValueInt, which mirror the

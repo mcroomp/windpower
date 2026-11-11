@@ -435,7 +435,7 @@ class LinkHubClient:
         clock = SimClock.from_dict(self.vehicle_status()["sim_clock"])
         return float(clock.time_boot_ms or 0) / 1000.0
 
-    def sim_sleep(self, duration_s: float, check=None) -> None:
+    def sim_sleep(self, duration_s: float, check: Callable[[], object] | None = None) -> None:
         deadline = self.sim_now() + duration_s
         while self.sim_now() < deadline:
             if check is not None:

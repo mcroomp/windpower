@@ -66,7 +66,7 @@ def main() -> None:
     _state = dict(pos_ned=pos, vel_ned=vel, rpy_rad=rpy,
                   accel_body=accel_body, gyro_body=gyro)
 
-    def step_fn(_servos, _t):
+    def step_fn(_servos: np.ndarray, _t: float):
         return _state
 
     n = 0

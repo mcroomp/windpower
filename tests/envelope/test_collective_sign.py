@@ -30,7 +30,7 @@ T_STEADY = 20.0
 _AERO = make_probe(load_rotor("beaupoil_2026"))
 
 
-def _thrust(col):
+def _thrust(col: float):
     r = probe_steady(
         _AERO,
         collective_rad = col,

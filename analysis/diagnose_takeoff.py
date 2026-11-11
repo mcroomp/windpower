@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import sys
 from pathlib import Path
 
@@ -74,7 +75,7 @@ def _fmt_row(r: TelRow) -> str:
     )
 
 
-def _find_event(rows: list[TelRow], pred) -> TelRow | None:
+def _find_event(rows: list[TelRow], pred: Callable[[TelRow], bool]) -> TelRow | None:
     for r in rows:
         if pred(r):
             return r

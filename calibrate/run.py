@@ -60,6 +60,8 @@ from .hw import (
     _rpm_triplet,
 )
 from .messages import read_one
+from ._observation_types import _ObservationLog, _ObservationSession, _ObservationState
+from linkhub_client.messages import Message, RawMessage
 from .util import (
     _fmt,
     _parse_flags,
@@ -154,7 +156,7 @@ def run_passive(
     session: LinkHubClient,
     options: PassiveRunOptions,
     *,
-    stop_requested=None,
+    stop_requested: Callable[[], bool] | None=None,
 ) -> None:
     """Run the production passive startup using typed options."""
     args = ["passive", "--trim", f"thr={options.thrust:.17g}"]
@@ -392,7 +394,7 @@ def _wait_for_armed(session: LinkHubClient, timeout_s: float = 15.0) -> bool:
 def _wait_for_passive_runup(
     session: LinkHubClient,
     *,
-    stop_requested=None,
+    stop_requested: Callable[[], bool] | None=None,
 ) -> bool:
     """Wait in ACRO until ArduPilot's configured heli runup estimate completes."""
     ramp_s = session.get_param("H_RSC_RAMP_TIME")
@@ -445,7 +447,7 @@ def _wait_for_passive_runup(
 def _wait_for_passive_ekf_settle(
     session: LinkHubClient,
     *,
-    stop_requested=None,
+    stop_requested: Callable[[], bool] | None=None,
     timeout_s: float = _PASSIVE_EKF_TIMEOUT_S,
     settle_s: float = _PASSIVE_EKF_SETTLE_S,
     rate_limit_rads: float = _PASSIVE_SETTLE_RATE_RADS,
@@ -551,7 +553,7 @@ def _configure_passive_startup_telemetry(session: LinkHubClient) -> None:
 def _wait_for_passive_land_clear(
     session: LinkHubClient,
     *,
-    stop_requested=None,
+    stop_requested: Callable[[], bool] | None=None,
     timeout_s: float = _PASSIVE_LAND_CLEAR_TIMEOUT_S,
 ) -> bool:
     """Wait for ArduPilot to clear land_complete during armed ACRO runup."""
@@ -716,7 +718,7 @@ def _safety_shutdown(
 _PID_TUNING_HZ = 4.0
 
 
-def _request_pid_tuning(session: LinkHubClient, hz: float = _PID_TUNING_HZ) -> None:
+def _request_pid_tuning(session: _ObservationSession, hz: float = _PID_TUNING_HZ) -> None:
     session.send_message(
         CommandLong(
             target_system=session._target_system,
@@ -729,23 +731,23 @@ def _request_pid_tuning(session: LinkHubClient, hz: float = _PID_TUNING_HZ) -> N
 
 
 def _observation_loop(
-    session: LinkHubClient,
+    session: _ObservationSession,
     *,
     duration_s: float | None,
     msg_types: list[str],
     streams: list[tuple[MavDataStream, int]],
-    handle_msg,
-    render_row,
+    handle_msg: Callable[[_ObservationState, Message | RawMessage | EscTelemetry, float], list[object] | None],
+    render_row: Callable[[_ObservationState, float], list[object]],
     header_cols: list[str],
-    log: _RunLog | None = None,
+    log: _ObservationLog | None = None,
     print_period_s: float = 1.0,
     header_print_cols: list[str] | None = None,
-    on_tick=None,
+    on_tick: Callable[[float], None] | None=None,
     suppress_status: bool = False,
-    key_handler=None,
-    setup_hook=None,
-    loop_hook=None,
-    stop_requested=None,
+    key_handler: Callable[[bytes], None] | None=None,
+    setup_hook: Callable[[], None] | None=None,
+    loop_hook: Callable[[_ObservationState, float], bool] | None=None,
+    stop_requested: Callable[[], bool] | None=None,
 ) -> tuple[int, bool]:
     """Run the standard observation loop.
 
@@ -775,7 +777,7 @@ def _observation_loop(
     print("  " + "  ".join(f"{c:>{w}}" for c, w in zip(print_hdr, widths)))
     print("  " + "  ".join("-" * w for w in widths))
 
-    state = {"armed": True, "pending_text": []}
+    state: _ObservationState = {"armed": True, "pending_text": []}
     t0 = time.monotonic()
     deadline = (t0 + duration_s) if duration_s else None
     last_print = -1.0
@@ -851,14 +853,14 @@ def _run_observation(
     mode_name: str,
     duration: float | None,
     log: _RunLog,
-    on_tick=None,
+    on_tick: Callable[[float], None] | None=None,
     keep_rc: bool = False,
     manual_controls: dict[str, float] | None = None,
     passive_target: _PassiveTarget | None = None,
     rotor_motor: LinkHubMotorController | None = None,
     protocol_debug: bool = False,
     auto_sequence_hold_s: float | None = None,
-    stop_requested=None,
+    stop_requested: Callable[[], bool] | None=None,
 ) -> None:
     """Generic observation loop for `run` modes.  Stream + columns are the
     same across all modes; the row content is whatever the FC reports.  Per-
@@ -1340,7 +1342,7 @@ def _run_observation(
         "pid_yaw_d": None,
     }
 
-    def _quat_to_rpy_deg(q) -> tuple[float, float, float] | tuple[None, None, None]:
+    def _quat_to_rpy_deg(q: tuple[float, ...] | None) -> tuple[float, float, float] | tuple[None, None, None]:
         if q is None or len(q) != 4:
             return None, None, None
         w, x, y, z = [float(v) for v in q]
@@ -1366,7 +1368,7 @@ def _run_observation(
         return (w, -x, -y, -z)
 
     def _quat_mul(
-        a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+        a: tuple[float, float, float, float], b: tuple[float, ...]
     ) -> tuple[float, float, float, float]:
         aw, ax, ay, az = a
         bw, bx, by, bz = b
@@ -1377,7 +1379,7 @@ def _run_observation(
             aw * bz + ax * by - ay * bx + az * bw,
         )
 
-    def _quat_error(q_actual, q_target):
+    def _quat_error(q_actual: tuple[float, float, float, float] | None, q_target: tuple[float, ...] | None):
         """Body-frame rotation error q_err = conj(q_actual) (x) q_target --
         i.e. the rotation that takes the actual attitude onto the target
         attitude.  Using the quaternion error directly (rather than
@@ -1397,7 +1399,7 @@ def _run_observation(
         yaw_deg = math.degrees(2.0 * math.atan2(z, w))
         return w, x, y, z, total_deg, yaw_deg
 
-    def handle_msg(st, msg, t_rel):
+    def handle_msg(st: _ObservationState, msg: Message | RawMessage | EscTelemetry, t_rel: float):
         if isinstance(msg, Attitude):
             state["roll"] = math.degrees(msg.roll)
             state["pitch"] = math.degrees(msg.pitch)
@@ -1529,16 +1531,16 @@ def _run_observation(
                 while state["smot_hist"] and state["smot_hist"][0][0] < cutoff:
                     state["smot_hist"].pop(0)
         elif hasattr(msg, "voltages"):
-            cells = [v for v in msg.voltages if v != 65535]
+            cells = [v for v in getattr(msg, "voltages") if v != 65535]
             if cells:
                 state["vbat"] = sum(cells) / 1000.0
-            if msg.current_battery >= 0:
-                state["curr"] = msg.current_battery / 100.0
+            if getattr(msg, "current_battery") >= 0:
+                state["curr"] = getattr(msg, "current_battery") / 100.0
         elif hasattr(msg, "voltage_battery"):
-            if state["vbat"] is None and msg.voltage_battery != 65535:
-                state["vbat"] = msg.voltage_battery / 1000.0
-            if state["curr"] is None and msg.current_battery >= 0:
-                state["curr"] = msg.current_battery / 100.0
+            if state["vbat"] is None and getattr(msg, "voltage_battery") != 65535:
+                state["vbat"] = getattr(msg, "voltage_battery") / 1000.0
+            if state["curr"] is None and getattr(msg, "current_battery") >= 0:
+                state["curr"] = getattr(msg, "current_battery") / 100.0
         elif isinstance(msg, EscTelemetry):
             erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
             if erpm is not None:
@@ -1573,8 +1575,8 @@ def _run_observation(
                 state[f"{prefix}_d"] = msg.D
         return None
 
-    def render_row(st, t_rel):
-        def _fresh_or_stale(value, value_ts, fmt):
+    def render_row(st: _ObservationState, t_rel: float):
+        def _fresh_or_stale(value: float | None, value_ts: float | None, fmt: Callable[[float], str]):
             if value is None:
                 return None
             if value_ts is None or (t_rel - value_ts) > 2.0:
@@ -1657,7 +1659,7 @@ def _run_observation(
         ]
 
     live_view = None
-    def _update_live_view(st, t_rel: float) -> bool:
+    def _update_live_view(st: object, t_rel: float) -> bool:
         return True
 
     if mode_name == "passive" and not protocol_debug:
@@ -1670,7 +1672,7 @@ def _run_observation(
             passive_reset_handler,
         )
 
-        def _update_passive_live_view(st, t_rel: float) -> bool:
+        def _update_passive_live_view(st: object, t_rel: float) -> bool:
             actual_q = state["att_q"] or (1.0, 0.0, 0.0, 0.0)
             _, _, _, _, qerr_deg, _ = _quat_error(state["att_q"], state["att_target_q"])
             _, _, rotor_rpm = _rpm_triplet(state["erpm"])
@@ -1763,7 +1765,7 @@ def _run_observation(
             )
         auto_sequence_index = requested_index
 
-    def _combined_loop_hook(st, t_rel: float) -> bool:
+    def _combined_loop_hook(st: object, t_rel: float) -> bool:
         _run_auto_sequence(t_rel)
         return _update_live_view(st, t_rel)
 
@@ -1914,7 +1916,7 @@ def _cmd_run(
     session: LinkHubClient,
     args: list[str],
     *,
-    stop_requested=None,
+    stop_requested: Callable[[], bool] | None=None,
     log_dir: str | Path | None = None,
 ) -> None:
     """run <mode> [--duration N] [--trim thr=V]"""

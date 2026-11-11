@@ -128,7 +128,7 @@ def _R_tilt_in_direction(tilt_angle_rad: float, azimuth_rad: float) -> np.ndarra
 
 
 @pytest.mark.parametrize("azimuth_deg", [0, 45, 90, 135, 180, 225, 270, 315])
-def test_attitude_loop_converges_from_all_directions(azimuth_deg):
+def test_attitude_loop_converges_from_all_directions(azimuth_deg: int):
     """Sweep initial body_z error around all 8 cardinal+diagonal directions.
 
     With gyroscopic precession (CCW spin, FRD body_z DOWN) the hub-moment ↔

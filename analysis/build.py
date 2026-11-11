@@ -32,7 +32,7 @@ STUCK_WARN_SECS = 60
 HEARTBEAT_SECS = 30
 
 
-def stream_with_monitor(cmd):
+def stream_with_monitor(cmd: list[str]):
     """Run cmd, stream output, and warn if it goes silent (likely stuck)."""
     proc = subprocess.Popen(
         cmd,

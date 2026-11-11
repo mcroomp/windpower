@@ -34,13 +34,17 @@ from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Protocol
+from numpy.typing import ArrayLike
 
 
 from simulation.dynamics import RigidBodyDynamics
-from dynbem       import create_aero, RotorInputs, step_omega
+from dynbem       import AeroResult, RotorDefinition, create_aero, RotorInputs, step_omega
+from simulation.ic import IC
+from simulation.kinematic import KinematicStartup
 from simulation.tether import DEFAULT_TETHER_MODEL, Tether, TetherInputs, TetherResult, make_tether
 from simulation.frames import cross3
-from simulation.rotor_physics import resolve_i_spin_kgm2
+from simulation.rotor_physics import require_mass_kg, resolve_i_spin_kgm2
 from simulation.param_defaults import thrust_to_coll_rad as _t2c
 from simulation.torque_model import (
     HubState as _HubState, HubParams as _HubParams, step as _hub_step,
@@ -54,6 +58,14 @@ from simulation.torque_model import (
 # dynbem's rotor schema). 0.0 = frictionless; not yet characterised on the
 # bench (see design/hardware.md).
 BEARING_FRICTION_NM = 0.0
+
+
+class AeroModel[State](Protocol):
+    def initial_rotor_state(self) -> State: ...
+
+    def step(
+        self, inputs: RotorInputs, state: State, dt: float,
+    ) -> tuple[AeroResult, State]: ...
 
 
 @dataclass
@@ -120,19 +132,19 @@ class PhysicsCore:
 
     def __init__(
         self,
-        rotor,
-        ic,
-        wind,
+        rotor: RotorDefinition,
+        ic: IC | SimpleNamespace,
+        wind: ArrayLike,
         *,
         base_k_ang:         float = BASE_K_ANG,
         k_yaw:              float = K_YAW_DEFAULT,
-        kinematic                 = None,
+        kinematic: KinematicStartup | None = None,
         startup_damp_k_ang: float = 0.0,
         z_floor:            float = -1.0,
         aero_model:         str   = "quasi_static",
         kinematic_aero_mode: str  = "locked",
         kinematic_nul_rate_gain_rads_per_rad: float = 0.0,
-        aero_override             = None,
+        aero_override: AeroModel[object] | None = None,
         tether_override: Tether | None = None,
         tether_model: str = DEFAULT_TETHER_MODEL,
         anchor_ned: np.ndarray | None = None,
@@ -162,7 +174,7 @@ class PhysicsCore:
 
         I_spin = resolve_i_spin_kgm2(rotor)
         self._dyn = RigidBodyDynamics(
-            mass   = float(rotor.inertia.mass_kg),
+            mass   = require_mass_kg(rotor),
             I_body = list(rotor.inertia.I_body_kgm2),
             I_spin = float(I_spin),
             pos0   = list(ic.pos),
@@ -191,7 +203,7 @@ class PhysicsCore:
             self._tether = tether_override
         else:
             self._tether = make_tether(
-                tether_model, hub_mass=float(rotor.inertia.mass_kg),
+                tether_model, hub_mass=require_mass_kg(rotor),
                 constant_tension_n=tether_constant_tension_n,
             )
         self._t_sim      = 0.0
@@ -199,21 +211,6 @@ class PhysicsCore:
 
         # Bootstrap tether tension from IC position
         self._tether_result = self._tether.evaluate(self._tether_inputs(0.0))
-
-    # ── Convenience constructor ───────────────────────────────────────────────
-
-    @classmethod
-    def from_state(cls, rotor, pos, vel, R0, rest_length, eq_thrust,
-                   omega_spin, wind, **kwargs):
-        ic = SimpleNamespace(
-            pos        = np.asarray(pos, dtype=float),
-            vel        = np.asarray(vel, dtype=float),
-            R0         = R0,
-            rest_length= float(rest_length),
-            eq_thrust  = float(eq_thrust),
-            omega_spin = float(omega_spin),
-        )
-        return cls(rotor, ic, wind, **kwargs)
 
     # ── Read-only state properties ────────────────────────────────────────────
 

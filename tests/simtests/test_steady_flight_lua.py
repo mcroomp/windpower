@@ -22,7 +22,7 @@ import pytest
 
 
 from tests.simtests.simtest_ic import load_ic
-from simulation.simtest_log import BadEventLog
+from simulation.simtest_log import BadEventLog, SimtestLog
 from simulation.tether import DEFAULT_TETHER_MODEL
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
@@ -46,7 +46,12 @@ WIND         = np.array([0.0, 10.0, 0.0])
 FLOOR_ALT_M  = 1.0
 
 
-def _run_steady(log, *, tether_model: str = DEFAULT_TETHER_MODEL, duration_s: float = T_SIM) -> dict:
+def _run_steady(
+    log: SimtestLog,
+    *,
+    tether_model: str = DEFAULT_TETHER_MODEL,
+    duration_s: float = T_SIM,
+) -> dict:
     """rawes.lua mode=1 altitude-hold flight from IC."""
     sim = RawesLua(mode=MODE_STEADY)
     sim.armed        = True
@@ -148,13 +153,13 @@ def _run_steady(log, *, tether_model: str = DEFAULT_TETHER_MODEL, duration_s: fl
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-def test_steady_flight_lua(simtest_log):
+def test_steady_flight_lua(simtest_log: SimtestLog):
     """rawes.lua mode=1: hub aloft, lateral motion bounded, tether taut, axle aligned for 90 s."""
     r = _run_steady(simtest_log)
     _assert_steady(r)
 
 
-def test_tallak_tether_lua_flight(simtest_log):
+def test_tallak_tether_lua_flight(simtest_log: SimtestLog):
     """The loaded cable remains bounded under the real Lua controller for 10 s."""
     r = _run_steady(simtest_log, tether_model="tallak_quasi_static", duration_s=10.0)
     _assert_steady(r)

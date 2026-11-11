@@ -19,7 +19,7 @@ import pytest
 
 
 from simulation.winch import WinchController
-from simulation.simtest_log import BadEventLog
+from simulation.simtest_log import BadEventLog, SimtestLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
@@ -63,7 +63,7 @@ T_FINAL_DROP_MAX = 15.0
 # ---------------------------------------------------------------------------
 
 
-def _run_landing(log) -> dict:
+def _run_landing(log: SimtestLog) -> dict:
     runner = PhysicsRunner(_ROTOR, _IC, WIND)
 
     # Note: xi_reel_in_deg / col_cruise_rad were dropped from the planner
@@ -237,7 +237,7 @@ def _run_landing(log) -> dict:
 
 
 @pytest.mark.skip(reason="Landing tests disabled pending landing controller rework")
-def test_landing_lua(simtest_log):
+def test_landing_lua(simtest_log: SimtestLog):
     """rawes.lua mode=4: floor reached within anchor radius, no descent bad events."""
     r = _run_landing(simtest_log)
     failures = []

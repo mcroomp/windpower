@@ -26,6 +26,26 @@ from arduloop.guided import (
 )
 from arduloop import HeliParams
 from arduloop.attitude_heli import HeliRateOutput
+from simulation.param_defaults import load_ap_params
+
+
+@pytest.mark.parametrize("loop_rate_hz,output_limit", [(400.0, 1.0), (200.0, 0.6)])
+def test_heli_parameter_loader_options(loop_rate_hz: float, output_limit: float) -> None:
+    params = load_ap_params()
+    hp = HeliParams.from_ap_dict(
+        params, loop_rate_hz=loop_rate_hz, output_limit=output_limit,
+    )
+    assert hp.loop_rate_hz == loop_rate_hz
+    assert hp.output_limit == output_limit
+    assert params["ATC_RAT_RLL_P"] == hp.roll.P
+    assert params["ATC_RAT_PIT_P"] == hp.pitch.P
+    assert params["ATC_RAT_YAW_P"] == hp.yaw.P
+
+
+def test_heli_parameter_loader_default_options() -> None:
+    hp = HeliParams.from_ap_dict(load_ap_params())
+    assert hp.loop_rate_hz == 400.0
+    assert hp.output_limit == 1.0
 
 
 # ---------------------------------------------------------------------------

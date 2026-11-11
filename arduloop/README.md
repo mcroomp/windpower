@@ -57,6 +57,10 @@ for _ in range(1600):
                             out.yaw_cmd, 0.5, dt)
 ```
 
+`HeliParams.from_ap_dict` accepts explicit keyword-only `loop_rate_hz` and
+`output_limit` options; ArduPilot-controlled fields come from the parameter
+dictionary.
+
 Run the bundled demo:
 
 ```

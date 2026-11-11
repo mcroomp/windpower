@@ -15,16 +15,17 @@ This test validates smooth, tension-controlled winch cycles without tension
 spikes, slack, or floor hits.
 """
 import os
+from collections.abc import Callable
 
 import numpy as np
 import pytest
 
 
 from simulation.winch import GovernedWinchController
-from simulation.simtest_log import BadEventLog
+from simulation.simtest_log import BadEventLog, SimtestLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
-from tests.common.mock_ardupilot import MockArdupilot
+from tests.common.mock_ardupilot import MockArdupilot, _PythonBackend
 from groundstation.pumping_planner import TensionCommand
 from simulation.comms import VirtualComms
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
@@ -74,7 +75,7 @@ T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.2
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_pumping(log, aero_model: str | None = None) -> dict:
+def _run_pumping(log: SimtestLog, aero_model: str | None = None) -> dict:
     # Aero model: explicit arg wins; otherwise the RAWES_AERO env var
     # (quasi_static [default] / pitt_peters / oye / vpm) selects it.
     if aero_model is None:
@@ -129,7 +130,7 @@ def _run_pumping(log, aero_model: str | None = None) -> dict:
             return TENSION_REEL_IN
         return TENSION_REEL_OUT
 
-    def _tel_fn(r, sr):
+    def _tel_fn(r: PhysicsRunner, sr: dict[str, object]):
         pos_h  = r.hub_state["pos"][:2]
         r_norm = max(float(np.linalg.norm(pos_h)), 0.1)
         v_rad  = float(np.dot(r.hub_state["vel"][:2], pos_h / r_norm))
@@ -206,10 +207,17 @@ def _run_pumping(log, aero_model: str | None = None) -> dict:
 
         # ── AP 50 Hz ──────────────────────────────────────────────────────
         if i % ap_every == 0 or phase != prev_phase:
-            ap.tick(t_sim, runner,
-                    accel_ned=prev_accel_ned,
-                    inject=(lambda _ap, __: _ap.receive_command(ap_cmd, DT_PLANNER))
-                           if ap_cmd is not None else None)
+            ap_inject: Callable[[_PythonBackend, PhysicsRunner], None] | None
+            if ap_cmd is not None:
+                ap_command = ap_cmd
+
+                def _receive_ap_command(_ap: _PythonBackend, _: PhysicsRunner) -> None:
+                    _ap.receive_command(ap_command, DT_PLANNER)
+
+                ap_inject = _receive_ap_command
+            else:
+                ap_inject = None
+            ap.tick(t_sim, runner, accel_ned=prev_accel_ned, inject=ap_inject)
 
         # ── Winch 400 Hz ──────────────────────────────────────────────────
         winch.step(runner.anchor_tension, DT)
@@ -266,7 +274,7 @@ def _run_pumping(log, aero_model: str | None = None) -> dict:
 # Tests
 # ---------------------------------------------------------------------------
 
-def test_pumping_unified(simtest_log):
+def test_pumping_unified(simtest_log: SimtestLog):
     """3 pumping cycles with GovernedWinchController (tension-governed, jerk-limited).
     Pass if no bad events (no tension spike, slack, or floor hit)."""
     r = _run_pumping(simtest_log)
@@ -277,7 +285,7 @@ def test_pumping_unified(simtest_log):
 
 
 @pytest.mark.skip(reason="Dynamic-inflow comparison only; quasi_static is the default flight model")
-def test_pumping_unified_pitt_peters(simtest_log):
+def test_pumping_unified_pitt_peters(simtest_log: SimtestLog):
     """Same as test_pumping_unified but with Pitt-Peters aero (no xi limit)."""
     r = _run_pumping(simtest_log, aero_model="pitt_peters")
     failures = []

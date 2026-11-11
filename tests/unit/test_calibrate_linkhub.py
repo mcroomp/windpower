@@ -10,7 +10,10 @@ from calibrate import linkhub
 
 
 @pytest.mark.parametrize("platform", ["nt", "posix"])
-def test_owned_linkhub_uses_a_windows_process_group(monkeypatch, platform):
+def test_owned_linkhub_uses_a_windows_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+):
     popen = Mock()
     monkeypatch.setattr(linkhub, "os", SimpleNamespace(name=platform))
     monkeypatch.setattr(linkhub, "_linkhub_binary", lambda: Path("linkhub.exe"))
@@ -26,7 +29,10 @@ def test_owned_linkhub_uses_a_windows_process_group(monkeypatch, platform):
 
 
 @pytest.mark.parametrize("platform", ["nt", "posix"])
-def test_owned_linkhub_stops_gracefully(monkeypatch, platform):
+def test_owned_linkhub_stops_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+):
     process = Mock()
     process.poll.return_value = None
     process.wait.return_value = 0
@@ -53,7 +59,7 @@ def test_owned_linkhub_reports_failed_cleanup():
         linkhub._stop_process(process)
 
 
-def test_owned_linkhub_reports_forced_shutdown(caplog):
+def test_owned_linkhub_reports_forced_shutdown(caplog: pytest.LogCaptureFixture):
     process = Mock()
     process.poll.return_value = None
     process.wait.side_effect = [subprocess.TimeoutExpired("linkhub", 10), 1]
@@ -67,7 +73,7 @@ def test_owned_linkhub_reports_forced_shutdown(caplog):
 
 
 @pytest.mark.parametrize("returncode", [0, 1])
-def test_owned_linkhub_handles_already_exited_process(returncode):
+def test_owned_linkhub_handles_already_exited_process(returncode: int):
     process = Mock()
     process.poll.return_value = returncode
     if returncode:

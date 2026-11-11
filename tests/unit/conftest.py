@@ -6,7 +6,7 @@ Fast, no-physics tests only. Simtests (full physics loops) live in tests/simtest
 import pytest
 
 
-def pytest_configure(config):
+def pytest_configure(config: pytest.Config):
     config.addinivalue_line(
         "markers",
         "simtest: full physics simulation loop — lives in tests/simtests/",
@@ -17,7 +17,7 @@ def pytest_configure(config):
     )
 
 
-def pytest_collection_modifyitems(items):
+def pytest_collection_modifyitems(items: list[pytest.Item]):
     for item in items:
         if item.get_closest_marker("timeout"):
             continue

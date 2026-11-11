@@ -12,7 +12,9 @@ from tests.lint import test_python_checks as lint_checks
 
 @pytest.mark.parametrize("returncode", [1, 2])
 @pytest.mark.parametrize("tool", ["Ruff", "Pyright"])
-def test_lint_failure_fails_the_check(monkeypatch, returncode, tool):
+def test_lint_failure_fails_the_check(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, tool: str,
+):
     run = Mock(return_value=subprocess.CompletedProcess([], returncode))
     monkeypatch.setattr(lint_checks.subprocess, "run", run)
 
@@ -21,7 +23,9 @@ def test_lint_failure_fails_the_check(monkeypatch, returncode, tool):
 
 
 @pytest.mark.parametrize(("tool", "args"), lint_checks.CHECKS)
-def test_lint_check_uses_test_interpreter_and_repository_root(monkeypatch, tool, args):
+def test_lint_check_uses_test_interpreter_and_repository_root(
+    monkeypatch: pytest.MonkeyPatch, tool: str, args: list[str],
+):
     run = Mock(return_value=subprocess.CompletedProcess([], 0))
     monkeypatch.setattr(lint_checks.subprocess, "run", run)
 
@@ -42,7 +46,9 @@ def test_lint_check_uses_test_interpreter_and_repository_root(monkeypatch, tool,
     (["--run-lint", "-m", "lint"], 1, "1 failed, 1 deselected"),
     (["--run-lint", "--collect-only"], 0, "2 tests collected"),
 ])
-def test_lint_category_is_explicitly_opt_in(tmp_path, options, expected_code, summary):
+def test_lint_category_is_explicitly_opt_in(
+    tmp_path: Path, options: list[str], expected_code: int, summary: str,
+):
     root = Path(__file__).resolve().parents[2]
     (tmp_path / "conftest.py").write_text((root / "tests" / "conftest.py").read_text())
     (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    lint: opt-in static checks\n")

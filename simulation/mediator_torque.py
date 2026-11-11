@@ -348,7 +348,7 @@ def run(
     iface.bind()
     log.info("Bound to UDP port %d", _RECV_PORT)
 
-    def step_fn(_servos, t):
+    def step_fn(_servos: np.ndarray, t: float):
         nonlocal hub_state, prev_roll, prev_pitch, _dynamics_started, delayed_throttle
         dt = iface.dt()
 

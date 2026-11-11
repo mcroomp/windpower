@@ -15,12 +15,17 @@ import threading
 import time
 from pathlib import Path
 from collections.abc import Iterator
+from typing import Protocol, TextIO
 
 from pymavlink import mavutil
 import contextlib
 
 
-def _json_safe(value):
+class _DictMessage(Protocol):
+    def to_dict(self) -> dict: ...
+
+
+def _json_safe(value: object) -> object:
     """Convert pymavlink binary fields into deterministic JSON values."""
     if isinstance(value, (bytes, bytearray)):
         return list(value)
@@ -44,11 +49,11 @@ class MavlinkLogWriter:
         Must remain open for the lifetime of this object.
     """
 
-    def __init__(self, fh) -> None:
+    def __init__(self, fh: TextIO) -> None:
         self._fh = fh
         self._lock = threading.Lock()
 
-    def write(self, msg, last_time_boot_ms: int, direction: str = "rx") -> None:
+    def write(self, msg: _DictMessage, last_time_boot_ms: int, direction: str = "rx") -> None:
         """
         Serialize *msg* (a pymavlink message) as one JSON line.
 

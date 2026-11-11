@@ -78,7 +78,9 @@ def _stub_session(final_state: str = "complete"):
         thread.join(timeout=1.0)
 
 
-def test_default_heartbeat_timeout_tolerates_usb_reboot(monkeypatch) -> None:
+def test_default_heartbeat_timeout_tolerates_usb_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     now = 0.0
     stopped = []
 
@@ -176,7 +178,9 @@ def test_failed_transfer_raises_and_leaves_no_file(tmp_path: Path) -> None:
     assert _DataFlashHandler.cancelled == ["/v1/mavlink/transfers/7"]
 
 
-def test_connect_preserves_valid_zero_target_component(monkeypatch) -> None:
+def test_connect_preserves_valid_zero_target_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session = LinkHubClient()
     monkeypatch.setattr(
         session,

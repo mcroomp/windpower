@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from numpy.typing import ArrayLike
 from typing import Any
 from collections.abc import Callable
 
@@ -41,8 +42,8 @@ from collections.abc import Callable
 # ---------------------------------------------------------------------------
 
 def compute_launch_position(
-    target_pos,
-    target_vel,
+    target_pos: ArrayLike,
+    target_vel: ArrayLike,
     damp_seconds: float,
     ramp_s: float = 0.0,
 ) -> np.ndarray:
@@ -81,8 +82,8 @@ def compute_launch_position(
 # ---------------------------------------------------------------------------
 
 def make_linear_traj(
-    target_pos,
-    target_vel,
+    target_pos: ArrayLike,
+    target_vel: ArrayLike,
     duration: float,
     ramp_s: float = 0.0,
 ) -> Callable[[float], tuple[np.ndarray, np.ndarray]]:
@@ -145,8 +146,8 @@ def make_linear_traj(
 # ---------------------------------------------------------------------------
 
 def make_smooth_trapezoid_traj(
-    target_pos,
-    direction,
+    target_pos: ArrayLike,
+    direction: ArrayLike,
     duration: float,
     cruise_speed: float,
     accel_s: float,
@@ -304,8 +305,8 @@ class KinematicStartup:
 
     def __init__(
         self,
-        target_pos = None,
-        target_vel = None,
+        target_pos: ArrayLike | None = None,
+        target_vel: ArrayLike | None = None,
         duration:  float = 0.0,
         ramp_s:    float = 0.0,
         R0:        np.ndarray | None = None,

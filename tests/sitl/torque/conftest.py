@@ -11,6 +11,7 @@ Fixtures:
   torque_armed_ddfp         — DDFP fixture with kinematic yaw model (closed-loop regulation).
 """
 import math
+from pathlib import Path
 
 import pytest
 
@@ -37,7 +38,7 @@ _col_min, _col_max = load_collective_phys_range()
 LUA_YAW_IC_THRUST: float = (-0.150 - _col_min) / (_col_max - _col_min)
 
 @pytest.fixture
-def torque_armed(tmp_path, request):
+def torque_armed(tmp_path: Path, request: pytest.FixtureRequest):
     """Counter-torque stack fixture at the IC (high-tilt) orientation. Yields StackContext.
 
     Boots from the FLIGHT default params (dual-GPS yaw, GPS pos/vel enabled) via
@@ -59,7 +60,9 @@ def torque_armed(tmp_path, request):
 
 
 @pytest.fixture
-def torque_armed_profile(request, tmp_path):
+def torque_armed_profile(
+    request: pytest.FixtureRequest, tmp_path: Path
+):
     """
     Like torque_armed but accepts a profile name via request.param.
 
@@ -82,7 +85,9 @@ def torque_armed_profile(request, tmp_path):
         yield ctx
 
 
-def _lua_torque_stack(tmp_path, request, armon_ms):
+def _lua_torque_stack(
+    tmp_path: Path, request: pytest.FixtureRequest, armon_ms: int | None
+):
     """Shared setup for Lua torque fixtures.
 
     ArduPilot DDFP yaw PID drives Motor4 (tail_channel=8 / Ch9).
@@ -102,7 +107,7 @@ def _lua_torque_stack(tmp_path, request, armon_ms):
 
 
 @pytest.fixture
-def torque_armed_lua(tmp_path, request):
+def torque_armed_lua(tmp_path: Path, request: pytest.FixtureRequest):
     """
     Torque stack with rawes.lua passive (RAWES_MODE=0, MODE_NONE).
 
@@ -116,7 +121,9 @@ def torque_armed_lua(tmp_path, request):
 
 
 @pytest.fixture
-def torque_production_vanilla_lua(tmp_path, request):
+def torque_production_vanilla_lua(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     Production-like torque fixture using vanilla SITL boot defaults + Lua PASSIVE.
 
@@ -150,7 +157,9 @@ def torque_production_vanilla_lua(tmp_path, request):
 
 
 @pytest.fixture
-def torque_production_delayed_lua(tmp_path, request):
+def torque_production_delayed_lua(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     Same as ``torque_production_vanilla_lua`` but with a 300 ms transport delay
     on the motor throttle response (models ESC / actuation latency).
@@ -177,7 +186,7 @@ def torque_production_delayed_lua(tmp_path, request):
 
 
 @pytest.fixture
-def torque_unarmed_lua(tmp_path, request):
+def torque_unarmed_lua(tmp_path: Path, request: pytest.FixtureRequest):
     """
     Torque stack with rawes.lua passive (RAWES_MODE=0, MODE_NONE).
 
@@ -191,7 +200,9 @@ def torque_unarmed_lua(tmp_path, request):
 
 
 @pytest.fixture
-def torque_unarmed_lua_calibrate(tmp_path, request):
+def torque_unarmed_lua_calibrate(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """Compass-only torque stack whose lifecycle is owned by calibrate run passive."""
     import simulation.torque_model as _m
 
@@ -221,7 +232,9 @@ def torque_unarmed_lua_calibrate(tmp_path, request):
 
 
 @pytest.fixture
-def torque_armed_ddfp_zero(tmp_path, request):
+def torque_armed_ddfp_zero(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     DDFP fixture with prescribed zero yaw throughout DYNAMIC.
 
@@ -249,7 +262,9 @@ def torque_armed_ddfp_zero(tmp_path, request):
 
 
 @pytest.fixture
-def torque_armed_ddfp_ramp(tmp_path, request):
+def torque_armed_ddfp_ramp(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     DDFP motor response to prescribed yaw ramp: psi_dot prescribed 0→10 deg/s
     over 30 s.  ArduPilot should drive motor throttle above the zero-yaw
@@ -278,7 +293,9 @@ def torque_armed_ddfp_ramp(tmp_path, request):
 
 
 @pytest.fixture
-def torque_armed_ddfp(tmp_path, request):
+def torque_armed_ddfp(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     DDFP fixture with kinematic yaw model (closed-loop regulation test).
 

@@ -24,7 +24,7 @@ import pytest
 
 
 from simulation.winch import WinchController
-from simulation.simtest_log import BadEventLog
+from simulation.simtest_log import BadEventLog, SimtestLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot, _PythonBackend
@@ -75,7 +75,7 @@ T_FLARE_MAX = 30.0  # s   max time in flare before timeout
 # ---------------------------------------------------------------------------
 
 
-def _run_landing(log) -> tuple[dict, _PythonBackend]:
+def _run_landing(log: SimtestLog) -> tuple[dict, _PythonBackend]:
     runner = PhysicsRunner(_ROTOR, _IC, WIND)
 
     ground = LandingGroundController(
@@ -284,7 +284,7 @@ def _run_landing(log) -> tuple[dict, _PythonBackend]:
 
 
 @pytest.mark.skip(reason="Landing tests disabled pending landing controller rework")
-def test_landing(simtest_log):
+def test_landing(simtest_log: SimtestLog):
     """4-phase landing: each phase verified at exit before checking the next."""
     r, ap = _run_landing(simtest_log)
     try:

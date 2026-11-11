@@ -72,19 +72,19 @@ class TestImmediateSettling:
         )
 
     @pytest.mark.parametrize("col_rad", [-0.28, -0.18, -0.10, 0.00, 0.10])
-    def test_collective_settles_immediately(self, col_rad):
+    def test_collective_settles_immediately(self, col_rad: float):
         m = self._make_fast()
         col_act, _, _ = m.step(col_rad, 0.0, 0.0, _DT)
         assert math.isclose(col_act, col_rad, abs_tol=1e-6)
 
     @pytest.mark.parametrize("tlon", [-0.5, 0.0, 0.5])
-    def test_tilt_lon_settles_immediately(self, tlon):
+    def test_tilt_lon_settles_immediately(self, tlon: float):
         m = self._make_fast()
         _, tlon_act, _ = m.step(-0.18, tlon, 0.0, _DT)
         assert math.isclose(tlon_act, tlon, abs_tol=1e-6)
 
     @pytest.mark.parametrize("tlat", [-0.5, 0.0, 0.5])
-    def test_tilt_lat_settles_immediately(self, tlat):
+    def test_tilt_lat_settles_immediately(self, tlat: float):
         m = self._make_fast()
         _, _, tlat_act = m.step(-0.18, 0.0, tlat, _DT)
         assert math.isclose(tlat_act, tlat, abs_tol=1e-6)

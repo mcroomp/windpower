@@ -16,6 +16,7 @@ import math
 
 import pytest
 
+from tests.sitl.stack_infra import StackContext
 from tests.sitl.torque.torque_test_utils import run_observation_loop, save_telemetry, assert_physics_yaw_rate
 
 pytestmark = pytest.mark.sitl
@@ -27,7 +28,7 @@ _THRESHOLD = math.radians(120.0)
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["slow_vary"], indirect=True)
-def test_slow_rpm_sitl(torque_armed_profile):
+def test_slow_rpm_sitl(torque_armed_profile: StackContext):
     """
     Rotor RPM varies slowly around nominal while the yaw loop stays canonical.
 

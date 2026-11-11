@@ -40,7 +40,7 @@ _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 _LOGS_DIR = _SIM_DIR / "logs"
 
 
-from analysis.flight_log import FlightLog  # noqa: E402
+from analysis.flight_log import Bucket, FlightLog  # noqa: E402
 
 
 @dataclass
@@ -183,7 +183,7 @@ def _first_nonzero_df_pid_tar_time(fl: FlightLog, eps_deg_s: float = 0.1) -> flo
     return min(ts) if ts else None
 
 
-def _bucket_events_short(bucket) -> str:
+def _bucket_events_short(bucket: Bucket) -> str:
     if not bucket.events:
         return ""
     labels: list[str] = []

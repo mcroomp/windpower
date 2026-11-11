@@ -362,7 +362,7 @@ def _cmd_get(session: LinkHubClient, args: list[str]) -> None:
 def _print_swash_layout(session: LinkHubClient) -> None:
     """Print the configured mixer and RAWES physical HR3-120 geometry."""
 
-    def g(name, default=None):
+    def g(name: str, default: float | None=None):
         v = session.get_param(name)
         return float(v) if v is not None else default
 
@@ -398,7 +398,7 @@ def _print_swash_layout(session: LinkHubClient) -> None:
         value = pwm[channel]
         return f"{value} us" if value else "no data"
 
-    def _quad(az):
+    def _quad(az: float | None):
         """Rough physical quadrant label from azimuth (deg, CCW from front)."""
         if az is None:
             return "?"
@@ -416,7 +416,7 @@ def _print_swash_layout(session: LinkHubClient) -> None:
         else:
             return "right-back"
 
-    def _factors(az):
+    def _factors(az: float | None):
         if az is None:
             return (None, None)
         a = math.radians(az)
@@ -507,7 +507,7 @@ def _print_swash_layout(session: LinkHubClient) -> None:
     print()
 
 
-def _fmt_az(az):
+def _fmt_az(az: float | None):
     if az is None:
         return "  ?  "
     return f"{az:+.0f} deg"

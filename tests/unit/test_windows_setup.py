@@ -22,7 +22,7 @@ def write_cmd(path: Path, source: str) -> None:
 
 
 @pytest.fixture
-def bootstrap(tmp_path):
+def bootstrap(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
     project = tmp_path / "project with spaces"
     project.mkdir()
     for name in ("setup.cmd", "setup.sh", "run_linkhub_ui.cmd", ".node-version"):
@@ -142,7 +142,9 @@ def bootstrap(tmp_path):
     return project, bin_dir, log, env
 
 
-def installed_tools(bootstrap, *, sdk: bool = True) -> None:
+def installed_tools(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], *, sdk: bool = True,
+) -> None:
     _, bin_dir, _, env = bootstrap
     for name in ("uv", "node", "npm", "cargo", "vswhere"):
         shutil.copy2(bin_dir / f"{name}.template", bin_dir / f"{name}.cmd")
@@ -154,7 +156,11 @@ def installed_tools(bootstrap, *, sdk: bool = True) -> None:
             path.touch()
 
 
-def run_script(bootstrap, script="setup.cmd", *args):
+def run_script(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+    script: str = "setup.cmd",
+    *args: str,
+):
     project, _, _, env = bootstrap
     command = subprocess.list2cmdline([str(project / script), *args])
     return subprocess.run(
@@ -168,13 +174,15 @@ def run_script(bootstrap, script="setup.cmd", *args):
     )
 
 
-def commands(bootstrap) -> list[str]:
+def commands(bootstrap: tuple[Path, Path, Path, dict[str, str]]) -> list[str]:
     log = bootstrap[2]
     return log.read_text().splitlines() if log.exists() else []
 
 
 @WINDOWS_ONLY
-def test_setup_bootstraps_all_missing_tools_without_python(bootstrap):
+def test_setup_bootstraps_all_missing_tools_without_python(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     result = run_script(bootstrap)
     assert result.returncode == 0, result.stdout + result.stderr
     calls = commands(bootstrap)
@@ -212,7 +220,9 @@ def test_node_version_policy_is_shared_by_npm_projects():
 
 
 @WINDOWS_ONLY
-def test_setup_stops_when_winget_has_no_supported_node_release(bootstrap):
+def test_setup_stops_when_winget_has_no_supported_node_release(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     bootstrap[3]["MOCK_NO_NODE24"] = "1"
     result = run_script(bootstrap)
     assert result.returncode != 0
@@ -221,7 +231,9 @@ def test_setup_stops_when_winget_has_no_supported_node_release(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_setup_reuses_tools_without_winget_and_handles_spaces(bootstrap):
+def test_setup_reuses_tools_without_winget_and_handles_spaces(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     installed_tools(bootstrap)
     project, bin_dir, _, _ = bootstrap
     (bin_dir / "winget.cmd").unlink()
@@ -236,7 +248,9 @@ def test_setup_reuses_tools_without_winget_and_handles_spaces(bootstrap):
 
 @WINDOWS_ONLY
 @pytest.mark.parametrize("stage", ["winget", "node-version", "python", "sync", "ruff", "npm-ci", "npm-run", "cargo", "run"])
-def test_setup_stops_on_install_or_build_failure(bootstrap, stage):
+def test_setup_stops_on_install_or_build_failure(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], stage: str,
+):
     if stage != "winget":
         installed_tools(bootstrap)
     bootstrap[3]["MOCK_FAIL"] = stage
@@ -249,7 +263,9 @@ def test_setup_stops_on_install_or_build_failure(bootstrap, stage):
 
 
 @WINDOWS_ONLY
-def test_setup_reports_missing_winget(bootstrap):
+def test_setup_reports_missing_winget(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     (bootstrap[1] / "winget.cmd").unlink()
     result = run_script(bootstrap)
     assert result.returncode != 0
@@ -258,7 +274,9 @@ def test_setup_reports_missing_winget(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_setup_rejects_install_success_without_an_available_tool(bootstrap):
+def test_setup_rejects_install_success_without_an_available_tool(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     bootstrap[3]["MOCK_INSTALL_NOOP"] = "1"
     result = run_script(bootstrap)
     assert result.returncode != 0
@@ -267,7 +285,9 @@ def test_setup_rejects_install_success_without_an_available_tool(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_setup_repairs_an_existing_build_tools_installation_missing_sdk(bootstrap):
+def test_setup_repairs_an_existing_build_tools_installation_missing_sdk(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     installed_tools(bootstrap, sdk=False)
     _, bin_dir, _, env = bootstrap
     env["MOCK_EXISTING_VS"] = "1"
@@ -284,7 +304,7 @@ def test_setup_repairs_an_existing_build_tools_installation_missing_sdk(bootstra
     assert any(line.startswith("visual-studio modify ") for line in commands(bootstrap))
 
 
-def server_artifacts(bootstrap) -> None:
+def server_artifacts(bootstrap: tuple[Path, Path, Path, dict[str, str]]) -> None:
     project, _, _, env = bootstrap
     env["MOCK_SERVER_EXE"] = env["COMSPEC"]
     shutil.copy2(env["COMSPEC"], project / "linkhub" / "target" / "release" / "linkhub.exe")
@@ -294,7 +314,9 @@ def server_artifacts(bootstrap) -> None:
 
 @WINDOWS_ONLY
 @pytest.mark.parametrize("missing", [None, "binary", "ui"])
-def test_launcher_delegates_setup_and_preserves_connection_arguments(bootstrap, missing):
+def test_launcher_delegates_setup_and_preserves_connection_arguments(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], missing: str | None,
+):
     installed_tools(bootstrap)
     server_artifacts(bootstrap)
     project, _, _, env = bootstrap
@@ -318,7 +340,9 @@ def test_launcher_delegates_setup_and_preserves_connection_arguments(bootstrap, 
 
 
 @WINDOWS_ONLY
-def test_prebuilt_launcher_does_not_require_python_uv_or_winget(bootstrap):
+def test_prebuilt_launcher_does_not_require_python_uv_or_winget(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     server_artifacts(bootstrap)
     result = run_script(bootstrap, "run_linkhub_ui.cmd", "auto")
     assert result.returncode == 7
@@ -328,7 +352,9 @@ def test_prebuilt_launcher_does_not_require_python_uv_or_winget(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_launcher_preserves_environment_defaults_and_explicit_baud(bootstrap):
+def test_launcher_preserves_environment_defaults_and_explicit_baud(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     server_artifacts(bootstrap)
     bootstrap[3].update({
         "LINKHUB_CONNECTION": "COM42",
@@ -344,7 +370,9 @@ def test_launcher_preserves_environment_defaults_and_explicit_baud(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_launcher_does_not_start_after_setup_failure(bootstrap):
+def test_launcher_does_not_start_after_setup_failure(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     installed_tools(bootstrap)
     server_artifacts(bootstrap)
     bootstrap[3]["MOCK_FAIL"] = "sync"
@@ -355,7 +383,9 @@ def test_launcher_does_not_start_after_setup_failure(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_git_bash_delegates_to_the_windows_bootstrap(bootstrap):
+def test_git_bash_delegates_to_the_windows_bootstrap(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     bash = Path(os.environ["PROGRAMFILES"]) / "Git" / "bin" / "bash.exe"
     if not bash.is_file():
         pytest.skip("Git Bash is not installed")

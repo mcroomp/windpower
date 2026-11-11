@@ -17,6 +17,7 @@ This module provides:
 from __future__ import annotations
 
 import math
+import logging
 from pathlib import Path
 
 import pytest
@@ -28,14 +29,16 @@ from simulation.simtest_log import BadEventLog
 from linkhub_client.messages import (
     Attitude,
     DebugFloatArray,
+    Message,
+    RawMessage,
     ServoOutputRaw,
     Statustext,
     decode_message,
 )
-from tests.sitl.stack_infra import observe  # noqa: E402
+from tests.sitl.stack_infra import StackContext, observe  # noqa: E402
 
 
-def yaw_motor_pwm_from_servo_output(msg, default: int = 0) -> int:
+def yaw_motor_pwm_from_servo_output(msg: object, default: int = 0) -> int:
     """Return yaw motor PWM from SERVO_OUTPUT_RAW.
 
     Motor4 is on output 9 (servo9_raw).
@@ -45,7 +48,7 @@ def yaw_motor_pwm_from_servo_output(msg, default: int = 0) -> int:
 
 
 def run_observation_loop(
-    ctx,
+    ctx: StackContext,
     settle_s: float,
     observe_s: float,
     timeout_margin_s: float = 20.0,
@@ -73,7 +76,7 @@ def run_observation_loop(
     }
     log = ctx.log
 
-    def handle(msg, t_rel):
+    def handle(msg: Message | RawMessage | None, t_rel: float):
         if msg is None:
             return None
         match decode_message(msg):
@@ -112,7 +115,7 @@ def run_observation_loop(
 
 def save_telemetry(rows: list,
                    log_dir: Path,
-                   log) -> None:
+                   log: logging.Logger) -> None:
     """Save telemetry CSV to <log_dir>/telemetry.csv (matches flight test convention)."""
     path = log_dir / "telemetry.csv"
     write_csv(rows, path)
@@ -124,7 +127,7 @@ def assert_yaw_rate(
     obs: list[dict],
     threshold_rad_s: float,
     settle_s: float,
-    log,
+    log: logging.Logger,
 ) -> None:
     """
     Assert that max |psi_dot| in the observation window is within threshold.
@@ -205,7 +208,7 @@ def assert_physics_yaw_rate(
     threshold_rad_s: float,
     settle_s: float,
     observe_s: float,
-    log,
+    log: logging.Logger,
 ) -> None:
     """
     Assert that the actual physics psi_dot stays within threshold.
@@ -285,7 +288,7 @@ def assert_motor_throttle_response(
     min_throttle: float,
     settle_s: float,
     observe_s: float,
-    log,
+    log: logging.Logger,
 ) -> None:
     """
     Assert that the motor throttle exceeds min_throttle in the observation window.

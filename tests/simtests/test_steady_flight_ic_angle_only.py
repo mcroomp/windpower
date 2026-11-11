@@ -23,6 +23,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+from simulation.simtest_log import SimtestLog
 from scipy.spatial.transform import Rotation
 
 
@@ -190,7 +192,7 @@ def _run_angle_ic_only(steps: int = 4000):
     }
 
 
-def test_steady_flight_ic_angle_only(simtest_log):
+def test_steady_flight_ic_angle_only(simtest_log: SimtestLog):
     """IC-angle-only guided control remains stable from zero cyclic initialization."""
     STEPS = 4000  # 10 s
     DRIFT_MAX = 15.0

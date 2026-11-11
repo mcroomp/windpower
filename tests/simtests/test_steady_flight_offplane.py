@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from simulation.ic import IC
+from simulation.simtest_log import SimtestLog
 
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.test_steady_flight import DT, _run_simulation
@@ -27,7 +29,7 @@ def _rotate_about_ned_down(angle_rad: float) -> np.ndarray:
     ])
 
 
-def _with_azimuth_offset(ic, offset_rad: float):
+def _with_azimuth_offset(ic: IC, offset_rad: float):
     rot = _rotate_about_ned_down(offset_rad)
     return SimpleNamespace(
         pos=rot @ ic.pos,
@@ -49,7 +51,7 @@ def _azimuth_error_deg(pos: np.ndarray, ref_az_rad: float) -> np.ndarray:
     ])
 
 
-def test_steady_flight_holds_offplane_start(simtest_log):
+def test_steady_flight_holds_offplane_start(simtest_log: SimtestLog):
     """From a 30 deg off-wind start, the kite holds its launch plane (bounded).
 
     With the no-truth-wind plane-keeping estimator the controller does NOT know

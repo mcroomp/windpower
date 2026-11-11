@@ -42,8 +42,12 @@ import json
 import argparse
 from pathlib import Path
 from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
+from typing import TypedDict
+from analysis._telemetry_types import _NumericColumn, _TelemetryRow
 
 import numpy as np
+from numpy.typing import NDArray
 from simulation.rotor_physics import require_mass_kg
 
 import simulation
@@ -70,7 +74,37 @@ BREAK_LOAD_N = 620.0
 FLOOR_ALT_M = 1.5
 
 
-def _aero_thrust(col):
+class _OscillationRow(TypedDict):
+    phase: str
+    t_start: float
+    dur_s: float
+    signal: str
+    f_dom_hz: float | None
+    pp_amp: float | None
+    rms: float
+
+
+class _BucketRow(TypedDict):
+    t: float
+    phase: str
+    alt: float | None
+    tgt: float | None
+    alt_err: float | None
+    el: float | None
+    d_eq: float | None
+    d_act: float | None
+    T_need: float | None
+    feasible: str
+    T_set: float | None
+    T_act: float | None
+    col_alt: float | None
+    col_act: float | None
+    col_sd: float | None
+    col_pp: float | None
+    flags: str
+
+
+def _aero_thrust(col: float):
     inputs = RotorInputs(
         collective_rad=float(col),
         tilt_lon=0.0,
@@ -94,14 +128,14 @@ _T_THRUST_MAX = _aero_thrust(COL_MAX)
 # ── Physics helpers ────────────────────────────────────────────────────────────
 
 
-def _elevation(pos):
+def _elevation(pos: NDArray[np.float64]):
     tlen = np.linalg.norm(pos)
     return math.degrees(
         math.asin(max(-1.0, min(1.0, float(-pos[2]) / max(tlen, 1e-6))))
     )
 
 
-def _angle_deg(v1, v2):
+def _angle_deg(v1: NDArray[np.float64], v2: NDArray[np.float64]):
     n1 = np.linalg.norm(v1)
     n2 = np.linalg.norm(v2)
     if n1 < 1e-9 or n2 < 1e-9:
@@ -110,7 +144,7 @@ def _angle_deg(v1, v2):
     return math.degrees(math.acos(max(-1.0, min(1.0, c))))
 
 
-def _t_thrust_needed(el_deg, delta_deg):
+def _t_thrust_needed(el_deg: float, delta_deg: float):
     el = math.radians(el_deg)
     d = math.radians(delta_deg)
     sd = math.sin(d)
@@ -121,7 +155,7 @@ def _t_thrust_needed(el_deg, delta_deg):
     return MG * math.cos(el) / sd
 
 
-def _t_min_achievable(el_deg):
+def _t_min_achievable(el_deg: float):
     el = math.radians(el_deg)
     if MG * math.cos(el) > _T_THRUST_MIN:
         return float("nan")
@@ -132,7 +166,7 @@ def _t_min_achievable(el_deg):
 # ── Load telemetry ─────────────────────────────────────────────────────────────
 
 
-def load_telemetry(csv_path):
+def load_telemetry(csv_path: str | Path):
     rows = []
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
@@ -153,7 +187,7 @@ def load_telemetry(csv_path):
 # ── Phase transitions ──────────────────────────────────────────────────────────
 
 
-def _phase_transitions(rows):
+def _phase_transitions(rows: list[_TelemetryRow]):
     events = []
     if not rows:
         return events
@@ -197,7 +231,7 @@ def _phase_transitions(rows):
 # ── Slack events ───────────────────────────────────────────────────────────────
 
 
-def _slack_events(rows, tension_window=5):
+def _slack_events(rows: list[_TelemetryRow], tension_window: int=5):
     events = []
     n = len(rows)
     i = 0
@@ -210,7 +244,7 @@ def _slack_events(rows, tension_window=5):
             before = rows[max(0, i - tension_window) : i]
             after = rows[j : min(n, j + tension_window)]
 
-            def mean_col(rlist, col):
+            def mean_col(rlist: list[_TelemetryRow], col: _NumericColumn):
                 vals = [
                     r[col]
                     for r in rlist
@@ -242,7 +276,7 @@ def _slack_events(rows, tension_window=5):
 
 # ── Oscillation analysis ───────────────────────────────────────────────────────
 
-_OSC_SIGNALS = [
+_OSC_SIGNALS: list[tuple[_NumericColumn, str]] = [
     ("tether_tension", "tension_N"),
     ("collective_rad", "col_act"),
     ("thrust_from_alt_ctrl", "thr_alt"),
@@ -257,7 +291,7 @@ _OSC_SIGNALS = [
 _MIN_SEGMENT_ROWS = 40
 
 
-def _dominant_freq(sig, dt):
+def _dominant_freq(sig: list[float], dt: float):
     if len(sig) < _MIN_SEGMENT_ROWS:
         return float("nan"), float("nan")
     x = np.asarray(sig, dtype=float)
@@ -271,7 +305,7 @@ def _dominant_freq(sig, dt):
     return float(freqs[idx]), float(amps[idx] * 2.0)
 
 
-def _oscillation_rows(rows, dt):
+def _oscillation_rows(rows: list[_TelemetryRow], dt: float):
     segments = []
     cur_phase = rows[0].get("phase", "")
     seg_rows = [rows[0]]
@@ -284,7 +318,7 @@ def _oscillation_rows(rows, dt):
         seg_rows.append(r)
     segments.append((cur_phase, seg_rows))
 
-    osc_rows = []
+    osc_rows: list[_OscillationRow] = []
     for phase, seg in segments:
         dur = seg[-1].get("t_sim", 0.0) - seg[0].get("t_sim", 0.0)
         if len(seg) < _MIN_SEGMENT_ROWS:
@@ -321,32 +355,32 @@ def _oscillation_rows(rows, dt):
 # ── Per-bucket computation ─────────────────────────────────────────────────────
 
 
-def _compute_buckets(rows, bucket_s):
+def _compute_buckets(rows: list[_TelemetryRow], bucket_s: float):
     buckets = defaultdict(list)
     for r in rows:
         bk = int(r["t_sim"] / bucket_s) * bucket_s
         buckets[bk].append(r)
 
-    bucket_rows = []
+    bucket_rows: list[_BucketRow] = []
     flag_counts = defaultdict(int)
 
     for bk in sorted(buckets.keys()):
         grp = buckets[bk]
         phase = grp[len(grp) // 2].get("phase", "")
 
-        def avg(key):
+        def avg(key: _NumericColumn):
             vals = [r[key] for r in grp if key in r and not math.isnan(r[key])]
             return float(np.mean(vals)) if vals else float("nan")
 
-        def std(key):
+        def std(key: _NumericColumn):
             vals = [r[key] for r in grp if key in r and not math.isnan(r[key])]
             return float(np.std(vals)) if len(vals) > 1 else float("nan")
 
-        def peak_to_peak(key):
+        def peak_to_peak(key: _NumericColumn):
             vals = [r[key] for r in grp if key in r and not math.isnan(r[key])]
             return float(np.max(vals) - np.min(vals)) if len(vals) > 1 else float("nan")
 
-        def frac(pred):
+        def frac(pred: Callable[[_TelemetryRow], bool]):
             n = sum(1 for r in grp if pred(r))
             return n / max(len(grp), 1)
 
@@ -408,10 +442,10 @@ def _compute_buckets(rows, bucket_s):
             key = f.split("(")[0].split("=")[0]
             flag_counts[key] += 1
 
-        def r4(v):
+        def r4(v: float):
             return round(v, 4) if not math.isnan(v) else None
 
-        def r1(v):
+        def r1(v: float):
             return round(v, 1) if not math.isnan(v) else None
 
         bucket_rows.append(
@@ -442,7 +476,7 @@ def _compute_buckets(rows, bucket_s):
 # ── Writers ────────────────────────────────────────────────────────────────────
 
 
-def _write_buckets_csv(bucket_rows, path):
+def _write_buckets_csv(bucket_rows: Sequence[Mapping[str, object]], path: str | Path):
     if not bucket_rows:
         return
     with open(path, "w", newline="") as f:
@@ -451,7 +485,7 @@ def _write_buckets_csv(bucket_rows, path):
         w.writerows(bucket_rows)
 
 
-def _write_osc_csv(osc_rows, path):
+def _write_osc_csv(osc_rows: Sequence[Mapping[str, object]], path: str | Path):
     if not osc_rows:
         return
     with open(path, "w", newline="") as f:
@@ -463,7 +497,7 @@ def _write_osc_csv(osc_rows, path):
 # ── Correlation / coherence analysis ──────────────────────────────────────────
 #
 # Signals included in pairwise analysis.  pos_z is sign-flipped to altitude.
-_CORR_SIGNALS = [
+_CORR_SIGNALS: list[tuple[_NumericColumn, str]] = [
     ("tether_tension", "tension_N"),
     ("collective_rad", "col_act"),
     ("thrust_from_alt_ctrl", "col_alt"),
@@ -483,7 +517,7 @@ _CORR_SIGNALS = [
 _CORR_REF = "tension_N"
 
 
-def _extract_signal(seg, col, label):
+def _extract_signal(seg: list[_TelemetryRow], col: _NumericColumn, label: str):
     """Extract a clean float array for one signal from a phase segment."""
     vals = []
     for r in seg:
@@ -498,7 +532,7 @@ def _extract_signal(seg, col, label):
     return arr
 
 
-def _detrend(arr):
+def _detrend(arr: NDArray[np.float64]):
     """Linear detrend, ignoring NaN."""
     good = np.isfinite(arr)
     if good.sum() < 4:
@@ -508,7 +542,7 @@ def _detrend(arr):
     return arr - np.polyval(p, x)
 
 
-def _cross_spectral_pair(a_raw, b_raw, dt, f_target):
+def _cross_spectral_pair(a_raw: NDArray[np.float64], b_raw: NDArray[np.float64], dt: float, f_target: float):
     """
     Coherence and phase lag of b relative to a at f_target.
 
@@ -557,7 +591,7 @@ def _cross_spectral_pair(a_raw, b_raw, dt, f_target):
     return coh, lag_s, lag_deg
 
 
-def _correlation_rows(rows, dt, osc_rows):
+def _correlation_rows(rows: list[_TelemetryRow], dt: float, osc_rows: list[_OscillationRow]):
     """
     For each phase segment, compute pairwise coherence + phase lag at the dominant
     tension frequency, plus Pearson r in the time domain.
@@ -625,7 +659,7 @@ def _correlation_rows(rows, dt, osc_rows):
 
             b_dt_pp = float(np.nanmax(b_dt) - np.nanmin(b_dt))
 
-            def _r(v, n=4):
+            def _r(v: float, n: int=4):
                 return round(v, n) if math.isfinite(v) else None
 
             result.append(
@@ -648,7 +682,7 @@ def _correlation_rows(rows, dt, osc_rows):
     return result
 
 
-def _write_corr_csv(corr_rows, path):
+def _write_corr_csv(corr_rows: list[dict[str, str | float | None]], path: str | Path):
     if not corr_rows:
         return
     with open(path, "w", newline="") as f:
@@ -663,7 +697,7 @@ def _write_corr_csv(corr_rows, path):
 # ── Verbose table (--verbose) ──────────────────────────────────────────────────
 
 
-def _print_bucket_table(bucket_rows, dt, n_rows):
+def _print_bucket_table(bucket_rows: list[_BucketRow], dt: float, n_rows: int):
     print()
     print(
         f"pump_diagnosis -- per-bucket table  bucket={bucket_rows[1]['t'] - bucket_rows[0]['t']:.1f}s  "
@@ -680,7 +714,7 @@ def _print_bucket_table(bucket_rows, dt, n_rows):
     print(hdr)
     print("  " + "-" * (len(hdr) + 30))
 
-    def f(v, fmt):
+    def f(v: float | None, fmt: str):
         if v is None:
             return "  nan"
         return format(v, fmt)
@@ -697,7 +731,7 @@ def _print_bucket_table(bucket_rows, dt, n_rows):
         )
 
 
-def _print_osc_table(osc_rows, dt):
+def _print_osc_table(osc_rows: list[_OscillationRow], dt: float):
     if not osc_rows:
         return
     print()
@@ -726,7 +760,7 @@ def _print_osc_table(osc_rows, dt):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 
-def diagnose(csv_path, bucket_s=5.0, verbose=False, out_dir=None):
+def diagnose(csv_path: str | Path, bucket_s: float=5.0, verbose: bool=False, out_dir: str | Path | None=None):
     rows = load_telemetry(csv_path)
     if not rows:
         print(f"No telemetry rows found at {csv_path}")
@@ -902,7 +936,7 @@ def diagnose(csv_path, bucket_s=5.0, verbose=False, out_dir=None):
         print("  " + "-" * 80)
         for t0, t1, ph, rl0, rl1, a0, a1 in transitions:
 
-            def fv(v):
+            def fv(v: float):
                 return f"{v:7.2f}" if not math.isnan(v) else "    nan"
 
             print(
@@ -922,7 +956,7 @@ def diagnose(csv_path, bucket_s=5.0, verbose=False, out_dir=None):
             for e in slack_evs:
                 dur_ms = e["duration_s"] * 1000.0
 
-                def fv(v):
+                def fv(v: float):
                     return f"{v:8.1f}" if not math.isnan(v) else "     nan"
 
                 wv = (

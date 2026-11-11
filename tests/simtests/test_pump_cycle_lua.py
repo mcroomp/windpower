@@ -28,6 +28,7 @@ import pytest
 from simulation.winch import GovernedWinchController
 from simulation.winch_node import GovernedWinchNode, Anemometer
 from groundstation.winch_protocol import WinchCommand
+from simulation.simtest_log import SimtestLog
 from tests.simtests.simtest_ic import load_ic
 from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_runner import PhysicsRunner
@@ -82,7 +83,7 @@ T_REEL_IN_MAX  = 300.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.2
 
 
-def _run_pumping(log, aero_model: str | None = None) -> dict:
+def _run_pumping(log: SimtestLog, aero_model: str | None = None) -> dict:
     # Aero model: explicit arg wins; otherwise the RAWES_AERO env var
     # (quasi_static [default] / pitt_peters / oye / vpm) selects it.
     if aero_model is None:
@@ -298,7 +299,7 @@ def test_lua_pumping_constants():
     assert float(f.KD_VZ)                 == pytest.approx(0.105, rel=1e-3)
 
 
-def test_lua_pumping_unified(simtest_log):
+def test_lua_pumping_unified(simtest_log: SimtestLog):
     """3 pumping cycles with rawes.lua (steady mode) + GovernedWinchController.
     Pass if no bad events (no tension spike, slack, or floor hit) -- mirrors
     test_pumping_unified."""
@@ -310,7 +311,7 @@ def test_lua_pumping_unified(simtest_log):
 
 
 @pytest.mark.skip(reason="Dynamic-inflow comparison only; quasi_static is the default flight model")
-def test_lua_pumping_unified_peters_he(simtest_log):
+def test_lua_pumping_unified_peters_he(simtest_log: SimtestLog):
     """Same as test_lua_pumping_unified but with Pitt-Peters aero (no xi limit)."""
     r = _run_pumping(simtest_log, aero_model="pitt_peters")
     failures = []
