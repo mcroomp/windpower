@@ -32,6 +32,9 @@
   ],
   "pythonVersion": "3.14",
   "typeCheckingMode": "standard",
+  "strict": [
+    "simulation"
+  ],
   "reportMissingParameterType": "error",
   "reportMissingImports": "warning",
   "reportMissingModuleSource": "none"

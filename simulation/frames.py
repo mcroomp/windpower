@@ -11,9 +11,10 @@ Legacy constant T_ENU_NED is kept for converting ENU initial conditions / test d
 """
 
 import numpy as np
+from numpy.typing import NDArray
 
 
-def cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def cross3(a: NDArray[np.float64], b: NDArray[np.float64]) -> NDArray[np.float64]:
     """Cross product a × b for 1D length-3 arrays. Avoids np.cross overhead."""
     return np.array([
         a[1]*b[2] - a[2]*b[1],
@@ -34,7 +35,7 @@ T_ENU_NED = np.array([
 ], dtype=float)
 
 
-def build_gps_yaw_frame(body_z: np.ndarray) -> np.ndarray:
+def build_gps_yaw_frame(body_z: NDArray[np.float64]) -> NDArray[np.float64]:
     """
     Build a rotation matrix with body_x purely horizontal (NED z-component = 0).
 
@@ -59,7 +60,7 @@ def build_gps_yaw_frame(body_z: np.ndarray) -> np.ndarray:
     return np.column_stack([x_orb, y_orb, body_z])
 
 
-def build_vel_aligned_frame(body_z: np.ndarray, vel_ned: np.ndarray) -> np.ndarray:
+def build_vel_aligned_frame(body_z: NDArray[np.float64], vel_ned: NDArray[np.float64]) -> NDArray[np.float64]:
     """
     Build an orbital rotation matrix whose ZYX yaw matches the GPS velocity heading.
 
@@ -89,7 +90,7 @@ def build_vel_aligned_frame(body_z: np.ndarray, vel_ned: np.ndarray) -> np.ndarr
     return np.column_stack([x_orb, y_orb, body_z])
 
 
-def build_orb_frame(body_z: np.ndarray) -> np.ndarray:
+def build_orb_frame(body_z: NDArray[np.float64]) -> NDArray[np.float64]:
     """
     Build an orbital rotation matrix whose column 2 = body_z (rotor axle direction).
 
@@ -112,11 +113,11 @@ def build_orb_frame(body_z: np.ndarray) -> np.ndarray:
     body_z = np.asarray(body_z, dtype=float)
     _EAST  = np.array([0.0, 1.0, 0.0])   # NED: East = Y axis
     _NORTH = np.array([1.0, 0.0, 0.0])   # NED: North = X axis
-    east_proj = _EAST - np.dot(_EAST, body_z) * body_z
+    east_proj: NDArray[np.float64] = _EAST - np.dot(_EAST, body_z) * body_z
     if np.linalg.norm(east_proj) > 1e-6:
         x_orb = east_proj / np.linalg.norm(east_proj)
     else:
-        north_proj = _NORTH - np.dot(_NORTH, body_z) * body_z
+        north_proj: NDArray[np.float64] = _NORTH - np.dot(_NORTH, body_z) * body_z
         x_orb = north_proj / np.linalg.norm(north_proj)
     y_orb = cross3(body_z, x_orb)
     return np.column_stack([x_orb, y_orb, body_z])

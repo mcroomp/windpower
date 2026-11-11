@@ -8,7 +8,7 @@ flight stack control is GUIDED-only.
 import math
 
 import numpy as np
-from numpy.typing import ArrayLike
+from numpy.typing import ArrayLike, NDArray
 from simulation.frames import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
 from simulation.swashplate import SwashplateServoModel
 from dynbem     import RotorDefinition, RotorInputs
@@ -548,10 +548,10 @@ class ElevationHoldController:
         else:
             self._az_ref = update_plane_azimuth(self._az_ref, pos, self._az_tau, dt)
 
-        R        = np.asarray(R, dtype=float)
+        rotation = np.asarray(R, dtype=float)
         bz_goal  = compute_bz_altitude_hold(pos, self._el, tension_n, self._mass_kg, G,
                                             az_ref_rad=self._az_ref)
-        rate_sp  = compute_rate_cmd(R[:, 2], bz_goal, R, kp=self._kp_outer, kd=0.0)
+        rate_sp  = compute_rate_cmd(rotation[:, 2], bz_goal, rotation, kp=self._kp_outer, kd=0.0)
         return float(rate_sp[0]), float(rate_sp[1])
 
 
@@ -737,8 +737,8 @@ class HeliCyclicController:
 # Aero-model utilities
 # ---------------------------------------------------------------------------
 
-def col_min_for_altitude_rad(
-    aero: AeroModel[object],
+def col_min_for_altitude_rad[State](
+    aero: AeroModel[State],
     xi_deg:        float,
     mass_kg:       float,
     omega:         float,
@@ -808,7 +808,7 @@ def col_min_for_altitude_rad(
 def compute_bz_tether(
     pos:    ArrayLike,
     anchor: ArrayLike,
-) -> np.ndarray | None:
+) -> NDArray[np.float64] | None:
     """
     Equilibrium body_z (FRD: hub axis pointing DOWN through the disk).
 
@@ -820,7 +820,7 @@ def compute_bz_tether(
     Returns None when the hub is at or inside the anchor (degenerate).
     Frame-agnostic: pass ENU or NED; the returned vector is in the same frame.
     """
-    delta = np.asarray(anchor, dtype=float) - np.asarray(pos, dtype=float)
+    delta: NDArray[np.float64] = np.asarray(anchor, dtype=float) - np.asarray(pos, dtype=float)
     d_len = float(np.linalg.norm(delta))
     if d_len < 0.1:
         return None
@@ -828,11 +828,11 @@ def compute_bz_tether(
 
 
 def slerp_body_z(
-    bz_prev:         np.ndarray,
-    bz_target:       np.ndarray,
+    bz_prev:         NDArray[np.float64],
+    bz_target:       NDArray[np.float64],
     slew_rate_rad_s: float,
     dt:              float,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """
     Rate-limited spherical interpolation between two unit vectors.
 
@@ -848,7 +848,7 @@ def slerp_body_z(
         return bz_target.copy()
     alpha     = min(1.0, float(slew_rate_rad_s) * float(dt) / theta)
     sin_theta = np.sin(theta)
-    result    = (np.sin((1.0 - alpha) * theta) * bz_prev
+    result: NDArray[np.float64] = (np.sin((1.0 - alpha) * theta) * bz_prev
                  + np.sin(alpha * theta) * bz_target) / sin_theta
     return result / np.linalg.norm(result)
 

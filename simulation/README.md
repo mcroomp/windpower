@@ -44,6 +44,33 @@ Use the commands and selection guidance in
 [testing.md](../design/testing.md) and
 [sitl_testing.md](../design/sitl_testing.md).
 
+## Type checking
+
+The entire package, including reference scripts, uses strict Pyright checking
+through [pyrightconfig.json](../pyrightconfig.json). From the repository root:
+
+```
+uv run pyright simulation
+uv run pyright
+uv run python -m pytest tests\lint --run-lint -m lint -v
+```
+
+Check the full project after changing shared contracts so callers outside
+`simulation` remain consistent. NumPy vector contracts use float64 arrays;
+physics results and wire packets use explicit typed dictionaries.
+
+The untyped `dynbem` dependency has a local partial stub package in
+[`typings/dynbem-stubs`](../typings/dynbem-stubs). Keep its declarations aligned
+with the installed API, including native model/state pairs, when upgrading
+`dynbem`; never edit installed dependency files. Matplotlib's partially typed
+plotting methods are checked through the shared interfaces in
+[`plotting.py`](plotting.py).
+
+Pylance's `source.addTypeAnnotation` refactoring can preview inferred annotations,
+and `module.createPartialStub` can scaffold dependency stubs. Review those
+previews: inferred `Any` and empty native-extension stubs do not establish
+correct contracts.
+
 ## Logs and telemetry
 
 Run artifacts are written below `simulation\logs\`.

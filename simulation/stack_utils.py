@@ -9,14 +9,12 @@ Importing
 ---------
 Any module inside simulation/ (or a subdirectory) can use:
 
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[N]))  # reach simulation/
-    from tests.sitl.stack_utils import (
+    from simulation.stack_utils import (
         STACK_ENV_FLAG, ARDUPILOT_ENV, SIM_VEHICLE_ENV,
         SITL_GCS_PORT, SITL_JSON_PORT, GCS_ADDRESS,
-        _resolve_sim_vehicle, _launch_sitl, _prime_sitl_eeprom,
-        _terminate_process, _kill_by_port,
-        _configure_logging, copy_logs_to_dir, check_ports_free,
+        resolve_sim_vehicle, launch_sitl, prime_sitl_eeprom,
+        terminate_process, kill_by_port,
+        configure_logging, copy_logs_to_dir, check_ports_free,
     )
 """
 from __future__ import annotations
@@ -29,6 +27,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from collections.abc import Mapping
 import contextlib
 
 # ---------------------------------------------------------------------------
@@ -62,7 +61,7 @@ GCS_ADDRESS : str = f"tcp:127.0.0.1:{SITL_GCS_PORT}"
 # Discovery
 # ---------------------------------------------------------------------------
 
-def _resolve_sim_vehicle() -> Path | None:
+def resolve_sim_vehicle() -> Path | None:
     """
     Locate sim_vehicle.py from environment variables.
 
@@ -88,12 +87,12 @@ def _resolve_sim_vehicle() -> Path | None:
 # Process management
 # ---------------------------------------------------------------------------
 
-def _launch_sitl(
+def launch_sitl(
     sim_vehicle: Path,
     log_path: Path,
     add_param_file: Path | None = None,
     wipe_eeprom: bool = True,
-) -> subprocess.Popen:
+) -> subprocess.Popen[bytes]:
     """
     Launch ArduPilot SITL (heli frame, JSON physics backend).
 
@@ -104,7 +103,7 @@ def _launch_sitl(
     add_param_file : if given, pass --add-param-file <path> (boot defaults)
     wipe_eeprom    : if True (default), delete eeprom.bin before launch so each
                      run starts from copter-heli.parm defaults.  Set False when
-                     a prior _prime_sitl_eeprom() call has already written a
+                     a prior prime_sitl_eeprom() call has already written a
                      primed EEPROM that must be preserved.
 
     Returns
@@ -142,7 +141,7 @@ def _launch_sitl(
     )
 
 
-def _prime_sitl_eeprom(
+def prime_sitl_eeprom(
     sim_vehicle: Path,
     add_param_file: Path | None = None,
     wait_s: float = 4.0,
@@ -153,7 +152,7 @@ def _prime_sitl_eeprom(
     ArduPilot's scripting subsystem initialises before the defaults file is
     loaded, so SCR_ENABLE=1 only takes effect on the SECOND boot (first boot
     writes it to EEPROM; second boot reads it before scripting.init() runs).
-    Call this before the real _launch_sitl(wipe_eeprom=False) to ensure Lua
+    Call this before the real launch_sitl(wipe_eeprom=False) to ensure Lua
     scripting starts on the very first test boot.
 
     Parameters
@@ -168,12 +167,12 @@ def _prime_sitl_eeprom(
     if eeprom.exists():
         eeprom.unlink()
     devnull = Path("/dev/null")
-    proc = _launch_sitl(sim_vehicle, devnull, add_param_file=add_param_file, wipe_eeprom=False)
+    proc = launch_sitl(sim_vehicle, devnull, add_param_file=add_param_file, wipe_eeprom=False)
     time.sleep(wait_s)
-    _terminate_process(proc)
+    terminate_process(proc)
 
 
-def _terminate_process(proc: subprocess.Popen) -> None:
+def terminate_process(proc: subprocess.Popen[bytes] | subprocess.Popen[str]) -> None:
     """
     Gracefully terminate a subprocess; SIGKILL if it doesn't stop within 10 s.
 
@@ -204,12 +203,12 @@ def _terminate_process(proc: subprocess.Popen) -> None:
     proc.wait(timeout=5.0)
 
 
-def _kill_by_port(port: int) -> None:
+def kill_by_port(port: int) -> None:
     """
     Kill any process still holding the given TCP port (Linux / Docker only).
 
     sim_vehicle.py spawns arducopter-heli in a different process group so
-    _terminate_process() may leave the SITL binary running.  This finds the
+    terminate_process() may leave the SITL binary running.  This finds the
     remaining process via fuser (preferred) or /proc/net/tcp fallback and
     sends SIGKILL.
     """
@@ -316,7 +315,7 @@ def check_ports_free(
 # Logging setup
 # ---------------------------------------------------------------------------
 
-def _configure_logging(log_file: Path) -> None:
+def configure_logging(log_file: Path) -> None:
     """
     Configure root logger to write DEBUG to log_file and INFO to stdout.
 
@@ -341,7 +340,7 @@ def _configure_logging(log_file: Path) -> None:
 # Log file management
 # ---------------------------------------------------------------------------
 
-def copy_logs_to_dir(log_dir: Path, copies: dict) -> None:
+def copy_logs_to_dir(log_dir: Path, copies: Mapping[str, str | Path]) -> None:
     """
     Copy log files into log_dir.
 

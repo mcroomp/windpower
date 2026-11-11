@@ -34,8 +34,8 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import ArrayLike
-from typing import Any
 from collections.abc import Callable
+from simulation.dynamics import RigidBodyDynamics
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +437,7 @@ class KinematicStartup:
         return R0 @ omega_body_frame
 
     # ------------------------------------------------------------------
-    def apply(self, hub_state: dict, dynamics: Any, t_sim: float) -> bool:
+    def apply(self, hub_state: dict[str, np.ndarray], dynamics: RigidBodyDynamics, t_sim: float) -> bool:
         """
         If kinematic phase is active, override hub_state in-place and sync the
         dynamics integrator's internal arrays so the first free-flight step
@@ -468,8 +468,8 @@ class KinematicStartup:
         Parameters
         ----------
         hub_state : dict with keys pos, vel, R, omega (mutated in-place)
-        dynamics  : RigidBodyDynamics — internal arrays _pos, _vel, _R, _omega
-                    are updated to stay in sync with the override.
+        dynamics  : RigidBodyDynamics — set_state() synchronizes the integrator
+                    with the override.
         t_sim     : current simulation time [s]
         """
         kin = self.state_at(t_sim)
@@ -479,13 +479,10 @@ class KinematicStartup:
         pos, vel = kin
         hub_state["pos"] = pos
         hub_state["vel"] = vel
-        dynamics._pos[:] = pos
-        dynamics._vel[:] = vel
 
         # Orientation: fixed R0 (default) or time-varying R_fn.
         R = self._R_fn(t_sim) if self._R_fn is not None else self.R0
         hub_state["R"] = R.copy()
-        dynamics._R[:] = R
 
         # Angular velocity.
         #
@@ -503,6 +500,6 @@ class KinematicStartup:
         # starts with the true orbital angular velocity (~0.01–0.19 rad/s).
         omega_world = self._omega_body_at(t_sim)
         hub_state["omega"] = omega_world   # full omega → sensors, consistent with R_fn
-        dynamics._omega[:] = 0.0          # free-flight IC: hub has no physical angular velocity
+        dynamics.set_state(pos, vel, R, np.zeros(3))
 
         return True

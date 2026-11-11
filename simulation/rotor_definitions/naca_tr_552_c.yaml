@@ -44,6 +44,7 @@ airfoil:
   # induced velocity pushes effective inflow angle to ≥ 14° regardless of collective.
   # The lumped single-point BEM requires a much lower effective slope to keep AoA in
   # the linear range.  0.87/rad is from De Schutter 2018 Table I (SG6040 approximation).
+  CL_alpha_per_rad:   0.87
                              # (represents whole-rotor effective lift response in the
                              #  lumped single-point autorotation BEM approximation)
   # Drag polar:  CD = CD0 + CL²/(π·AR·e)

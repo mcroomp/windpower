@@ -14,6 +14,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
+from simulation.plotting import figure_view
 
 HERE = Path(__file__).parent
 
@@ -113,7 +114,8 @@ def data_to_px(mu: float, CL: float):
 # Figure: left = traced + overlay, right = CSV only
 # ---------------------------------------------------------------------------
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+native_fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+fig = figure_view(native_fig)
 fig.suptitle(
     "Figure 13 — Lift coefficient  $C_L$  vs  μ  (Rotor C, NACA 4412)\n"
     "Left: user-traced original with CSV data overlaid    Right: CSV data alone",
@@ -207,5 +209,5 @@ ax2.set_title("CSV data — Rotor C (NACA 4412)", fontsize=9)
 plt.tight_layout()
 out = HERE / "figure_13_comparison.png"
 fig.savefig(out, dpi=150, bbox_inches="tight")
-plt.close(fig)
+plt.close(native_fig)
 print(f"Saved: {out}")

@@ -29,6 +29,8 @@ Euler angles extracted in ZYX order (yaw-pitch-roll) to match ArduPilot.
 import logging
 import numpy as np
 import math
+from typing import TypedDict
+from numpy.typing import NDArray
 
 log = logging.getLogger(__name__)
 
@@ -79,22 +81,14 @@ def _rotation_matrix_to_euler_zyx(R: np.ndarray) -> np.ndarray:
     return np.array([roll, pitch, yaw])
 
 
-def _euler_zyx_to_rotation(roll: float, pitch: float, yaw: float) -> np.ndarray:
-    """
-    Build a ZYX rotation matrix from [roll, pitch, yaw] angles.
-
-    R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
-    Maps body frame to world: v_world = R @ v_body.
-    Inverse of _rotation_matrix_to_euler_zyx.
-    """
-    cr, sr = math.cos(roll),  math.sin(roll)
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    cy, sy = math.cos(yaw),   math.sin(yaw)
-    return np.array([
-        [ cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
-        [ sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
-        [-sp,     cp*sr,             cp*cr            ],
-    ])
+class SensorReadings(TypedDict):
+    pos_ned: NDArray[np.float64]
+    vel_ned: NDArray[np.float64]
+    rpy: NDArray[np.float64]
+    accel_body: NDArray[np.float64]
+    gyro_body: NDArray[np.float64]
+    orb_yaw_rad: float
+    v_horiz_ms: float
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +134,7 @@ class PhysicalSensor:
         omega_body:      np.ndarray,
         accel_world_ned: np.ndarray,
         dt:              float = 0.0,   # retained for API compatibility; not used
-    ) -> dict:
+    ) -> SensorReadings:
         """
         Compute physical sensor outputs.
 

@@ -61,6 +61,25 @@ Available controllers
 
 import math
 import numpy as np
+from numpy.typing import NDArray
+from typing import NotRequired, TypedDict
+
+
+class TrajectoryState(TypedDict):
+    pos_ned: NDArray[np.float64]
+    vel_ned: NDArray[np.float64]
+    omega_spin: float
+    body_z: NDArray[np.float64]
+    tension_n: NotRequired[float]
+    tether_length_m: NotRequired[float]
+
+
+class TrajectoryCommand(TypedDict):
+    phase: str
+    attitude_q: NotRequired[NDArray[np.float64]]
+    thrust: NotRequired[float]
+    winch_speed_ms: NotRequired[float]
+    tension_feedforward_n: NotRequired[float]
 
 # ---------------------------------------------------------------------------
 # Quaternion utilities (module-level, importable)
@@ -122,7 +141,7 @@ def quat_is_identity(q: np.ndarray, atol: float = 1e-6) -> bool:
 class TrajectoryPlanner:
     """Abstract base class — subclass and implement step()."""
 
-    def step(self, state: dict, dt: float, **kwargs: object) -> dict:
+    def step(self, state: TrajectoryState, dt: float, **kwargs: object) -> TrajectoryCommand:
         """
         Advance one planner step.
 
@@ -160,7 +179,7 @@ class HoldPlanner(TrajectoryPlanner):
     Use for: closed-loop stability tests where the pumping cycle is inactive.
     """
 
-    def step(self, state: dict, dt: float, **kwargs: object) -> dict:
+    def step(self, state: TrajectoryState, dt: float, **kwargs: object) -> TrajectoryCommand:
         return {
             "attitude_q":     Q_IDENTITY.copy(),
             "thrust":         0.0,

@@ -50,4 +50,4 @@ class WinchTelemetry:
     rest_length:  float
     speed_ms:     float
     net_energy_j: float
-    wind_ned:     tuple
+    wind_ned:     tuple[float, float, float]

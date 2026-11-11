@@ -89,6 +89,33 @@ def test_force_exactly_cancels_gravity_holds_altitude():
     assert s["vel"][2] == pytest.approx(0.0,   abs=1e-6)
 
 
+def test_prescribed_state_is_used_by_next_physics_step():
+    dyn = _fresh()
+    pos = np.array([4.0, -2.0, -30.0])
+    vel = np.array([1.0, 3.0, -0.5])
+    yaw = 0.4
+    rotation = np.array([
+        [math.cos(yaw), -math.sin(yaw), 0.0],
+        [math.sin(yaw), math.cos(yaw), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    omega = np.array([0.0, 0.0, 0.2])
+    dyn.set_state(pos, vel, rotation, omega)
+
+    dt = 0.01
+    state = dyn.step(np.array([0.0, 0.0, -MASS * G]), np.zeros(3), dt)
+    expected_yaw = yaw + omega[2] * dt
+    expected_rotation = np.array([
+        [math.cos(expected_yaw), -math.sin(expected_yaw), 0.0],
+        [math.sin(expected_yaw), math.cos(expected_yaw), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    np.testing.assert_allclose(state["pos"], pos + vel * dt, atol=1e-12)
+    np.testing.assert_allclose(state["vel"], vel, atol=1e-12)
+    np.testing.assert_allclose(state["omega"], omega, atol=1e-12)
+    np.testing.assert_allclose(state["R"], expected_rotation, atol=1e-12)
+
+
 # ── 2. Angular momentum conservation (no spin, no torque) ──────────────────
 
 

@@ -37,17 +37,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from simulation.planner import TrajectoryPlanner
+    from simulation.planner import TrajectoryCommand, TrajectoryPlanner, TrajectoryState
 
 import numpy as np
 
 # Local modules (same directory)
 from simulation.physics_core import PhysicsCore
-from simulation.sitl_interface import SITLInterface, SIM_CLOCK_HZ
+from simulation.sitl_interface import SITLInterface, SITLState, SIM_CLOCK_HZ
 from simulation.swashplate import ardupilot_h3_120_inverse, collective_out_to_rad
 from simulation.param_defaults import load_collective_phys_range as _load_col_range
 from simulation.sensor import make_sensor, SpinSensor
-from simulation.kinematic import KinematicStartup, compute_launch_position, make_smooth_trapezoid_traj  # noqa: F401
+from simulation.kinematic import KinematicStartup, compute_launch_position as compute_launch_position, make_smooth_trapezoid_traj
 from simulation.winch import GovernedWinchController
 from simulation.winch_node import GovernedWinchNode, Anemometer
 from groundstation.winch_protocol import WinchCommand
@@ -272,7 +272,7 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
         sigma    = float(cfg["spin_sensor_sigma"]),
     )
     ev.write("config", t_sim=0.0,
-             spin_sensor_sigma=round(spin_sensor._sigma, 3),
+             spin_sensor_sigma=round(float(cfg["spin_sensor_sigma"]), 3),
              tether_model=cfg["tether_model"],
              tether_EA_kN=round(core.tether.properties.axial_stiffness_n / 1000),
              tether_rest_length_m=round(core.rest_length, 1),
@@ -290,7 +290,7 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
     _t_step0        = None                # sim time of first step_fn call
 
     s1 = s2 = s3       = 0.0           # servo values
-    _traj_cmd          = {"phase": "", "tension_feedforward_n": 0.0}  # last trajectory command
+    _traj_cmd: TrajectoryCommand = {"phase": "", "tension_feedforward_n": 0.0}  # last trajectory command
     _logged_transition = False         # one-shot: kinematic → free-flight transition log
     _ff_t0             = None          # sim-time of first free-flight step (for cyclic blend)
     _blend_logged      = False         # one-shot: report cyclic blend activation
@@ -389,7 +389,7 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
     # Called by run_lockstep once per servo packet. Closes over all subsystems
     # and mutable state declared above. Returns the state dict for send_state().
 
-    def step_fn(servos: np.ndarray, t_sim: float):
+    def step_fn(servos: np.ndarray, t_sim: float) -> SITLState:
         nonlocal step, last_log_time, _t_step0
         nonlocal s1, s2, s3, _traj_cmd, _logged_transition
         nonlocal _ff_t0, _blend_logged
@@ -457,7 +457,7 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
                         "wind_ned":     list(_wt.wind_ned),
                     }).encode(), _winch_peer)
 
-            _state_pkt = {
+            _state_pkt: TrajectoryState = {
                 "pos_ned":    core.hub_state["pos"],
                 "vel_ned":    core.hub_state["vel"],
                 "omega_spin": spin_sensor.measure(core.omega_spin),
@@ -472,7 +472,7 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
             # HoldPlanner's "hold" label.  (HoldPlanner is the only trajectory;
             # the winch is driven purely by the cable WinchCommand.)
             if _winch_sock is not None:
-                _traj_cmd = dict(_traj_cmd)
+                _traj_cmd = _traj_cmd.copy()
                 _traj_cmd["phase"] = _winch_phase
 
             # Advance the fast governing loop one physics tick using the local
@@ -703,14 +703,14 @@ def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None 
         # run alignTilt() before fuseVelData() is called.
         _gps_ready = (t_sim - _t_step0) >= 2.0
         step += 1
-        return dict(
-            pos_ned    = sensor_data["pos_ned"],
-            vel_ned    = sensor_data["vel_ned"] if _gps_ready else np.zeros(3),
-            rpy_rad    = sensor_data["rpy"],
-            accel_body = sensor_data["accel_body"],
-            gyro_body  = sensor_data["gyro_body"],
-            rpm_rad_s  = core.omega_spin,
-        )
+        return {
+            "pos_ned": sensor_data["pos_ned"],
+            "vel_ned": sensor_data["vel_ned"] if _gps_ready else np.zeros(3),
+            "rpy_rad": sensor_data["rpy"],
+            "accel_body": sensor_data["accel_body"],
+            "gyro_body": sensor_data["gyro_body"],
+            "rpm_rad_s": core.omega_spin,
+        }
 
     # -- Run lockstep ---------------------------------------------------------
     try:

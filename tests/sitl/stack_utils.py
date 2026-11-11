@@ -5,6 +5,7 @@ Centralises the env-var names, logging setup, process launch/teardown, log
 copying, and port cleanup so every stack test file can import from one place.
 """
 import logging
+from typing import Any
 import os
 import re
 import shutil
@@ -581,7 +582,7 @@ def _launch_mediator(
     telemetry_log_path: str | None = None,
     events_log_path: str | None = None,
     tether_rest_length: float | None = None,
-    initial_state: dict | None = None,
+    initial_state: Mapping[str, Any] | None = None,
     startup_damp_seconds: float | None = None,
     run_id: int | None = None,
     base_k_ang: float | None = None,

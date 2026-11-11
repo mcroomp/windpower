@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 import pytest
@@ -51,7 +53,7 @@ _MIN_ALT_M = 3.0
 _MIN_TENSION_N = 0.01
 
 
-def _get_ic_thrust(ic: dict) -> float:
+def _get_ic_thrust(ic: Mapping[str, Any]) -> float:
     if "eq_thrust" in ic:
         return float(ic["eq_thrust"])
     raise KeyError(

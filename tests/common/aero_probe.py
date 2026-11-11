@@ -14,6 +14,7 @@ applied — windpower and the aero share one convention.
 """
 from __future__ import annotations
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -21,17 +22,11 @@ import simulation
 from dynbem import (
     RotorInputs,
     RotorDefinition,
-    _OyeBEMModelLinear,
-    _OyeBEMModelTabulated,
-    _PittPetersModelLinear,
-    _PittPetersModelTabulated,
-    _QuasiStaticBEMLinear,
-    _QuasiStaticBEMTabulated,
-    _VpmRotorLinear,
-    _VpmRotorTabulated,
     create_aero,
     rotor_definition as _rd,
 )
+if TYPE_CHECKING:
+    from simulation.physics_core import AeroLoads, AeroModel
 
 
 _ROTOR_DEFS = Path(simulation.__file__).resolve().parent / "rotor_definitions"
@@ -49,17 +44,8 @@ def make_probe(rotor: RotorDefinition | None = None):
     return create_aero(rotor, "quasi_static")
 
 
-def probe_steady(
-    aero: (
-        _QuasiStaticBEMLinear
-        | _QuasiStaticBEMTabulated
-        | _PittPetersModelLinear
-        | _PittPetersModelTabulated
-        | _OyeBEMModelLinear
-        | _OyeBEMModelTabulated
-        | _VpmRotorLinear
-        | _VpmRotorTabulated
-    ),
+def probe_steady[State](
+    aero: AeroModel[State],
     *,
     collective_rad: float,
     tilt_lon: float = 0.0,
@@ -69,7 +55,7 @@ def probe_steady(
     omega_rotor: float,
     wind_world: np.ndarray,
     rho_kg_m3: float = 1.225,
-):
+) -> AeroLoads:
     """Return a quasi-steady AeroResult.
 
     The aero ``step`` API settles its inflow/wake state on the first call, so a

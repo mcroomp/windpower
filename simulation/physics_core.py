@@ -34,13 +34,15 @@ from __future__ import annotations
 import numpy as np
 import math
 from dataclasses import dataclass
+from collections.abc import Callable
+from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Protocol
-from numpy.typing import ArrayLike
+from typing import NotRequired, Protocol, TypedDict
+from numpy.typing import ArrayLike, NDArray
 
 
 from simulation.dynamics import RigidBodyDynamics
-from dynbem       import AeroResult, RotorDefinition, create_aero, RotorInputs, step_omega
+from dynbem       import RotorDefinition, create_aero, RotorInputs, step_omega
 from simulation.ic import IC
 from simulation.kinematic import KinematicStartup
 from simulation.tether import (
@@ -65,12 +67,70 @@ from simulation.torque_model import (
 BEARING_FRICTION_NM = 0.0
 
 
+class AeroLoads(Protocol):
+    @property
+    def F_world(self) -> NDArray[np.float64]: ...
+
+    @property
+    def m_hub_world(self) -> NDArray[np.float64]: ...
+
+    @property
+    def M_spin(self) -> NDArray[np.float64]: ...
+
+    @property
+    def Q_spin(self) -> float: ...
+
+
+@dataclass
+class PrescribedAeroLoads:
+    F_world: NDArray[np.float64]
+    m_hub_world: NDArray[np.float64]
+    M_spin: NDArray[np.float64]
+    Q_spin: float
+
+
 class AeroModel[State](Protocol):
     def initial_rotor_state(self) -> State: ...
 
     def step(
         self, inputs: RotorInputs, state: State, dt: float,
-    ) -> tuple[AeroResult, State]: ...
+    ) -> tuple[AeroLoads, State]: ...
+
+
+def _bind_aero[State](
+    aero: AeroModel[State],
+) -> tuple[AeroModel[State], Callable[[RotorInputs, float], AeroLoads]]:
+    state = aero.initial_rotor_state()
+
+    def advance(inputs: RotorInputs, dt: float) -> AeroLoads:
+        nonlocal state
+        result, state = aero.step(inputs, state, dt)
+        return result
+
+    return aero, advance
+
+
+class _IntegratedResult(TypedDict):
+    hub_state: dict[str, NDArray[np.float64]]
+    tension_now: float
+    tether_result: TetherResult
+    omega_spin: float
+    tether_force: NDArray[np.float64]
+    tether_moment: NDArray[np.float64]
+    aero_result: AeroLoads
+    tilt_lon: float
+    tilt_lat: float
+    damp_alpha: float
+    is_kinematic: bool
+    ground_contact: bool
+    accel_specific_world: NDArray[np.float64]
+    omega_body: NotRequired[Sequence[float] | NDArray[np.float64] | None]
+    accel_world: NotRequired[Sequence[float] | NDArray[np.float64] | None]
+
+
+class PhysicsStepResult(_IntegratedResult):
+    tension_min: float
+    tension_max: float
 
 
 @dataclass
@@ -135,7 +195,7 @@ class PhysicsCore:
     T_AERO_OFFSET = 45.0    # s — aero ramp already complete at simulation start
     KINEMATIC_SPINUP_S = 5.0  # s — final kinematic window to blend omega to IC target
 
-    def __init__(
+    def __init__[State](
         self,
         rotor: RotorDefinition,
         ic: IC | SimpleNamespace,
@@ -149,7 +209,7 @@ class PhysicsCore:
         aero_model:         str   = "quasi_static",
         kinematic_aero_mode: str  = "locked",
         kinematic_nul_rate_gain_rads_per_rad: float = 0.0,
-        aero_override: AeroModel[object] | None = None,
+        aero_override: AeroModel[State] | None = None,
         tether_override: Tether | None = None,
         tether_model: str = DEFAULT_TETHER_MODEL,
         anchor_ned: np.ndarray | None = None,
@@ -190,11 +250,23 @@ class PhysicsCore:
             omega0 = [0.0, 0.0, 0.0],
             z_floor= z_floor,
         )
-        self._aero = (aero_override if aero_override is not None
-                      else create_aero(rotor, model=aero_model))
-        # Inflow state owned by the aero model.  omega is tracked separately
-        # (moved out of RotorState in dynbem 0.2.0 — now an input).
-        self._rotor_state    = self._aero.initial_rotor_state()
+        if aero_override is not None:
+            self._aero, self._advance_aero = _bind_aero(aero_override)
+        else:
+            match aero_model:
+                case "quasi_static" | "bem":
+                    self._aero, self._advance_aero = _bind_aero(create_aero(rotor, model="quasi_static"))
+                case "pitt_peters":
+                    self._aero, self._advance_aero = _bind_aero(create_aero(rotor, model="pitt_peters"))
+                case "oye" | "oye_bem":
+                    self._aero, self._advance_aero = _bind_aero(create_aero(rotor, model="oye"))
+                case "vpm" | "vpm_rotor" | "free_wake":
+                    self._aero, self._advance_aero = _bind_aero(create_aero(rotor, model="vpm"))
+                case _:
+                    raise ValueError(
+                        f"Unknown aero model {aero_model!r}. "
+                        "Choose 'quasi_static' (alias 'bem'), 'pitt_peters', 'oye', or 'vpm'."
+                    )
         self._omega_rad_s    = float(ic.omega_spin)
         self._omega_hold_start_rad_s = float(self._omega_rad_s)
         self._omega_release_target_rad_s = float(ic.omega_spin)
@@ -223,7 +295,7 @@ class PhysicsCore:
     # ── Read-only state properties ────────────────────────────────────────────
 
     @property
-    def hub_state(self) -> dict:
+    def hub_state(self) -> dict[str, NDArray[np.float64]]:
         return self._dyn.state
 
     @property
@@ -333,7 +405,7 @@ class PhysicsCore:
              tilt_lon: float, tilt_lat: float,
              rest_length: float | None = None,
              yaw_throttle: float | None = None,
-             payout_rate_ms: float | None = None) -> dict:
+             payout_rate_ms: float | None = None) -> PhysicsStepResult:
         """
         400 Hz step with caller-supplied tilts.
 
@@ -398,9 +470,7 @@ class PhysicsCore:
             if self.terminated:
                 break
         assert result is not None
-        result["tension_min"] = tension_min
-        result["tension_max"] = tension_max
-        return result
+        return {**result, "tension_min": tension_min, "tension_max": tension_max}
 
     def warm_inflow(self, collective_rad: float, n_steps: int = 500,
                     dt: float = 1e-3) -> None:
@@ -431,7 +501,7 @@ class PhysicsCore:
             rho_kg_m3      = 1.225,
         )
         for _ in range(n_steps):
-            _, self._rotor_state = self._aero.step(inputs, self._rotor_state, dt)
+            self._advance_aero(inputs, dt)
 
     def warm_inflow_from_thrust(self, thrust_cmd: float, n_steps: int = 500,
                                 dt: float = 1e-3) -> None:
@@ -446,8 +516,8 @@ class PhysicsCore:
                    rest_length: float | None,
                    yaw_throttle: float | None = None,
                    payout_rate_ms: float | None = None,
-                   *, aero_result: AeroResult | None = None,
-                   aero_dt: float | None = None) -> dict:
+                   *, aero_result: AeroLoads | None = None,
+                   aero_dt: float | None = None) -> _IntegratedResult:
 
         if not np.isfinite(dt) or dt <= 0.0:
             raise ValueError("physics dt must be finite and positive")
@@ -504,13 +574,10 @@ class PhysicsCore:
                     "R": R_next,
                     "omega": omega_world,
                 }
-                self._dyn._pos[:] = pos_kin
-                self._dyn._vel[:] = vel_kin
-                self._dyn._R[:] = R_next
-                self._dyn._omega[:] = omega_world
+                self._dyn.set_state(pos_kin, vel_kin, R_next, omega_world)
 
                 F_net = np.zeros(3)
-                result = SimpleNamespace(
+                result = PrescribedAeroLoads(
                     F_world=np.zeros(3),
                     m_hub_world=np.zeros(3),
                     M_spin=np.zeros(3),
@@ -525,7 +592,7 @@ class PhysicsCore:
                 # creating an artificial yaw-rate transient.
                 self._hub_state.omega_motor = self._omega_rad_s * self._hub_params.gear_ratio
                 self._hub_state.psi_dot = 0.0
-                result = SimpleNamespace(
+                result = PrescribedAeroLoads(
                     F_world=np.zeros(3),
                     m_hub_world=np.zeros(3),
                     M_spin=np.zeros(3),
@@ -553,8 +620,8 @@ class PhysicsCore:
                 )
                 # Cable/drum stiffness needs fast substeps, not faster inflow
                 # updates. Hold aero loads over the caller's physics frame.
-                result, self._rotor_state = self._aero.step(
-                    rotor_inputs, self._rotor_state, dt if aero_dt is None else aero_dt,
+                result = self._advance_aero(
+                    rotor_inputs, dt if aero_dt is None else aero_dt,
                 )
             else:
                 result = aero_result

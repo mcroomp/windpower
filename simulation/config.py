@@ -26,6 +26,7 @@ Example (mediator):
 
 import json
 import copy
+from typing import Any, cast
 from numpy.typing import ArrayLike
 
 # ---------------------------------------------------------------------------
@@ -35,13 +36,14 @@ from numpy.typing import ArrayLike
 # ---------------------------------------------------------------------------
 import simulation.ic as _ic
 from simulation.tether import DEFAULT_TETHER_MODEL
+from simulation.planner import HoldPlanner
 
-_ss: dict = _ic.load_ic_dict()
+_ss: _ic.ICData = _ic.load_ic_dict()
 
 # ---------------------------------------------------------------------------
 # Schema and defaults
 # ---------------------------------------------------------------------------
-DEFAULTS: dict = {
+DEFAULTS: dict[str, Any] = {
     # ── Rotor definition ─────────────────────────────────────────────────────
     "rotor_definition": "beaupoil_2026",  # built-in name or path to .yaml file
 
@@ -202,12 +204,12 @@ DEFAULTS: dict = {
 # Public API
 # ---------------------------------------------------------------------------
 
-def defaults() -> dict:
+def defaults() -> dict[str, Any]:
     """Return a deep copy of DEFAULTS (safe to mutate)."""
     return copy.deepcopy(DEFAULTS)
 
 
-def load(path: str | None) -> dict:
+def load(path: str | None) -> dict[str, Any]:
     """
     Load a mediator config from a JSON file, filling missing keys from DEFAULTS.
 
@@ -220,7 +222,7 @@ def load(path: str | None) -> dict:
     cfg = defaults()
     if path is not None:
         with open(path, encoding="utf-8") as fh:
-            overrides = json.load(fh)
+            overrides: dict[str, Any] = json.load(fh)
         # Validate top-level keys — warn on unknown keys to catch typos
         unknown = set(overrides) - set(DEFAULTS)
         if unknown:
@@ -234,27 +236,28 @@ def load(path: str | None) -> dict:
             if k not in DEFAULTS:
                 continue
             if k == "trajectory" and isinstance(v, dict):
+                trajectory_overrides = cast(dict[str, Any], v)
                 # Deep merge: keep default sub-dicts, override only what's given
                 cfg["trajectory"] = copy.deepcopy(DEFAULTS["trajectory"])
-                cfg["trajectory"].update(v)
+                cfg["trajectory"].update(trajectory_overrides)
                 for sub_key in ("hold", "deschutter", "landing"):
-                    if sub_key in v and isinstance(v[sub_key], dict):
+                    if sub_key in trajectory_overrides and isinstance(trajectory_overrides[sub_key], dict):
                         merged = copy.deepcopy(DEFAULTS["trajectory"].get(sub_key, {}))
-                        merged.update(v[sub_key])
+                        merged.update(trajectory_overrides[sub_key])
                         cfg["trajectory"][sub_key] = merged
             else:
                 cfg[k] = v
     return cfg
 
 
-def save(cfg: dict, path: str) -> None:
+def save(cfg: dict[str, Any], path: str) -> None:
     """Write cfg as a pretty-printed JSON file."""
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=2)
         fh.write("\n")
 
 
-def make_trajectory(cfg: dict, wind_ned: ArrayLike):
+def make_trajectory(cfg: dict[str, Any], wind_ned: ArrayLike) -> HoldPlanner:
     """
     Build a TrajectoryController from the ``cfg["trajectory"]`` section.
 
@@ -270,6 +273,4 @@ def make_trajectory(cfg: dict, wind_ned: ArrayLike):
     Note: body_z_eq0 is no longer a parameter — guidance runs inside
     Mode_RAWES (mediator), not in the trajectory planner.
     """
-    from simulation.planner import HoldPlanner
-
     return HoldPlanner()

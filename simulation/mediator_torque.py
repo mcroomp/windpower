@@ -55,6 +55,7 @@ import argparse
 import logging
 import math
 from collections import deque
+from collections.abc import Callable
 
 import numpy as np
 
@@ -64,7 +65,7 @@ import simulation.torque_model as _m
 from simulation.mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from simulation.mediator_events import MediatorEventLog
 from simulation.servo_pwm import MOTOR_PWM_MIN, MOTOR_PWM_MAX
-from simulation.sitl_interface import SITLInterface
+from simulation.sitl_interface import SITLInterface, SITLState
 
 # ---------------------------------------------------------------------------
 # Timing / port constants
@@ -244,7 +245,13 @@ def _yaw_slow_ramp(dt: float) -> float:
     return -math.radians(10.0 * min(1.0, dt / 30.0))
 
 
-PROFILES: dict[str, tuple] = {
+type _Profile = (
+    tuple[Callable[[float, float], float], Callable[[float], tuple[float, float]]]
+    | tuple[Callable[[float, float], float], Callable[[float], tuple[float, float]], Callable[[float], float]]
+)
+
+
+PROFILES: dict[str, _Profile] = {
     "startup":    (_omega_constant,  _tilt_flat),   # shared 10 s spinup ramp in DYNAMIC loop
     "constant":   (_omega_constant, _tilt_flat),
     "slow_vary":  (_omega_slow_vary, _tilt_flat),
@@ -348,7 +355,7 @@ def run(
     iface.bind()
     log.info("Bound to UDP port %d", _RECV_PORT)
 
-    def step_fn(_servos: np.ndarray, t: float):
+    def step_fn(_servos: np.ndarray, t: float) -> SITLState:
         nonlocal hub_state, prev_roll, prev_pitch, _dynamics_started, delayed_throttle
         dt = iface.dt()
 
@@ -435,14 +442,14 @@ def run(
             gyro_body, accel_body = _body_vectors(
                 roll_send, pitch_send, psi_dot_send, roll_dot, pitch_dot)
 
-        return dict(
-            pos_ned         = np.array([0.0, 0.0, 0.0]),
-            vel_ned         = np.array([0.0, 0.0, 0.0]),
-            rpy_rad         = np.array([roll_send, pitch_send, psi_send]),
-            accel_body      = np.asarray(accel_body),
-            gyro_body       = np.asarray(gyro_body),
-            battery_voltage = _BATTERY_V,
-        )
+        return {
+            "pos_ned": np.array([0.0, 0.0, 0.0]),
+            "vel_ned": np.array([0.0, 0.0, 0.0]),
+            "rpy_rad": np.array([roll_send, pitch_send, psi_send]),
+            "accel_body": np.asarray(accel_body),
+            "gyro_body": np.asarray(gyro_body),
+            "battery_voltage": _BATTERY_V,
+        }
 
     n = 0
     try:

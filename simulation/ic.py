@@ -24,11 +24,29 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 import numpy as np
 
 # Canonical location of the generated IC file (lives next to this module).
 IC_JSON_PATH = Path(__file__).resolve().parent / "steady_state_starting.json"
+
+
+class ICData(TypedDict):
+    pos: list[float]
+    vel: list[float]
+    R0: list[list[float]]
+    R0_kinematic: NotRequired[list[list[float]]]
+    R0_orbit: NotRequired[list[list[float]]]
+    orbit_bz: NotRequired[list[float]]
+    omega_spin: float
+    rest_length: float
+    eq_thrust: float
+    coll_eq_rad: NotRequired[float]
+    tension_eq_n: NotRequired[float]
+    trim_tilt_lon: float
+    trim_tilt_lat: float
+    home_z_ned: float
 
 
 @dataclass
@@ -64,7 +82,7 @@ def _require_json() -> Path:
     return IC_JSON_PATH
 
 
-def load_ic_dict() -> dict:
+def load_ic_dict() -> ICData:
     """
     Return the raw ``steady_state_starting.json`` contents as a plain dict.
 
