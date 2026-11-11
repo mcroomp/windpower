@@ -34,6 +34,11 @@ sitl = [
     "empy==3.3.4",
     "pexpect",
 ]
+videoanalysis = [
+    "matplotlib",
+    "numpy",
+    "opencv-python",
+]
 
 [dependency-groups]
 dev = [
@@ -77,6 +82,8 @@ include = [
     "envelope.*",
     "analysis",
     "analysis.*",
+    "videoanalysis",
+    "videoanalysis.*",
     "viz3d",
     "viz3d.*",
     "scripts",

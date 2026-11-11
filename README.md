@@ -99,6 +99,7 @@ The detailed boundary and proposal live in [linkhub.md](design/linkhub.md).
 | Production phase planning and winch protocol | [groundstation/](groundstation/) |
 | Hardware calibration | [design/calibration.md](design/calibration.md) |
 | Offline reports, envelope analysis, telemetry playback | [analysis/](analysis/), [envelope/](envelope/), [viz3d/](viz3d/) |
+| Offline rotor-camera video tracking | [videoanalysis/README.md](videoanalysis/README.md) |
 | Deployed Lua and standalone tools | [scripts/](scripts/) |
 
 ---
@@ -148,6 +149,7 @@ load unrelated documents.
 | [mavlink-protocol README](linkhub/mavlink-protocol/README.md) | Stable MAVLink protocol crate, pinned definitions and generation workflow |
 | [linkhub-ui/README.md](linkhub-ui/README.md) | Browser UI setup and behavior |
 | [linkhub_client/README.md](linkhub_client/README.md) | Typed Python HTTP client |
+| [videoanalysis/README.md](videoanalysis/README.md) | Offline rotor-camera tracking and square-normal analysis |
 | [envelope/CLAUDE.md](envelope/CLAUDE.md) | Agent notes for the flight-envelope package |
 | [presentations/presentation_sitl_aero.md](presentations/presentation_sitl_aero.md) | Slide deck on the SITL and aero architecture |
 

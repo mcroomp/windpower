@@ -25,7 +25,7 @@ Wind drives autorotation; cyclic steers; tether tension during reel-out drives a
 ## Repository Layout
 
 The repo root is a single Python distribution (`pyproject.toml`, name `rawes`) containing
-9 first-party top-level packages, installed in editable mode by `uv sync`.
+10 first-party top-level packages, installed in editable mode by `uv sync`.
 Import them as plain dotted
 packages (`from simulation.controller import ...`, `from analysis.flight_log import ...`) —
 there are no `sys.path.insert()` hacks anywhere in the codebase.
@@ -38,6 +38,7 @@ there are no `sys.path.insert()` hacks anywhere in the codebase.
 | `calibrate/` | Bench calibration REPL/tooling for hardware bring-up |
 | `envelope/` | Flight-envelope map computation (`compute_map.py`) and related analysis |
 | `analysis/` | Post-run diagnosis/report scripts (all read `simulation/logs/{test_name}/...`) |
+| `videoanalysis/` | Offline OpenCV rotor-camera tracking, shape/brightness measurements, and approximate square-normal analysis |
 | `viz3d/` | 3D telemetry playback and torque visualizers |
 | `scripts/` | Deployed Lua flight scripts (`rawes.lua`, `rawes_test_surface.lua`) and standalone runtime scripts (`sitl_bench.py`) |
 | `tests/` | All test suites: `tests/unit`, `tests/simtests`, `tests/sitl` (Docker/SITL), `tests/oneoff`, `tests/common` |
