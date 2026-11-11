@@ -61,8 +61,9 @@ run `uv sync --dev --extra simulation` explicitly after dependency changes.
 
 ## Python linting
 
-Python 3.14 is the minimum runtime. Local setup, CI, and simulation containers
-use Python 3.14.10; `.python-version` selects that interpreter for `uv run`.
+Python 3.14 is the minimum runtime. Local setup upgrades within the minor selected
+by `.python-version`; see [runtime setup](../README.md#running-tests).
+CI and simulation containers pin their own Python patch releases.
 Development dependencies include Ruff, with configuration in `pyproject.toml`.
 The **Modernization + simplification** profile selects Ruff's default correctness
 rules (`E4`, `E7`, `E9`, `F`), pyupgrade (`UP`), and flake8-simplify (`SIM`),
@@ -103,8 +104,9 @@ Gates pass the active interpreter explicitly
 so Docker checks never resolve packages from a mounted Windows virtual environment.
 Simulation dependencies
 include NeuralFoil for the SG6042 polar analysis.
-Pyright uses the same system Node.js 24.x as npm builds; install/select the
-major in `.node-version` before invoking it, rather than installing `pyright[nodejs]`.
+Pyright uses the same Node.js as npm builds. Windows setup provides it locally;
+see [runtime setup](../README.md#running-tests) for standalone command usage.
+Use the major in `.node-version` rather than installing `pyright[nodejs]`.
 Shared helpers used across test tiers belong in `tests/common/`; stack workers
 do not synchronize `tests/unit/`.
 

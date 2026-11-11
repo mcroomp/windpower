@@ -43,6 +43,7 @@ tmp/
 
 # Node
 node_modules/
+/.tools/
 /linkhub-ui/dist/
 /linkhub-ui/dist-demo/
 

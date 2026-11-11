@@ -69,10 +69,18 @@ _setup_venv() {
         echo "[ERROR] Node.js $node_major.x is required; select it on PATH before setup." >&2
         return 1
     fi
-    echo "[INFO] Installing uv-managed Python 3.14.10 ..."
-    uv python install 3.14.10
+    local python_version python_exe
+    python_version="$(tr -d '\r\n' < "$REPO_DIR/.python-version")"
+    if [[ -z "$python_version" ]]; then
+        echo "[ERROR] .python-version must specify the supported Python minor." >&2
+        return 1
+    fi
+    export UV_PYTHON_INSTALL_DIR="$REPO_DIR/.tools/python"
+    echo "[INFO] Upgrading repository-local Python $python_version ..."
+    uv python install --upgrade --no-bin --no-registry "$python_version"
+    python_exe="$(uv python find --managed-python --system --no-project "$python_version")"
     echo "[INFO] Synchronizing the project environment ..."
-    uv sync --project "$REPO_DIR" --python 3.14.10 --managed-python --locked --dev --extra simulation
+    uv sync --project "$REPO_DIR" --python "$python_exe" --managed-python --locked --dev --extra simulation
     echo "[INFO] Checking Python with Ruff ..."
     uv run --no-sync --project "$REPO_DIR" ruff check "$REPO_DIR"
     echo "[INFO] Checking Python with Pyright ..."

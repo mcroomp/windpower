@@ -186,13 +186,21 @@ setup.cmd            (Windows)         or       bash setup.sh
 
 On Windows, `setup.cmd` owns the complete setup:
 
-- Install missing uv (`astral-sh.uv`), Node.js 24.x (`OpenJS.NodeJS.LTS`, selecting a matching release),
-  Rust (`Rustlang.Rustup`), and Visual Studio C++ Build Tools through WinGet.
+- Install missing uv (`astral-sh.uv`), Rust (`Rustlang.Rustup`), and Visual Studio
+  C++ Build Tools through WinGet.
   An existing Build Tools installation missing C++ support is updated through
   its Visual Studio installer. C++ tools and the x64 Windows SDK can require a
   large download, administrator approval, or a Windows restart.
-- Use uv to install managed Python 3.14.10 and sync locked development and
-  simulation dependencies, including editable `rawes` and `linkhub-client`.
+- Download Node.js for the major in `.node-version` into `.tools/node`, verify
+  the official archive's SHA256, and check for updates on every setup run. Setup uses
+  that installation's node and npm without changing the global PATH or any
+  shared Node.js installations. Other repositories can use different versions;
+  nvm is not required. Upgrades stay within Node 24.
+- Use uv to upgrade managed Python to the latest patch of the minor in
+  `.python-version` (Python 3.14), stored in `.tools/python` without global
+  executable or registry changes. Sync `.venv` to that exact interpreter and
+  the locked development and simulation dependencies, including editable
+  `rawes` and `linkhub-client`.
   No existing Python, `py` launcher, or pip installation is needed.
 - Check Python with Ruff and Pyright, run `npm ci` and build the UI, then build the LinkHub release binary.
 
@@ -220,14 +228,15 @@ Use `uv` for the local Python environment. `uv sync --dev` provisions the
 lightweight hardware environment; `uv sync --dev --extra simulation` adds the
 scientific/Lua stack. Run `uv sync` explicitly after dependency changes
 (`UV_NO_SYNC=1` is configured on this workstation).
-Python 3.14 is the minimum; `.python-version` pins the development interpreter.
-Node.js uses one shared system installation for UI tools and Pyright; `.node-version`
-selects major 24 with patch updates allowed. CI reads that file, setup rejects
-other majors, and each npm project enforces `24.x`. Pyright does not install a
-private Node.js wheel.
+Python 3.14 is the minimum; `.python-version` selects the development minor.
+`.node-version` selects Node.js major 24 with patch updates allowed. Windows setup
+uses the repo-local installation for both UI tools and Pyright; standalone
+commands can prepend `.tools/node` to their process PATH. Native Linux and CI
+use a separately provisioned Node.js matching that file. Each npm project
+enforces `24.x`; Pyright does not install a private Node.js wheel.
 All npm projects use `https://packagefeedproxy.microsoft.io/npm/`, including
 locked tarball URLs, rather than contacting the public npm registry directly.
-If an older uv reports no download for the pinned Python release, update uv
+If an older uv cannot find the current Python patch release, update uv
 using its owning package manager (on Windows, `winget upgrade --id astral-sh.uv`).
 
 Ruff and standard-mode Pyright gate local builds and CI. Their pytest `lint` category
