@@ -9,7 +9,7 @@ from simulation.rawes_lua_harness import RawesLua
 
 
 @pytest.mark.parametrize(("north", "velocity"), [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)])
-def test_crosswind_command_produces_restoring_thrust(north, velocity):
+def test_crosswind_command_produces_restoring_thrust(north: float, velocity: float):
     sim = RawesLua()
     rate = compute_crosswind_rate_cmd(
         np.array([north, 0.0, 0.0]), np.array([velocity, 0.0, 0.0]),
@@ -22,7 +22,7 @@ def test_crosswind_command_produces_restoring_thrust(north, velocity):
 
 
 @pytest.mark.parametrize("angles", [(0, 0, 0), (0, 0, 90), (25, 40, 70), (-35, 60, -120)])
-def test_lua_crosswind_projection_matches_full_body_rotation(angles):
+def test_lua_crosswind_projection_matches_full_body_rotation(angles: tuple[float, float, float]):
     sim = RawesLua()
     R = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
     sim.R = R

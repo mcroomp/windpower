@@ -123,6 +123,16 @@ do not synchronize `tests/unit/`.
 `tests/simtests/conftest.py` also auto-applies `pytest.mark.timeout(600)` to any
 simtest that does not declare its own timeout explicitly.
 
+Pumping tests retain three full cycles at 400 Hz and the 600-second default
+timeout. Elastic cable/drum substeps must not multiply aero/inflow evaluations:
+those remain at the caller's frame rate (see
+[PhysicsCore responsibilities](simulation.md#physicscore-responsibilities)).
+`tests/unit/test_torque_winch.py` checks stiff-mode convergence, aero call
+counts, and 400/1600 Hz flight convergence for quasi-static, Pitt-Peters and
+Oye aero. `tests/unit/test_tether_models.py` checks that moving stretched
+lines converge without a long under-relaxation tail while matching independent
+equilibria. No solver tolerances or flight safety gates are relaxed.
+
 ## Unit tests (`tests/unit/`)
 
 The unit suite is intentionally broad and file-granular. Prefer collection

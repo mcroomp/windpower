@@ -10,7 +10,7 @@ from simulation.rawes_lua_harness import RawesLua
 from simulation.controller import compute_takeoff_body_z
 
 
-def _sim(mode):
+def _sim(mode: int):
     sim = RawesLua(mode=mode)
     sim.armed = True
     sim.healthy = True
@@ -27,6 +27,7 @@ def test_takeoff_handoff_preserves_live_altitude_controller():
     sim = _sim(MODE_TAKEOFF)
     sim.run(0.1)
     thrust = sim.guided_throttle
+    assert thrust is not None
     integral = sim.fns.takeoff_alt_i()
     trim = sim.fns.takeoff_thrust_trim()
     sim.send_message(NamedValueFloat(name="RAWES_THR", value=thrust))
@@ -51,7 +52,7 @@ def test_cold_steady_capture_keeps_release_recovery():
 
 
 @pytest.mark.parametrize("yaw_rate", [0.0, 3.0])
-def test_vertical_damping_is_not_disabled_by_rotor_axis_yaw(yaw_rate):
+def test_vertical_damping_is_not_disabled_by_rotor_axis_yaw(yaw_rate: float):
     sim = _sim(MODE_STEADY)
     sim.gyro = [0.0, 0.0, yaw_rate]
     sim.run(0.04)
@@ -63,7 +64,7 @@ def test_vertical_damping_is_not_disabled_by_rotor_axis_yaw(yaw_rate):
 
 @pytest.mark.parametrize("azimuth", [0.0, math.pi / 2, math.pi, -math.pi / 2])
 @pytest.mark.parametrize("yaw", [0.0, 1.3])
-def test_takeoff_lean_pulls_downwind_independently_of_body_yaw(azimuth, yaw):
+def test_takeoff_lean_pulls_downwind_independently_of_body_yaw(azimuth: float, yaw: float):
     sim = _sim(MODE_TAKEOFF)
     sim.R = Rotation.from_euler("z", yaw).as_matrix()
     lean = math.radians(50.0)
@@ -103,7 +104,7 @@ def test_takeoff_lean_stays_level_below_clearance_and_slews_after_liftoff():
     [(math.radians(61), 0.0), (-0.1, 0.0), (float("nan"), 0.0),
      (0.5, None), (0.5, float("inf"))],
 )
-def test_takeoff_rejects_invalid_wind_capture_commands(lean, azimuth):
+def test_takeoff_rejects_invalid_wind_capture_commands(lean: float, azimuth: float | None):
     sim = _sim(MODE_TAKEOFF)
     sim.send_message(NamedValueFloat(name="RAWES_LEAN", value=lean))
     if azimuth is not None:

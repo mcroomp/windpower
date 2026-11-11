@@ -229,6 +229,23 @@ def test_wind_step_and_payout_warm_start_match_independent_equilibrium() -> None
     np.testing.assert_allclose(warm.force_on_anchor_ned, cold.force_on_anchor_ned, rtol=1e-5, atol=1e-5)
 
 
+def test_moving_stretched_line_converges_without_relaxation_tail() -> None:
+    model = TallakQuasiStaticTether()
+    initial = _inputs(wind_ned=np.array([0.0, 10.0, 0.0]))
+    model.evaluate(initial)
+    changed = _inputs(
+        attachment_pos_ned=initial.attachment_pos_ned + np.array([0.0, 0.0001, 0.0]),
+        attachment_vel_ned=np.array([0.0, 0.1, 0.0]),
+        wind_ned=initial.wind_ned,
+    )
+    warm = model.evaluate(changed)
+    cold = TallakQuasiStaticTether().evaluate(changed)
+    assert warm.iterations <= 3
+    assert warm.residual_m <= 1e-10
+    np.testing.assert_allclose(warm.force_on_hub_ned, cold.force_on_hub_ned, atol=1e-6)
+    np.testing.assert_allclose(warm.force_on_anchor_ned, cold.force_on_anchor_ned, atol=1e-6)
+
+
 def test_solver_failure_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     def failed_solve(matrix: np.ndarray, rhs: np.ndarray):
         raise np.linalg.LinAlgError("test failure")

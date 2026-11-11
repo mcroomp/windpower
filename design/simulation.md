@@ -162,10 +162,19 @@ The repo’s AP-equivalent closed loops live in `arduloop\` and
 Spring-damper steps are subdivided to resolve the cable's natural frequency;
 the tether stiffness is not softened. Coupled torque-driven drums also
 subdivide quasi-static elastic-cable steps, using both hub mass and reflected
-drum inertia. Other quasi-static steps retain the caller timestep. Spring
+drum inertia. Only tether, rigid-body, rotor-speed and drum integration use
+these fast substeps. Aero forces and inflow are evaluated once per caller
+frame and held across its elastic substeps; a 400 Hz caller does not run
+the aero solver at the cable's much higher elastic-mode resolution.
+Other quasi-static steps retain the caller timestep. Spring
 damping uses endpoint-relative extension rate minus payout speed, not absolute
 hub speed. The drum responds to the anchor-end load; the hub receives the
 distinct kite-end reaction through the current two-ended tether contract.
+
+The Tallak distributed-load iteration updates stretched-line loads directly.
+Sagging lines retain under-relaxation. Both paths use the same endpoint and
+distributed-load convergence tolerances; cached states only warm-start the
+solve, never replace it.
 
 Ground impact at the configured NED floor is terminal. `PhysicsCore.step()`
 returns the impact frame with `ground_contact=True`, stops any remaining

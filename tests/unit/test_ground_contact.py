@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from dynbem import RotorInputs
 
 from tests.common.mock_ardupilot import _MockArdupilotBase
 from tests.simtests._rotor_helpers import load_default_rotor
@@ -13,13 +14,13 @@ class _NoAero:
     def initial_rotor_state(self):
         return None
 
-    def step(self, inputs, state, dt):
+    def step(self, inputs: RotorInputs, state: object, dt: float):
         return SimpleNamespace(
             F_world=np.zeros(3), m_hub_world=np.zeros(3), Q_spin=0.0,
         ), state
 
 
-def _runner(floor=0.0, *, starting_z=None, vertical_speed=1.0):
+def _runner(floor: float = 0.0, *, starting_z: float | None = None, vertical_speed: float = 1.0):
     ic = SimpleNamespace(
         pos=[0.0, 0.0, floor - 0.01 if starting_z is None else starting_z],
         vel=[0.0, 0.0, vertical_speed], R0=np.eye(3),
@@ -32,7 +33,7 @@ def _runner(floor=0.0, *, starting_z=None, vertical_speed=1.0):
 
 
 @pytest.mark.parametrize("floor", [0.0, -1.0])
-def test_impact_stops_substeps_and_prevents_restart(floor):
+def test_impact_stops_substeps_and_prevents_restart(floor: float):
     runner = _runner(floor)
     core = runner._core
     result = core.step(0.02, 0.0, 0.0, 0.0)

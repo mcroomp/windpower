@@ -375,6 +375,7 @@ class PhysicsCore:
         tension_min = math.inf
         tension_max = -math.inf
         result = None
+        aero_result = None
         for i in range(n_steps):
             if self._winch is not None:
                 self._winch.step(self.anchor_tension, sub_dt)
@@ -386,7 +387,10 @@ class PhysicsCore:
             result = self._integrate(
                 sub_dt, collective_rad, tilt_lon, tilt_lat,
                 step_length, yaw_throttle, payout_rate_ms=step_rate,
+                aero_result=aero_result, aero_dt=dt,
             )
+            if not result["is_kinematic"]:
+                aero_result = result["aero_result"]
             if not math.isfinite(self.tension_now):
                 raise RuntimeError(f"Non-finite tether tension at t={self._t_sim:.6f} s")
             tension_min = min(tension_min, self.tension_now)
@@ -441,7 +445,9 @@ class PhysicsCore:
                    tilt_lon: float, tilt_lat: float,
                    rest_length: float | None,
                    yaw_throttle: float | None = None,
-                   payout_rate_ms: float | None = None) -> dict:
+                   payout_rate_ms: float | None = None,
+                   *, aero_result: AeroResult | None = None,
+                   aero_dt: float | None = None) -> dict:
 
         if not np.isfinite(dt) or dt <= 0.0:
             raise ValueError("physics dt must be finite and positive")
@@ -534,19 +540,24 @@ class PhysicsCore:
 
             # Aerodynamic forces — new state-based API.  Aero model integrates
             # omega, spin angle, and inflow states through the returned derivative.
-            rotor_inputs = RotorInputs(
-                collective_rad = collective_rad,
-                tilt_lon       = tilt_lon,
-                tilt_lat       = tilt_lat,
-                R_hub          = hub["R"],
-                v_hub_world    = hub["vel"],
-                wind_world     = self._wind,
-                omega_rad_s    = self._omega_rad_s,
-                rho_kg_m3      = 1.225,
-            )
-            # Aero integrates its inflow state internally via step(); omega is a
-            # RotorInputs field (not part of RotorState) so it stays external.
-            result, self._rotor_state = self._aero.step(rotor_inputs, self._rotor_state, dt)
+            if aero_result is None:
+                rotor_inputs = RotorInputs(
+                    collective_rad = collective_rad,
+                    tilt_lon       = tilt_lon,
+                    tilt_lat       = tilt_lat,
+                    R_hub          = hub["R"],
+                    v_hub_world    = hub["vel"],
+                    wind_world     = self._wind,
+                    omega_rad_s    = self._omega_rad_s,
+                    rho_kg_m3      = 1.225,
+                )
+                # Cable/drum stiffness needs fast substeps, not faster inflow
+                # updates. Hold aero loads over the caller's physics frame.
+                result, self._rotor_state = self._aero.step(
+                    rotor_inputs, self._rotor_state, dt if aero_dt is None else aero_dt,
+                )
+            else:
+                result = aero_result
 
             # Integrate omega externally using step_omega
             omega_min = (r.autorotation.omega_min_rad_s
