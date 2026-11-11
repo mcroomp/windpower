@@ -6,8 +6,6 @@ inverses of each other and produce values that match the ArduPilot signal flow
 documented in design/ardupilot_swashplate.md.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -129,7 +127,7 @@ def test_forward_mixing_matrix_values():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("col_out", [0.0, 0.1, 0.263, 0.5, 0.75, 1.0])
-def test_inverse_pure_collective_round_trip(col_out):
+def test_inverse_pure_collective_round_trip(col_out: float):
     s1, s2, s3 = ardupilot_h3_120_forward(col_out, 0.0, 0.0)
     col_rt, roll_rt, pitch_rt = ardupilot_h3_120_inverse(s1, s2, s3)
     assert math.isclose(col_rt, col_out, abs_tol=1e-10)
@@ -138,7 +136,7 @@ def test_inverse_pure_collective_round_trip(col_out):
 
 
 @pytest.mark.parametrize("roll", [-1.0, -0.5, 0.0, 0.5, 1.0])
-def test_inverse_pure_roll_round_trip(roll):
+def test_inverse_pure_roll_round_trip(roll: float):
     s1, s2, s3 = ardupilot_h3_120_forward(0.5, roll, 0.0)
     col_rt, roll_rt, pitch_rt = ardupilot_h3_120_inverse(s1, s2, s3)
     assert math.isclose(col_rt,   0.5,  abs_tol=1e-10)
@@ -147,7 +145,7 @@ def test_inverse_pure_roll_round_trip(roll):
 
 
 @pytest.mark.parametrize("pitch", [-1.0, -0.5, 0.0, 0.5, 1.0])
-def test_inverse_pure_pitch_round_trip(pitch):
+def test_inverse_pure_pitch_round_trip(pitch: float):
     s1, s2, s3 = ardupilot_h3_120_forward(0.5, 0.0, pitch)
     col_rt, roll_rt, pitch_rt = ardupilot_h3_120_inverse(s1, s2, s3)
     assert math.isclose(col_rt,   0.5,   abs_tol=1e-10)
@@ -252,7 +250,7 @@ def test_collective_rad_to_out_endpoints():
 
 
 @pytest.mark.parametrize("rad", [-0.28, -0.18, -0.079, 0.0, 0.10])
-def test_collective_rad_round_trip(rad):
+def test_collective_rad_round_trip(rad: float):
     out = collective_rad_to_out(rad, _COL_MIN, _COL_MAX)
     back = collective_out_to_rad(out, _COL_MIN, _COL_MAX)
     assert math.isclose(back, rad, abs_tol=1e-12)

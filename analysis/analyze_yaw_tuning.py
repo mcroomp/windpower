@@ -32,7 +32,7 @@ import numpy as np
 def parse_metadata(path: Path) -> dict[str, str]:
     """Pull '# key: value' lines from the top of the CSV into a dict."""
     meta: dict[str, str] = {}
-    with open(path, "r") as f:
+    with open(path) as f:
         for line in f:
             if not line.startswith("#"):
                 break
@@ -46,12 +46,15 @@ def parse_metadata(path: Path) -> dict[str, str]:
 def load_data(path: Path) -> dict[str, np.ndarray]:
     """Load the CSV body (skipping '#' lines) into a dict of column-name -> ndarray.
     Blank cells become NaN."""
-    with open(path, "r") as f:
+    with open(path) as f:
         # Skip metadata
+        header: str | None = None
         for line in f:
             if not line.startswith("#"):
                 header = line
                 break
+        if header is None:
+            raise ValueError(f"{path} contains metadata but no CSV header row")
         rdr = csv.reader(f)
         cols = [c.strip() for c in header.strip().split(",")]
         rows: list[list[str]] = list(rdr)
@@ -197,7 +200,6 @@ def tuning_hints(metrics: dict, meta: dict) -> list[str]:
     kd = float(meta.get("ATC_RAT_YAW_D",    0.0) or 0.0)
     imax = float(meta.get("ATC_RAT_YAW_IMAX", 0.7) or 0.7)
 
-    tail_max = metrics["tail_max_abs_dps"]
     tail_std = metrics["tail_std_dps"]
     tail_mean = metrics["tail_mean_dps"]
     settled  = not math.isnan(metrics["settle_t_s"])
@@ -349,7 +351,7 @@ def make_plot(df: dict[str, np.ndarray], metrics: dict, meta: dict,
 def print_report(meta: dict, metrics: dict, hints: list[str]) -> None:
     print()
     print("=" * 70)
-    print(f"Yaw PID tuning analysis")
+    print("Yaw PID tuning analysis")
     print("=" * 70)
     print()
     print("Run metadata")

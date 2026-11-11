@@ -28,14 +28,9 @@ Pass criteria:
 
 import json
 import logging
-import math
 import socket
-import sys
 
 import pytest
-
-pytestmark = pytest.mark.sitl
-
 
 from tests.sitl.stack_infra import (
     StackContext, dump_startup_diagnostics,
@@ -47,6 +42,10 @@ from groundstation.pumping_planner import PumpingGroundController
 from groundstation.unified_ground import _cmd_to_nv
 from linkhub_client.messages import NamedValueFloat, Statustext, decode_message
 from tests.simtests._rotor_helpers import load_default_rotor
+
+pytestmark = pytest.mark.sitl
+
+
 
 _ROTOR = load_default_rotor()
 
@@ -199,7 +198,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
                 tension_now  = float(state["tension_n"])
                 rest_length  = float(state["rest_length"])
                 net_energy_j = float(state["net_energy_j"])
-            except (TimeoutError, socket.timeout):
+            except TimeoutError:
                 pass  # keep last known values; mediator may still be in kinematic
 
             # ── Ground planner step (10 Hz) ───────────────────────────────
@@ -336,6 +335,7 @@ def test_pumping_cycle_lua_sitl(guided_nogps_armed_pumping_lua: StackContext):
             f"Net energy {net_energy:.1f} J <= 0"
         )
 
+        assert ctx.mediator_log is not None
         assert_no_mediator_criticals(ctx.mediator_log)
 
         log.info(

@@ -109,7 +109,7 @@ class GovernedWinchNode:
     """
 
     def __init__(self, winch: GovernedWinchController | TorqueWinchController,
-                 anemometer: "Anemometer | None" = None):
+                 anemometer: Anemometer | None = None):
         self._winch      = winch
         self._anemometer = anemometer
         self._tension_n: float      = 0.0
@@ -117,7 +117,7 @@ class GovernedWinchNode:
 
     # ---- physics side (mediator / sim only) ---------------------------------
 
-    def update_sensors(self, tension_n: float, wind_world_ned=None) -> None:
+    def update_sensors(self, tension_n: float, wind_world_ned: np.ndarray | None = None) -> None:
         """Feed the load-cell reading and ambient wind into the node.
 
         Called at the physics rate. tension_n is the tether

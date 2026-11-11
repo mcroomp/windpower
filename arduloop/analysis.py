@@ -42,7 +42,7 @@ def empirical_frf(u: np.ndarray, y: np.ndarray, fs: float,
     norm = (win ** 2).sum()
 
     step = nperseg - noverlap
-    Suu = np.zeros(nperseg // 2 + 1, dtype=complex)
+    Suu: np.ndarray = np.zeros(nperseg // 2 + 1, dtype=complex)
     Suy = np.zeros_like(Suu)
     nseg = 0
     for start in range(0, n - nperseg + 1, step):
@@ -57,7 +57,7 @@ def empirical_frf(u: np.ndarray, y: np.ndarray, fs: float,
         raise ValueError("empirical_frf: signal too short for nperseg")
     Suu /= nseg * norm
     Suy /= nseg * norm
-    H = Suy / np.where(Suu.real > 1e-20, Suu, 1.0)
+    H = Suy / np.where(np.real(Suu) > 1e-20, Suu, 1.0)
     freqs = np.fft.rfftfreq(nperseg, d=1.0 / fs)
     return freqs, H
 

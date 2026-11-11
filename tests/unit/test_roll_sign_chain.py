@@ -6,8 +6,6 @@ This test suite narrows down which layer has the sign inversion issue.
 """
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -105,6 +103,8 @@ class TestRollSignChainLinks:
             )
         
         # Compare cyclic relative to trim; absolute tilt can remain positive if trim is positive.
+        assert _IC.trim_tilt_lat is not None
+        assert tilt_lat_out is not None
         delta_tilt_lat = tilt_lat_out - _IC.trim_tilt_lat
         assert delta_tilt_lat < 0, (
             f"Targeting negative roll rate with positive body roll should "
@@ -120,7 +120,6 @@ class TestRollSignChainLinks:
         """
         # Hovering at IC attitude
         R_hub = np.asarray(_R_HUB_HOVER, dtype=float)
-        collective_rad = _IC.coll_eq_rad
         tilt_lon = 0.0
         tilt_lat = -0.05  # left-roll disk
         
@@ -215,6 +214,8 @@ class TestEndToEndRollCorrection:
         
         # Run controller to generate cyclic (should be negative to roll left)
         dt = 1.0 / 400.0
+        tilt_lon_cmd = _IC.trim_tilt_lon
+        tilt_lat_cmd = _IC.trim_tilt_lat
         for _ in range(50):
             tilt_lon_cmd, tilt_lat_cmd, _ = heli.step_from_thrust(
                 float(_IC.eq_thrust), rate_sp, 0.0, omega_body_right_roll, dt,
@@ -264,7 +265,7 @@ class TestEndToEndRollCorrection:
             f"mx_cmd={mx_cmd_body:.3f}, mx_trim={mx_trim_body:.3f}"
         )
         
-        print(f"✓ End-to-end OK:")
+        print("✓ End-to-end OK:")
         print(f"  roll_error={math.degrees(roll_error):.2f}deg ->") 
         print(f"  rate_sp={rate_sp:.4f} rad/s ->") 
         print(f"  tilt_lat={tilt_lat_cmd:.4f} ->") 

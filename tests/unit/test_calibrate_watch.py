@@ -2,9 +2,18 @@
 
 import math
 
+import pytest
+
 from calibrate.watch import _watch_attitude
 from linkhub_client import MessageBatch, SimClock
-from linkhub_client.messages import Attitude, MavCmd, PidTuning
+from linkhub_client.messages import (
+    Attitude,
+    MavCmd,
+    MavDataStream,
+    Message,
+    PidTuning,
+    RawMessage,
+)
 
 _CLOCK = SimClock(epoch=1, time_boot_ms=1, quality=None)
 
@@ -14,10 +23,10 @@ class _Log:
         self.rows = []
         self.n_rows = 0
 
-    def write_header(self, columns):
+    def write_header(self, columns: list[str]):
         self.columns = columns
 
-    def row(self, values):
+    def row(self, values: list[object]):
         self.rows.append(values)
         self.n_rows += 1
 
@@ -26,15 +35,20 @@ class _Session:
     _target_system = 1
     _target_component = 1
 
-    def send_message(self, _message):
+    def send_message(self, _message: Message | RawMessage):
         pass
-    def request_data_stream(self, _stream, _rate_hz):
+    def request_data_stream(self, _stream: MavDataStream, _rate_hz: int):
         pass
 
     def current_cursor(self):
         return "v1:0"
 
-    def read_messages(self, _after, message_types, **_kwargs):
+    def read_messages(
+        self,
+        _after: str,
+        message_types: str | list[str] | tuple[str, ...] | set[str],
+        **_kwargs: object,
+    ):
         if message_types == ["ATTITUDE", "HEARTBEAT", "STATUSTEXT"]:
             return MessageBatch((Attitude(
                 roll=math.radians(10),
@@ -51,13 +65,15 @@ class _RecordingSession(_Session):
     def __init__(self):
         self.sent = []
 
-    def send_message(self, message):
+    def send_message(self, message: Message | RawMessage):
         self.sent.append(message)
 
 
-def test_watch_attitude_handles_already_decoded_attitude(monkeypatch):
+def test_watch_attitude_handles_already_decoded_attitude(
+    monkeypatch: pytest.MonkeyPatch,
+):
     clock = iter([0.0, 0.1, 0.2, 16.0])
-    monkeypatch.setattr("calibrate.watch.time.monotonic", clock.__next__)
+    monkeypatch.setattr("calibrate.run.time.monotonic", clock.__next__)
     monkeypatch.setattr("calibrate.run.decode_message", lambda message: message)
     log = _Log()
 
@@ -67,9 +83,11 @@ def test_watch_attitude_handles_already_decoded_attitude(monkeypatch):
     assert log.rows[0][1:4] == ["10.000", "-5.000", "20.000"]
 
 
-def test_observation_loop_requests_yaw_pid_tuning_at_4_hz_by_default(monkeypatch):
+def test_observation_loop_requests_yaw_pid_tuning_at_4_hz_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
     clock = iter([0.0, 0.1, 0.2, 16.0])
-    monkeypatch.setattr("calibrate.watch.time.monotonic", clock.__next__)
+    monkeypatch.setattr("calibrate.run.time.monotonic", clock.__next__)
     monkeypatch.setattr("calibrate.run.decode_message", lambda message: message)
     session = _RecordingSession()
 

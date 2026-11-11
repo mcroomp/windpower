@@ -16,7 +16,7 @@ Run:
 """
 from __future__ import annotations
 
-import sys
+from pathlib import Path
 
 from analysis.linkhub_journal import cursor_sequence, iter_messages
 from tests.sitl.stack_infra import _acro_stack
@@ -27,7 +27,9 @@ import pytest
 pytestmark = [pytest.mark.sitl, pytest.mark.timeout(1200)]
 
 
-def test_kinematic_gps_sitl(tmp_path, request):
+def test_kinematic_gps_sitl(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     GPS fuses during a stationary kinematic hold; EKF stays clean for 40 s.
 
@@ -120,7 +122,6 @@ def test_kinematic_gps_sitl(tmp_path, request):
         for issue in issues:
             log.warning("EKF issue: %s", issue)
         assert not issues, (
-            "EKF problems in 40 s window after GPS fusion (t=%.1f..%.1f s):\n%s"
-            % (t_fused, t_end, "\n".join(issues))
+            "EKF problems in 40 s window after GPS fusion (t={:.1f}..{:.1f} s):\n{}".format(t_fused, t_end, "\n".join(issues))
         )
         log.info("EKF validation PASSED (%.0f s clean after GPS fusion)", t_end - t_fused)

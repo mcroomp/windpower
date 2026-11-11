@@ -7,10 +7,9 @@ identify the Python guidance/collective layer before the full-loop tests.
 import math
 
 import numpy as np
-import pytest
 
 from simulation.controller import TensionPI, compute_bz_tether, position_feedback_bz_eq
-from tests.unit._aero_probe import load_rotor
+from tests.common.aero_probe import load_rotor
 
 
 _ROTOR = load_rotor("beaupoil_2026")
@@ -74,7 +73,9 @@ def test_tensionpi_converges_simple_positive_tension_plant():
     plant_tau = 0.8
     slope_n_per_rad = 500.0
     trim_tension = 300.0
-    for _ in range(int(20.0 / dt)):
+    n_steps = int(20.0 / dt)
+    col = ctrl.update(tension, dt)
+    for _ in range(1, n_steps):
         col = ctrl.update(tension, dt)
         tension_target = trim_tension + slope_n_per_rad * (col - COL_TRIM)
         tension += (tension_target - tension) / plant_tau * dt

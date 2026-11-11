@@ -1,37 +1,14 @@
 """
 calibrate/constants.py -- All module-level constants and tables.
 
-Every submodule that needs gcs/param_defaults/servo_pwm imports them from here
-via relative imports (from .constants import ...).
+Shared client and message types are imported directly from linkhub_client.
 """
 from __future__ import annotations
 
 import math
 import os
 
-# Re-exported so existing calibration modules share the one HTTP client.
-from linkhub_client.client import LinkHubClient, LinkHubGenerationChanged, WallClock
-from linkhub_client.messages import (
-    Attitude,
-    AttitudeQuaternion,
-    EscTelemetry,
-    PidTuning,
-    BatteryStatus,
-    RcChannels,
-    SysStatus,
-    CommandAck,
-    ExtendedSysState,
-    Heartbeat,
-    LocalPositionNed,
-    MavLandedState,
-    NamedValueFloat,
-    CommandLong,
-    DebugFloatArray,
-    decode_message,
-    Statustext,
-)
-from simulation.servo_pwm      import (SWASH_PWM_MIN, SWASH_PWM_NEUTRAL, SWASH_PWM_MAX,
-                                        MOTOR_PWM_MIN, MOTOR_PWM_MAX)
+from simulation.servo_pwm      import (SWASH_PWM_MIN, SWASH_PWM_NEUTRAL, SWASH_PWM_MAX)
 
 # Resolve paths from this package rather than importing the simulation runtime.
 _REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -12,12 +12,13 @@ Usage:
 import argparse
 import csv
 import math
-import os
 import re
 import sys
 from pathlib import Path
 
 import simulation
+import contextlib
+from analysis._telemetry_types import _TelemetryRow
 
 # ── CLI ───────────────────────────────────────────────────────────────────────────────
 ap = argparse.ArgumentParser()
@@ -78,7 +79,7 @@ if EKF_CSV.exists():
     with open(EKF_CSV, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
-            try:
+            with contextlib.suppress(ValueError, KeyError):
                 ekf_rows.append({
                     "t_ms":  int(row["time_boot_ms"]),
                     "roll":  float(row["att_roll"]),
@@ -91,8 +92,6 @@ if EKF_CSV.exists():
                     "vel_e": float(row["vel_e"]),
                     "vel_d": float(row["vel_d"]),
                 })
-            except (ValueError, KeyError):
-                pass
     print(f"  {len(ekf_rows)} EKF rows")
 else:
     print(f"  WARNING: {EKF_CSV} not found -- EKF comparison skipped")
@@ -140,7 +139,7 @@ print(f"Target altitude:  {home_alt:.2f} m")
 # Match by nearest t_ms (convert sim t_sim -> t_ms: t_ms ~ (t_sim + arm_offset) * 1000).
 # We don't know exact arm offset, so we use relative time from kinematic exit.
 
-def ekf_at(t_ms_approx, window_ms=200):
+def ekf_at(t_ms_approx: float, window_ms: float=200):
     """Return the EKF row closest to t_ms_approx, within window_ms."""
     best = None
     best_dt = float("inf")
@@ -159,12 +158,12 @@ if ekf_rows:
     print(f"EKF time range:  {ekf_t_min/1000:.1f} .. {ekf_t_max/1000:.1f} s (boot time)")
 
 # ── Physics body_z from R matrix ─────────────────────────────────────────────
-def body_z_from_R(r):
+def body_z_from_R(r: _TelemetryRow):
     """Extract body_z in NED from rotation matrix stored in telemetry row."""
     # R is body-to-world (NED). body_z = R @ [0,0,1] = third column.
     return (r["r02"], r["r12"], r["r22"])
 
-def angle_deg(v1, v2):
+def angle_deg(v1: tuple[float, float, float], v2: tuple[float, float, float]):
     """Angle in degrees between two 3-vectors."""
     dot = sum(a*b for a,b in zip(v1,v2))
     dot = max(-1.0, min(1.0, dot))
@@ -226,9 +225,8 @@ for r in sampled:
         flags.append(f"ALT={alt:.1f}m")
     if col < -0.25:
         flags.append(f"COL_NEG={col:.3f}")
-    if abs(s3 - 1500) > 400 and phase == "free":
-        if col < -0.20:
-            flags.append(f"S3_LOW={s3:.0f}")
+    if abs(s3 - 1500) > 400 and phase == "free" and col < -0.20:
+        flags.append(f"S3_LOW={s3:.0f}")
 
     flag_str = "  ".join(flags)
     if marker:

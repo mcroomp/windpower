@@ -257,16 +257,16 @@ def main() -> int:
         all_lines += _parse_telemetry_csv(log_dir / "telemetry.csv")
 
     # Sort by timestamp (stable — preserves order within same second)
-    all_lines.sort(key=lambda l: l.timestamp_s)
+    all_lines.sort(key=lambda line: line.timestamp_s)
 
     if args.errors_only:
-        all_lines = [l for l in all_lines if l.level in ("WARNING", "ERROR", "CRITICAL")]
+        all_lines = [line for line in all_lines if line.level in ("WARNING", "ERROR", "CRITICAL")]
     if args.no_debug:
-        all_lines = [l for l in all_lines if l.level != "DEBUG"]
+        all_lines = [line for line in all_lines if line.level != "DEBUG"]
 
     use_color = not args.no_color and sys.stdout.isatty() and not args.write
 
-    source_w = max((len(l.source) for l in all_lines), default=8)
+    source_w = max((len(line.source) for line in all_lines), default=8)
     level_w  = 8
 
     out_lines = []
@@ -278,8 +278,8 @@ def main() -> int:
         )
 
     total = len(all_lines)
-    errs  = sum(1 for l in all_lines if l.level in ("ERROR", "CRITICAL"))
-    warns = sum(1 for l in all_lines if l.level == "WARNING")
+    errs  = sum(1 for line in all_lines if line.level in ("ERROR", "CRITICAL"))
+    warns = sum(1 for line in all_lines if line.level == "WARNING")
     summary = f"\n--- {total} lines  {errs} errors  {warns} warnings ---"
 
     if args.write:

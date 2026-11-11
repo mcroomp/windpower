@@ -20,6 +20,17 @@ _SIM = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 
 _LOG = _SIM / "logs"
 
+KEY_COLS = (
+    "tether_tension",
+    "collective_rad",
+    "thrust_from_alt_ctrl",
+    "alt_pid_integral",
+    "omega_rotor",
+    "pos_z",
+    "tether_rest_length",
+    "winch_speed_ms",
+)
+
 
 def _load(path: Path) -> list[dict]:
     rows = []
@@ -118,7 +129,7 @@ def _print_time_series(py_rows: list[dict], lua_rows: list[dict],
                        phase: str, t_start: float, t_end: float,
                        cols: list[str]) -> None:
     """Print raw 400 Hz rows side-by-side for a narrow time window."""
-    def _filter(rows):
+    def _filter(rows: list[dict[str | None, str | list[str] | None]]):
         return [r for r in rows
                 if (not phase or r.get("phase", "") == phase)
                 and t_start <= _flt(r, "t_sim") <= t_end]

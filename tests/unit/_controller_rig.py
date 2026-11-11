@@ -52,11 +52,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 
-from dynbem import RotorInputs, OyeBEMModel
+from dynbem import RotorDefinition, RotorInputs, OyeBEMModel
+from dynbem._dynbem import _OyeBEMModelLinear, _OyeBEMModelTabulated
 from simulation.controller import HeliCyclicController
 from simulation.dynamics import RigidBodyDynamics
 from simulation.param_defaults import thrust_to_coll_rad
@@ -95,8 +95,13 @@ class StepMetrics:
 # Plant identification (open-loop frequency response)
 # ---------------------------------------------------------------------------
 
-def _settle_inflow(aero, omega_spin: float, R_hub: np.ndarray,
-                   n_steps: int = 200, dt: float = 0.02) -> object:
+def _settle_inflow(
+    aero: _OyeBEMModelLinear | _OyeBEMModelTabulated,
+    omega_spin: float,
+    R_hub: np.ndarray,
+    n_steps: int = 200,
+    dt: float = 0.02,
+) -> object:
     """Pre-settle the dynamic-inflow states so the Bode probe starts from
     a quasi-static operating point and the first cycles aren't transient.
 
@@ -113,7 +118,7 @@ def _settle_inflow(aero, omega_spin: float, R_hub: np.ndarray,
 
 
 def probe_open_loop_plant(
-    rotor,
+    rotor: RotorDefinition,
     R_hub:          np.ndarray,
     *,
     omega_spin:     float,
@@ -259,7 +264,7 @@ def identify_decoupling_phase(
 # ---------------------------------------------------------------------------
 
 def probe_step_response(
-    rotor,
+    rotor: RotorDefinition,
     R_hub:          np.ndarray,
     *,
     omega_spin:     float,

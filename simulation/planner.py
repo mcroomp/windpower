@@ -61,8 +61,6 @@ Available controllers
 
 import math
 import numpy as np
-import sys
-import os
 
 # ---------------------------------------------------------------------------
 # Quaternion utilities (module-level, importable)
@@ -124,7 +122,7 @@ def quat_is_identity(q: np.ndarray, atol: float = 1e-6) -> bool:
 class TrajectoryPlanner:
     """Abstract base class — subclass and implement step()."""
 
-    def step(self, state: dict, dt: float, **kwargs) -> dict:
+    def step(self, state: dict, dt: float, **kwargs: object) -> dict:
         """
         Advance one planner step.
 
@@ -162,11 +160,10 @@ class HoldPlanner(TrajectoryPlanner):
     Use for: closed-loop stability tests where the pumping cycle is inactive.
     """
 
-    def step(self, state: dict, dt: float, **kwargs) -> dict:
+    def step(self, state: dict, dt: float, **kwargs: object) -> dict:
         return {
             "attitude_q":     Q_IDENTITY.copy(),
             "thrust":         0.0,
             "winch_speed_ms": 0.0,
             "phase":          "hold",
         }
-

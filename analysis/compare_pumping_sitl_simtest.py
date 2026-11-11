@@ -24,7 +24,8 @@ import csv
 import json
 import math
 from pathlib import Path
-from typing import Iterable
+from collections.abc import Iterable
+from typing import SupportsFloat, SupportsIndex
 
 
 DEFAULT_SIMTEST_DIR = Path("simulation/logs/test_lua_pumping_unified")
@@ -75,6 +76,8 @@ PARAM_PREFIX_FOCUS = (
 
 def _f(v: object, default: float = float("nan")) -> float:
     if v is None:
+        return default
+    if not isinstance(v, (str, bytes, bytearray, SupportsFloat, SupportsIndex)):
         return default
     try:
         return float(v)
@@ -216,10 +219,8 @@ def _print_param_diff(mismatches: list[tuple[str, float, float, float]], top_n: 
 
     print(f"{'param':<26} {'simtest':>12} {'sitl':>12} {'delta':>12}")
     print("-" * 66)
-    shown = 0
-    for k, sv, tv, d in finite:
+    for shown, (k, sv, tv, d) in enumerate(finite, start=1):
         print(f"{k:<26} {sv:12.5g} {tv:12.5g} {d:12.5g}")
-        shown += 1
         if shown >= top_n:
             break
 

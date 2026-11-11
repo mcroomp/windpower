@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -10,7 +11,7 @@ from simulation.telemetry_columns import COLUMNS
 from simulation.telemetry_csv import read_csv
 
 
-def test_read_csv_ignores_incomplete_appended_row(tmp_path) -> None:
+def test_read_csv_ignores_incomplete_appended_row(tmp_path: Path) -> None:
     path = tmp_path / "telemetry.csv"
     complete = [""] * len(COLUMNS)
     complete[COLUMNS.index("t_sim")] = "1.0"
@@ -27,7 +28,7 @@ def test_read_csv_ignores_incomplete_appended_row(tmp_path) -> None:
     assert [row.t_sim for row in rows] == [1.0]
 
 
-def _write_physics_csv(path) -> None:
+def _write_physics_csv(path: Path) -> None:
     with path.open("w", newline="", encoding="utf-8") as output:
         writer = csv.DictWriter(output, fieldnames=COLUMNS)
         writer.writeheader()
@@ -38,7 +39,7 @@ def _write_physics_csv(path) -> None:
             writer.writerow(row)
 
 
-def _record(time_boot_ms: int, message: str, **fields):
+def _record(time_boot_ms: int, message: str, **fields: object):
     return {
         "_t_wall": 0.0,
         "_dir": "rx",
@@ -50,7 +51,7 @@ def _record(time_boot_ms: int, message: str, **fields):
     }
 
 
-def test_enriches_physics_rows_with_latest_mavlink_observation(tmp_path) -> None:
+def test_enriches_physics_rows_with_latest_mavlink_observation(tmp_path: Path) -> None:
     physics = tmp_path / "telemetry.physics.csv"
     mavlink = tmp_path / "mavlink.jsonl"
     output = tmp_path / "telemetry.csv"
@@ -102,7 +103,7 @@ def test_enriches_physics_rows_with_latest_mavlink_observation(tmp_path) -> None
 
 
 def test_enrichment_rejects_export_without_simulation_clock_metadata(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     physics = tmp_path / "telemetry.physics.csv"
     mavlink = tmp_path / "mavlink.jsonl"
@@ -126,7 +127,7 @@ def test_enrichment_rejects_export_without_simulation_clock_metadata(
         enrich_sitl_telemetry(physics, mavlink, tmp_path / "telemetry.csv")
 
 
-def test_enrichment_maps_typed_pid_tuning_axis_to_rate_columns(tmp_path) -> None:
+def test_enrichment_maps_typed_pid_tuning_axis_to_rate_columns(tmp_path: Path) -> None:
     physics = tmp_path / "telemetry.physics.csv"
     mavlink = tmp_path / "mavlink.jsonl"
     output = tmp_path / "telemetry.csv"
@@ -149,12 +150,12 @@ def test_enrichment_maps_typed_pid_tuning_axis_to_rate_columns(tmp_path) -> None
     assert math.isnan(float(rows[1]["rate_pitch_p_contrib"]))
 
 
-def test_enrichment_maps_diagnostic_array_keys_by_validity_mask(tmp_path) -> None:
+def test_enrichment_maps_diagnostic_array_keys_by_validity_mask(tmp_path: Path) -> None:
     physics = tmp_path / "telemetry.physics.csv"
     mavlink = tmp_path / "mavlink.jsonl"
     output = tmp_path / "telemetry.csv"
     _write_physics_csv(physics)
-    keys = list(DIAG_KEYS)
+    keys: list[str] = list(DIAG_KEYS)
     data = [0.0] * 58
     for key, value in (("YFF_U", 0.25), ("OL_TEN", 12.5), ("OL_AP", 0.0)):
         index = keys.index(key)

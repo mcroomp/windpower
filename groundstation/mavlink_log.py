@@ -14,12 +14,18 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
+from typing import Protocol, TextIO
 
 from pymavlink import mavutil
+import contextlib
 
 
-def _json_safe(value):
+class _DictMessage(Protocol):
+    def to_dict(self) -> dict: ...
+
+
+def _json_safe(value: object) -> object:
     """Convert pymavlink binary fields into deterministic JSON values."""
     if isinstance(value, (bytes, bytearray)):
         return list(value)
@@ -43,11 +49,11 @@ class MavlinkLogWriter:
         Must remain open for the lifetime of this object.
     """
 
-    def __init__(self, fh) -> None:
+    def __init__(self, fh: TextIO) -> None:
         self._fh = fh
         self._lock = threading.Lock()
 
-    def write(self, msg, last_time_boot_ms: int, direction: str = "rx") -> None:
+    def write(self, msg: _DictMessage, last_time_boot_ms: int, direction: str = "rx") -> None:
         """
         Serialize *msg* (a pymavlink message) as one JSON line.
 
@@ -71,9 +77,9 @@ class MavlinkLogWriter:
             pass
 
     @classmethod
-    def open(cls, path: "str | Path") -> "MavlinkLogWriter":
+    def open(cls, path: str | Path) -> MavlinkLogWriter:
         """Open *path* for writing and return a MavlinkLogWriter."""
-        fh = open(Path(path), "w", encoding="utf-8")
+        fh = open(Path(path), "w", encoding="utf-8")  # noqa: SIM115 - ownership transfers to writer.close()
         writer = cls(fh)
         writer._owned_fh = fh  # keep reference so caller can close via writer.close()
         return writer
@@ -82,16 +88,14 @@ class MavlinkLogWriter:
         """Close the underlying file if opened via MavlinkLogWriter.open()."""
         fh = getattr(self, "_owned_fh", None)
         if fh is not None:
-            try:
+            with contextlib.suppress(Exception):
                 fh.close()
-            except Exception:
-                pass
             self._owned_fh = None
 
 
 def iter_messages(
-    path: "str | Path",
-    types: "list[str] | None" = None,
+    path: str | Path,
+    types: list[str] | None = None,
 ) -> Iterator[dict]:
     """
     Yield message dicts from a mavlink.jsonl file.
@@ -122,8 +126,8 @@ def iter_messages(
 
 
 def convert_raw_to_ndjson(
-    raw_path: "str | Path",
-    ndjson_path: "str | Path",
+    raw_path: str | Path,
+    ndjson_path: str | Path,
 ) -> int:
     """Replay a native pymavlink raw capture into parser-derived NDJSON.
 

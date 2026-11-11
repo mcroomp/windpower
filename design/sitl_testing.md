@@ -39,7 +39,17 @@ Verified behavior from `test.sh`:
 - `test_linkhub_stress_sitl.py` runs exclusively so the transport benchmark
   measures LinkHub rather than contention from another stack.
 - Before collection the runner calls `bash setup.sh build` and probes the image
-  for Python 3.12+, `arducopter-heli`, and `linkhub`.
+  for Python 3.14+, `arducopter-heli`, and `linkhub`.
+- Runtime images install managed Python 3.14.10, shared Node.js 24.x, Ruff, and Pyright.
+  The pre-worker build check runs the [Python lint gates](testing.md#python-linting)
+  once; workers do not repeat them before collection.
+- Docker installs locked development dependencies plus the `simulation` and `sitl`
+  extras from `pyproject.toml` and `uv.lock`. The `sitl` extra supplies ArduPilot's
+  Python launch tools. The dependency layer omits local editable packages; each
+  worker runs `uv sync --locked` after source synchronization to install those
+  packages and verify the complete environment. A sync failure stops the worker.
+- Image-cache inputs include both manifests, the lockfile, and the Python pin;
+  dependency changes rebuild the environment rather than patching it with pip.
 - Each selected file gets an outer wall-clock timeout through
   `RAWES_STACK_TEST_TIMEOUT_S` (default `600` seconds).
 

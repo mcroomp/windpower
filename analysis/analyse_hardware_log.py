@@ -147,11 +147,11 @@ def _print_summary(data: dict[str, list]) -> None:
         yaw_cmd_mean = (sum(c4)/len(c4) - 1500.0) / 500.0
         print(f"  CH4 normalized  : {yaw_cmd_mean:+.3f}  (-1=full left, 0=centre, +1=full right)")
         if abs(yaw_cmd_mean) > 0.05:
-            print(f"  [DIAGNOSIS] CH4 is NOT centred -- yaw rate setpoint is non-zero!")
-            print(f"              This is likely the root cause of SERVO4 wind-up.")
-            print(f"              In ACRO mode yaw rate cmd = CH4 deviation * ACRO_YAW_RATE.")
+            print("  [DIAGNOSIS] CH4 is NOT centred -- yaw rate setpoint is non-zero!")
+            print("              This is likely the root cause of SERVO4 wind-up.")
+            print("              In ACRO mode yaw rate cmd = CH4 deviation * ACRO_YAW_RATE.")
         else:
-            print(f"  [OK] CH4 is centred -- yaw rate setpoint is near zero.")
+            print("  [OK] CH4 is centred -- yaw rate setpoint is near zero.")
 
     if data["imu0_t"]:
         gz = data["imu0_gz"]
@@ -188,17 +188,16 @@ def _plot(data: dict[str, list], path: str) -> None:
     fig = plt.figure(figsize=(14, 13))
     fig.suptitle(f"Hardware log: {os.path.basename(path)}", fontsize=12)
     gs = gridspec.GridSpec(5, 1, hspace=0.50)
+    time_keys = ("rate_t", "pidr_t", "rcou_t", "rcin_t", "hrsc_t", "imu0_t", "imu1_t")
+    t0 = next((data[key][0] for key in time_keys if data[key]), 0.0)
 
     # -- Panel 1: yaw rate ----------------------------------------------------
     ax1 = fig.add_subplot(gs[0])
     if data["rate_t"]:
-        t0 = data["rate_t"][0]
         t  = [x - t0 for x in data["rate_t"]]
         ax1.plot(t, data["rate_ydes"], "b--", lw=0.8, label="YDes (setpoint)")
         ax1.plot(t, data["rate_y"],    "r",   lw=1.0, label="Y (actual)")
     if data["pidr_t"]:
-        if not data["rate_t"]:
-            t0 = data["pidr_t"][0]
         t = [x - t0 for x in data["pidr_t"]]
         ax1.plot(t, data["pidr_err"], "g", lw=0.8, alpha=0.7, label="PIDR Err")
     ax1.set_ylabel("deg/s")

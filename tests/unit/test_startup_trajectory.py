@@ -19,7 +19,6 @@ These tests verify the kinematic formula and trajectory properties only.
 No aerodynamics, wind, or tether forces are involved.
 """
 
-import sys
 import os
 import math
 
@@ -29,10 +28,11 @@ import pytest
 # ---------------------------------------------------------------------------
 # Import from mediator
 # ---------------------------------------------------------------------------
-_SIM_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
-
 from simulation.mediator import compute_launch_position
 import simulation.config as _mcfg
+
+_SIM_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
+
 DEFAULT_POS0 = _mcfg.DEFAULTS["pos0"]
 DEFAULT_VEL0 = _mcfg.DEFAULTS["vel0"]
 
@@ -121,7 +121,9 @@ class TestTrajectorySmoothnessNumerical:
         velocities = np.array([_kinematic_state(launch_pos, _TARGET_VEL, t)[1] for t in times])
         return times, positions, velocities
 
-    def test_no_velocity_jump_at_any_step(self, trajectory):
+    def test_no_velocity_jump_at_any_step(
+        self, trajectory: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ):
         """Velocity is constant — change per step must be zero."""
         _, _, velocities = trajectory
         dv = np.diff(velocities, axis=0)
@@ -131,7 +133,9 @@ class TestTrajectorySmoothnessNumerical:
             "expected zero for constant-velocity trajectory"
         )
 
-    def test_acceleration_is_zero(self, trajectory):
+    def test_acceleration_is_zero(
+        self, trajectory: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ):
         """Numerically estimated acceleration must be zero throughout."""
         times, _, velocities = trajectory
         dt = times[1] - times[0]
@@ -142,7 +146,9 @@ class TestTrajectorySmoothnessNumerical:
             "(expected zero for constant-velocity trajectory)"
         )
 
-    def test_constant_speed_throughout(self, trajectory):
+    def test_constant_speed_throughout(
+        self, trajectory: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ):
         """Speed must be constant (= |target_vel|) throughout."""
         _, _, velocities = trajectory
         speeds = np.linalg.norm(velocities, axis=1)
@@ -150,7 +156,9 @@ class TestTrajectorySmoothnessNumerical:
         np.testing.assert_allclose(speeds, target_speed, atol=1e-10,
                                    err_msg="speed must be constant at |target_vel|")
 
-    def test_position_monotone_toward_target_per_axis(self, trajectory):
+    def test_position_monotone_toward_target_per_axis(
+        self, trajectory: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ):
         """Each axis must move monotonically from launch_pos toward target_pos."""
         _, positions, _ = trajectory
         launch_pos = positions[0]
@@ -186,7 +194,9 @@ class TestHandoffContinuity:
 
     DT = 1.0 / 400.0   # mediator timestep [s]
 
-    def _run_kinematic_phase(self, launch_pos, target_vel, duration):
+    def _run_kinematic_phase(
+        self, launch_pos: np.ndarray, target_vel: np.ndarray, duration: float,
+    ):
         """Step through constant-velocity trajectory at 400 Hz; return final (pos, vel)."""
         pos = launch_pos.copy()
         n   = int(round(duration / self.DT))

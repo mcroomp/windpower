@@ -106,10 +106,9 @@ def compute_metrics(y_orig, y_sim):
 def fmt_metric(m):
     """Format a metrics dict as a one-line summary."""
     if m.get("status") != "ok":
-        return "  ** %s" % m.get("status", "unknown")
+        return "  ** {}".format(m.get("status", "unknown"))
     return (
-        "  amp=%.3f  spec=%.3f  best_xc=%.3f  xc=%.3f  NRMSE=%.0f%%"
-        % (m["amp_ratio"], m["spectral_corr"], m["best_xcorr"],
+        "  amp={:.3f}  spec={:.3f}  best_xc={:.3f}  xc={:.3f}  NRMSE={:.0f}%".format(m["amp_ratio"], m["spectral_corr"], m["best_xcorr"],
            m["xcorr"], m["nrmse"] * 100))
 
 
@@ -149,23 +148,23 @@ def compare_fig10(orig_dir, sim_dir):
     all_grades = []
 
     for qty in quantities:
-        orig_path = os.path.join(orig_dir, "orig_fig10_%s.csv" % qty)
-        sim_path  = os.path.join(sim_dir, "sim_fig10_%s.csv" % qty)
+        orig_path = os.path.join(orig_dir, f"orig_fig10_{qty}.csv")
+        sim_path  = os.path.join(sim_dir, f"sim_fig10_{qty}.csv")
 
         if not os.path.exists(orig_path):
-            print("\n  [%s] original CSV not found" % qty)
+            print(f"\n  [{qty}] original CSV not found")
             continue
         if not os.path.exists(sim_path):
-            print("\n  [%s] simulated CSV not found" % qty)
+            print(f"\n  [{qty}] simulated CSV not found")
             continue
 
         orig = load_csv(orig_path)
         sim  = load_csv(sim_path)
 
-        print("\n  [%s]" % qty)
+        print(f"\n  [{qty}]")
         for blade in ["blade_1", "blade_2", "blade_3"]:
             if blade not in orig or blade not in sim:
-                print("    %-8s -- missing data" % blade)
+                print(f"    {blade:<8s} -- missing data")
                 continue
 
             t_c, y_o, y_s = interpolate_to_common(
@@ -173,13 +172,13 @@ def compare_fig10(orig_dir, sim_dir):
                 sim["time"], sim[blade])
 
             if t_c is None:
-                print("    %-8s -- no time overlap" % blade)
+                print(f"    {blade:<8s} -- no time overlap")
                 continue
 
             m = compute_metrics(y_o, y_s)
             g = grade(m)
             all_grades.append(g)
-            print("    %-8s [%s] %s" % (blade, g, fmt_metric(m)))
+            print(f"    {blade:<8s} [{g}] {fmt_metric(m)}")
 
     return all_grades
 
@@ -194,23 +193,23 @@ def compare_fig14(orig_dir, sim_dir):
     all_grades = []
 
     for panel in panels:
-        orig_path = os.path.join(orig_dir, "orig_fig14_%s.csv" % panel)
-        sim_path  = os.path.join(sim_dir, "sim_fig14_%s.csv" % panel)
+        orig_path = os.path.join(orig_dir, f"orig_fig14_{panel}.csv")
+        sim_path  = os.path.join(sim_dir, f"sim_fig14_{panel}.csv")
 
         if not os.path.exists(orig_path):
-            print("\n  [panel %s] original CSV not found" % panel)
+            print(f"\n  [panel {panel}] original CSV not found")
             continue
         if not os.path.exists(sim_path):
-            print("\n  [panel %s] simulated CSV not found" % panel)
+            print(f"\n  [panel {panel}] simulated CSV not found")
             continue
 
         orig = load_csv(orig_path)
         sim  = load_csv(sim_path)
 
-        print("\n  [panel %s]" % panel)
+        print(f"\n  [panel {panel}]")
         for col in ["beta", "error"]:
             if col not in orig or col not in sim:
-                print("    %-10s -- missing data" % col)
+                print(f"    {col:<10s} -- missing data")
                 continue
 
             t_c, y_o, y_s = interpolate_to_common(
@@ -218,13 +217,13 @@ def compare_fig14(orig_dir, sim_dir):
                 sim["time"], sim[col])
 
             if t_c is None:
-                print("    %-10s -- no time overlap" % col)
+                print(f"    {col:<10s} -- no time overlap")
                 continue
 
             m = compute_metrics(y_o, y_s)
             g = grade(m)
             all_grades.append(g)
-            print("    %-10s [%s] %s" % (col, g, fmt_metric(m)))
+            print(f"    {col:<10s} [{g}] {fmt_metric(m)}")
 
     return all_grades
 
@@ -239,23 +238,23 @@ def compare_fig15(orig_dir, sim_dir):
     all_grades = []
 
     for panel in panels:
-        orig_path = os.path.join(orig_dir, "orig_fig15_%s.csv" % panel)
-        sim_path  = os.path.join(sim_dir, "sim_fig15_%s.csv" % panel)
+        orig_path = os.path.join(orig_dir, f"orig_fig15_{panel}.csv")
+        sim_path  = os.path.join(sim_dir, f"sim_fig15_{panel}.csv")
 
         if not os.path.exists(orig_path):
-            print("\n  [%s] original CSV not found" % panel)
+            print(f"\n  [{panel}] original CSV not found")
             continue
         if not os.path.exists(sim_path):
-            print("\n  [%s] simulated CSV not found" % panel)
+            print(f"\n  [{panel}] simulated CSV not found")
             continue
 
         orig = load_csv(orig_path)
         sim  = load_csv(sim_path)
 
-        print("\n  [%s]" % panel)
+        print(f"\n  [{panel}]")
         for col in ["beta", "error"]:
             if col not in orig or col not in sim:
-                print("    %-10s -- missing data" % col)
+                print(f"    {col:<10s} -- missing data")
                 continue
 
             t_c, y_o, y_s = interpolate_to_common(
@@ -263,13 +262,13 @@ def compare_fig15(orig_dir, sim_dir):
                 sim["time"], sim[col])
 
             if t_c is None:
-                print("    %-10s -- no time overlap" % col)
+                print(f"    {col:<10s} -- no time overlap")
                 continue
 
             m = compute_metrics(y_o, y_s)
             g = grade(m)
             all_grades.append(g)
-            print("    %-10s [%s] %s" % (col, g, fmt_metric(m)))
+            print(f"    {col:<10s} [{g}] {fmt_metric(m)}")
 
     return all_grades
 
@@ -283,10 +282,10 @@ def main():
     sim_dir  = "csv_simulated"
 
     if not os.path.isdir(orig_dir):
-        print("Run digitize.py first to create %s/" % orig_dir)
+        print(f"Run digitize.py first to create {orig_dir}/")
         sys.exit(1)
     if not os.path.isdir(sim_dir):
-        print("Run simulate.py first to create %s/" % sim_dir)
+        print(f"Run simulate.py first to create {sim_dir}/")
         sys.exit(1)
 
     all_grades = []
@@ -305,11 +304,12 @@ def main():
         counts = {}
         for g in valid:
             counts[g] = counts.get(g, 0) + 1
-        print("  Grade distribution: %s" %
-              "  ".join("%s=%d" % (g, counts.get(g, 0))
-                        for g in ["A", "B", "C", "D", "F"] if g in counts))
+        distribution = "  ".join(
+            f"{g}={counts.get(g, 0)}" for g in ["A", "B", "C", "D", "F"] if g in counts
+        )
+        print(f"  Grade distribution: {distribution}")
         avg = np.mean([grade_map[g] for g in valid])
-        print("  Average GPA: %.2f / 4.00" % avg)
+        print(f"  Average GPA: {avg:.2f} / 4.00")
 
     print("\nMetric key:")
     print("  amp:      amplitude ratio (sim/orig, 1.0 = perfect)")

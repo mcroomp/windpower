@@ -18,6 +18,8 @@ from simulation.param_defaults import thrust_to_coll_rad
 from simulation.controller import compute_bz_altitude_hold
 from simulation.frames import build_orb_frame
 from simulation.rawes_lua_harness import RawesLua
+from simulation.rotor_physics import require_mass_kg
+from simulation.simtest_log import SimtestLog
 from simulation.tether import TetherProperties
 from simulation.winch import TorqueWinchController
 from simulation.winch_node import Anemometer, GovernedWinchNode
@@ -28,6 +30,7 @@ from tests.simtests.simtest_runner import PhysicsRunner
 pytestmark = [pytest.mark.simtest, pytest.mark.timeout(900)]
 
 _ROTOR = load_default_rotor()
+_MASS_KG = require_mass_kg(_ROTOR)
 DT = 1.0 / 400.0
 LUA_EVERY = round(0.020 / DT)
 PLANNER_EVERY = round(0.1 / DT)
@@ -54,7 +57,7 @@ STEADY_MAX_RATE_RADS = 0.5
 STEADY_SETTLE_S = 0.2
 
 
-def _altitude_target(paid_out_m):
+def _altitude_target(paid_out_m: float):
     return max(
         TAKEOFF_ALT_TARGET_M,
         min(paid_out_m, MIN_TETHER_LENGTH_M) * math.sin(TETHER_ELEVATION_RAD),
@@ -66,16 +69,16 @@ def _altitude_target(paid_out_m):
     [(1.0, 3.0), (6.0, 3.0), (50.0, 50.0 * math.sin(math.radians(25.0))),
      (60.0, 50.0 * math.sin(math.radians(25.0)))],
 )
-def test_altitude_command_follows_tether_elevation_not_vertical_payout(paid_out_m, expected):
+def test_altitude_command_follows_tether_elevation_not_vertical_payout(paid_out_m: float, expected: float):
     assert _altitude_target(paid_out_m) == pytest.approx(expected)
 
 
-def _handoff_ready(R, pos, gyro, paid_out_m):
+def _handoff_ready(R: np.ndarray, pos: np.ndarray, gyro: np.ndarray, paid_out_m: float):
     if paid_out_m < HANDOFF_MIN_LENGTH_M:
         return False
     length = float(np.linalg.norm(pos))
     elevation = math.asin(float(np.clip(-pos[2] / length, -1.0, 1.0)))
-    goal = compute_bz_altitude_hold(pos, elevation, LAUNCH_TENSION_N, _ROTOR.inertia.mass_kg)
+    goal = compute_bz_altitude_hold(pos, elevation, LAUNCH_TENSION_N, _MASS_KG)
     return (
         goal[2] <= math.cos(math.radians(STEADY_MIN_TILT_DEG))
         and float(np.dot(R[:, 2], goal)) >= math.cos(math.radians(HANDOFF_AXIS_TOL_DEG))
@@ -86,7 +89,7 @@ def _handoff_ready(R, pos, gyro, paid_out_m):
 def test_handoff_requires_inclined_geometry_not_just_climb_height():
     pos = np.array([0.0, 8.0, -3.0])
     elevation = math.atan2(3.0, 8.0)
-    goal = compute_bz_altitude_hold(pos, elevation, LAUNCH_TENSION_N, _ROTOR.inertia.mass_kg)
+    goal = compute_bz_altitude_hold(pos, elevation, LAUNCH_TENSION_N, _MASS_KG)
     R = build_orb_frame(goal)
     assert _handoff_ready(R, pos, np.zeros(3), 8.5)
     assert not _handoff_ready(np.eye(3), pos, np.zeros(3), 8.5)
@@ -95,7 +98,10 @@ def test_handoff_requires_inclined_geometry_not_just_climb_height():
     assert not _handoff_ready(np.eye(3), np.array([0.0, 0.0, -17.0]), np.zeros(3), 17.0)
 
 
-def _steady_orientation_reached(R, target, gyro, paid_out_m) -> bool:
+def _steady_orientation_reached(
+    R: np.ndarray, target: np.ndarray | list[float] | None,
+    gyro: np.ndarray, paid_out_m: float,
+) -> bool:
     if target is None:
         return False
     target = np.asarray(target, dtype=float)
@@ -124,7 +130,7 @@ def _steady_orientation_reached(R, target, gyro, paid_out_m) -> bool:
     ],
 )
 def test_steady_orientation_requires_length_tilt_tracking_and_low_rates(
-    roll_deg, goal_deg, rate, paid_out_m, reached,
+    roll_deg: float, goal_deg: float, rate: float, paid_out_m: float, reached: bool,
 ):
     roll = math.radians(roll_deg)
     goal = math.radians(goal_deg)
@@ -148,9 +154,11 @@ def _build_ic() -> SimpleNamespace:
             omega_rad_s=OMEGA_START_RAD_S, rho_kg_m3=1.225,
         )
         result, _ = aero.step(inputs, aero.initial_rotor_state(), DT)
-        return float(result.F_world[2]) + _ROTOR.inertia.mass_kg * 9.81 + LAUNCH_TENSION_N
+        return float(result.F_world[2]) + _MASS_KG * 9.81 + LAUNCH_TENSION_N
 
     initial_alt = 1.0
+    if _ROTOR.control is None or _ROTOR.control.axle_attachment_length_m is None:
+        raise ValueError("Rotor axle attachment length is required")
     attachment_length = initial_alt - _ROTOR.control.axle_attachment_length_m
     return SimpleNamespace(
         pos=np.array([0.0, 0.0, -initial_alt]),
@@ -201,7 +209,10 @@ def _failure_reason(
         (100.0, 50.0, 99.9, 0.3, 2.5, None),
     ],
 )
-def test_ground_liftoff_failure_limits(t, altitude, tension, liftoff_t, transition_t, reason):
+def test_ground_liftoff_failure_limits(
+    t: float, altitude: float, tension: float,
+    liftoff_t: float | None, transition_t: float | None, reason: str | None,
+):
     failure = _failure_reason(t, altitude, tension, liftoff_t, transition_t)
     if reason is None:
         assert failure is None
@@ -209,7 +220,7 @@ def test_ground_liftoff_failure_limits(t, altitude, tension, liftoff_t, transiti
         assert failure is not None and reason in failure
 
 
-def test_ground_liftoff(simtest_log):
+def test_ground_liftoff(simtest_log: SimtestLog):
     ic = _build_ic()
     sim = RawesLua(mode=MODE_TAKEOFF)
     sim.armed = True
@@ -242,7 +253,7 @@ def test_ground_liftoff(simtest_log):
     max_tension = runner.tension_now
     max_alt = runner.altitude
 
-    def inject(s, r):
+    def inject(s: RawesLua, r: PhysicsRunner) -> None:
         if transition_t is None:
             thrust = TAKEOFF_THRUST_SEED
             wind = node.telemetry().wind_ned
@@ -260,6 +271,7 @@ def test_ground_liftoff(simtest_log):
         ):
             s.send_message(NamedValueFloat(name=name, value=value))
 
+    sr = None
     for i in range(round(TOTAL_RUNTIME / DT)):
         if i % PLANNER_EVERY == 0:
             node.exchange(WinchCommand(
@@ -321,6 +333,7 @@ def test_ground_liftoff(simtest_log):
             )
             lua.write_telemetry(simtest_log.log_dir / "telemetry.csv")
 
+    assert sr is not None
     if abort_reason is None and steady_t is None:
         abort_reason = (
             f"Did not establish steady-flight orientation with at least "

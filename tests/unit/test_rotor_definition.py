@@ -5,18 +5,17 @@ autorotation sub-records).  These tests verify YAML loading, derived
 geometry properties, and validation for the rotors used by this project.
 """
 import math
-import sys
-from pathlib import Path
 
 import pytest
 
 
 from dynbem import rotor_definition as rd
-from simulation.rotor_physics import resolve_i_spin_kgm2
-from tests.unit._aero_probe import load_rotor
+from dynbem.rotor_definition import ValidationIssue
+from simulation.rotor_physics import require_mass_kg, resolve_i_spin_kgm2
+from tests.common.aero_probe import load_rotor
 
 
-def _errors(issues):
+def _errors(issues: list[ValidationIssue]):
     return [i for i in issues if i.level == "ERROR"]
 
 
@@ -100,11 +99,11 @@ class TestDeSchutterGeometry:
 
 class TestValidation:
     def test_beaupoil_no_errors(self):
-        issues = load_rotor("beaupoil_2026").validate()
+        issues = getattr(load_rotor("beaupoil_2026"), "validate")()
         assert _errors(issues) == [], f"Unexpected errors: {_errors(issues)}"
 
     def test_de_schutter_no_errors(self):
-        issues = load_rotor("de_schutter_2018").validate()
+        issues = getattr(load_rotor("de_schutter_2018"), "validate")()
         assert _errors(issues) == [], f"Unexpected errors: {_errors(issues)}"
 
 
@@ -116,6 +115,16 @@ class TestInertiaControl:
         """mass_kg must be auto-resolved from blade+stationary+shell sums."""
         r = load_rotor("beaupoil_2026")
         assert r.inertia.mass_kg is not None and r.inertia.mass_kg > 0
+
+    def test_require_mass_returns_configured_mass(self):
+        r = load_rotor("beaupoil_2026")
+        assert require_mass_kg(r) == r.inertia.mass_kg
+
+    def test_require_mass_rejects_missing_mass(self):
+        r = load_rotor("beaupoil_2026")
+        r.inertia.mass_kg = None
+        with pytest.raises(ValueError, match="rotor.inertia.mass_kg is required"):
+            require_mass_kg(r)
 
     def test_beaupoil_I_body_present(self):
         r = load_rotor("beaupoil_2026")

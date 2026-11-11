@@ -48,7 +48,7 @@ class BadEventLog:
         self._events: list[dict] = []
 
     # ------------------------------------------------------------------ write
-    def record(self, kind: str, t: float, phase: str, alt: float, **extra) -> None:
+    def record(self, kind: str, t: float, phase: str, alt: float, **extra: object) -> None:
         """Append one bad event."""
         self._events.append(dict(kind=kind, t=t, phase=phase, alt=alt, **extra))
 
@@ -66,13 +66,13 @@ class BadEventLog:
         return False
 
     # ----------------------------------------------------------------- query
-    def of_kind(self, kind: str, phase: "str | None" = None) -> list[dict]:
+    def of_kind(self, kind: str, phase: str | None = None) -> list[dict]:
         evs = [e for e in self._events if e["kind"] == kind]
         if phase is not None:
             evs = [e for e in evs if e["phase"] == phase]
         return evs
 
-    def count(self, kind: str, phase: "str | None" = None) -> int:
+    def count(self, kind: str, phase: str | None = None) -> int:
         return len(self.of_kind(kind, phase))
 
     def __bool__(self) -> bool:

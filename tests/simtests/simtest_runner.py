@@ -31,14 +31,25 @@ physics sees the correct swashplate tilt.
 Collective is sourced from the guided vertical channel when available,
 with ch3 kept as a legacy fallback.
 """
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 
+from arduloop.attitude_heli import HeliRateOutput
+from dynbem import (
+    RotorDefinition,
+    _OyeBEMModelLinear,
+    _OyeBEMModelTabulated,
+    _PittPetersModelLinear,
+    _PittPetersModelTabulated,
+    _QuasiStaticBEMLinear,
+    _QuasiStaticBEMTabulated,
+    _VpmRotorLinear,
+    _VpmRotorTabulated,
+)
 
 from simulation.physics_core import PhysicsCore, HubObservation
+from simulation.ic import IC
 from simulation.tether import DEFAULT_TETHER_MODEL, Tether, TetherResult
 from simulation.winch import TorqueWinchController
 from simulation.controller import HeliCyclicController
@@ -66,8 +77,19 @@ class PhysicsRunner:
     BASE_K_ANG    = PhysicsCore.BASE_K_ANG
     T_AERO_OFFSET = PhysicsCore.T_AERO_OFFSET
 
-    def __init__(self, rotor, ic, wind, *, z_floor: float = -1.0,
-                 aero_model: str = "quasi_static", aero_override=None,
+    def __init__(self, rotor: RotorDefinition, ic: IC | SimpleNamespace, wind: np.ndarray, *, z_floor: float = -1.0,
+                 aero_model: str = "quasi_static",
+                 aero_override: (
+                     _QuasiStaticBEMLinear
+                     | _QuasiStaticBEMTabulated
+                     | _PittPetersModelLinear
+                     | _PittPetersModelTabulated
+                     | _OyeBEMModelLinear
+                     | _OyeBEMModelTabulated
+                     | _VpmRotorLinear
+                     | _VpmRotorTabulated
+                     | None
+                 ) = None,
                  tether_model: str = DEFAULT_TETHER_MODEL, tether_override: Tether | None = None,
                  winch: TorqueWinchController | None = None):
         """
@@ -100,7 +122,16 @@ class PhysicsRunner:
     # ── Convenience constructor for warmup / IC generation runs ───────────────
 
     @classmethod
-    def for_warmup(cls, rotor, pos, R0, rest_length, eq_thrust, omega_spin, wind):
+    def for_warmup(
+        cls,
+        rotor: RotorDefinition,
+        pos: np.ndarray,
+        R0: np.ndarray,
+        rest_length: float,
+        eq_thrust: float,
+        omega_spin: float,
+        wind: np.ndarray,
+    ):
         ic = SimpleNamespace(
             pos        = np.asarray(pos, dtype=float),
             vel        = np.zeros(3),
@@ -165,7 +196,7 @@ class PhysicsRunner:
     def step_from_thrust(self, dt: float, thrust_cmd: float,
                          rate_roll: float, rate_pitch: float,
                          omega_body: np.ndarray,
-                         *, rest_length: "float | None" = None) -> dict:
+                         *, rest_length: float | None = None) -> dict:
         """400 Hz step for Python-AP tests using thrust [0..1].
 
         Does not drive the yaw-motor hub ODE (yaw_throttle stays None -> pure
@@ -188,10 +219,10 @@ class PhysicsRunner:
         self,
         dt: float,
         thrust_cmd: float,
-        heli_out,
+        heli_out: HeliRateOutput,
         *,
-        rest_length: "float | None" = None,
-        yaw_throttle: "float | None" = None,
+        rest_length: float | None = None,
+        yaw_throttle: float | None = None,
     ) -> dict:
         """400 Hz step for GUIDED tests.
 
@@ -220,6 +251,3 @@ class PhysicsRunner:
             yaw_throttle = float(np.clip(heli_out.yaw_cmd, 0.0, 1.0))
         return self._core.step(dt, col_act, tlon, tlat, rest_length,
                                 yaw_throttle=float(yaw_throttle))
-
-
-from tests.common.mock_ardupilot import MockArdupilot

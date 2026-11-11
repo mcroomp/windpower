@@ -31,10 +31,8 @@ import argparse
 import csv
 import math
 import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 import simulation as _simulation_pkg
@@ -42,7 +40,7 @@ _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 _LOGS_DIR = _SIM_DIR / "logs"
 
 
-from analysis.flight_log import FlightLog  # noqa: E402
+from analysis.flight_log import Bucket, FlightLog  # noqa: E402
 
 
 @dataclass
@@ -71,7 +69,7 @@ def _resolve_log_dir(target: str) -> Path:
     return _LOGS_DIR / target
 
 
-def _fmt_opt(v: Optional[float], prec: int = 2) -> str:
+def _fmt_opt(v: float | None, prec: int = 2) -> str:
     if v is None:
         return "-"
     if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
@@ -79,7 +77,7 @@ def _fmt_opt(v: Optional[float], prec: int = 2) -> str:
     return f"{v:.{prec}f}"
 
 
-def _rad_to_deg_opt(v: Optional[float]) -> Optional[float]:
+def _rad_to_deg_opt(v: float | None) -> float | None:
     if v is None:
         return None
     if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
@@ -87,7 +85,7 @@ def _rad_to_deg_opt(v: Optional[float]) -> Optional[float]:
     return math.degrees(v)
 
 
-def _is_nonzero(v: Optional[float], eps: float = 0.1) -> bool:
+def _is_nonzero(v: float | None, eps: float = 0.1) -> bool:
     if v is None:
         return False
     if isinstance(v, float) and math.isnan(v):
@@ -104,27 +102,27 @@ def _parse_text_log(path: Path, source: str) -> list[TextEvent]:
     for i, line in enumerate(lines, start=1):
         m = _RE_WALL.match(line)
         wall = m.group(1) if m else ""
-        l = line.lower()
+        normalized = line.lower()
 
-        if "seeded set_attitude_target" in l:
+        if "seeded set_attitude_target" in normalized:
             events.append(TextEvent(source, i, wall, "SET_ATT_TARGET_CMD", line.strip()))
-        elif "set_target_angle" in l:
+        elif "set_target_angle" in normalized:
             events.append(TextEvent(source, i, wall, "SET_TARGET_ANGLE_CALL", line.strip()))
-        elif "sending arm command" in l:
+        elif "sending arm command" in normalized:
             events.append(TextEvent(source, i, wall, "ARM_CMD_SENT", line.strip()))
-        elif "arm command accepted" in l:
+        elif "arm command accepted" in normalized:
             events.append(TextEvent(source, i, wall, "ARM_CMD_ACCEPTED", line.strip()))
-        elif "vehicle is armed" in l or "armed=true" in l:
+        elif "vehicle is armed" in normalized or "armed=true" in normalized:
             events.append(TextEvent(source, i, wall, "ARMED_LOG", line.strip()))
-        elif "disarming motors" in l or "armed=false" in l:
+        elif "disarming motors" in normalized or "armed=false" in normalized:
             events.append(TextEvent(source, i, wall, "DISARMED_LOG", line.strip()))
-        elif "rawes ic seed set" in l:
+        elif "rawes ic seed set" in normalized:
             events.append(TextEvent(source, i, wall, "RAWES_IC_SEED_SET", line.strip()))
 
     return events
 
 
-def _first_sim_event(fl: FlightLog, category: str, text_equals: Optional[str] = None) -> Optional[float]:
+def _first_sim_event(fl: FlightLog, category: str, text_equals: str | None = None) -> float | None:
     for ev in fl.events:
         if ev.category != category:
             continue
@@ -134,27 +132,27 @@ def _first_sim_event(fl: FlightLog, category: str, text_equals: Optional[str] = 
     return None
 
 
-def _first_tgt_time(fl: FlightLog) -> Optional[float]:
+def _first_tgt_time(fl: FlightLog) -> float | None:
     if not fl._tgt_rows:
         return None
     return fl._tgt_rows[0]["t_sim"]
 
 
-def _first_nonzero_tgt_time(fl: FlightLog, eps_deg: float = 0.1) -> Optional[float]:
+def _first_nonzero_tgt_time(fl: FlightLog, eps_deg: float = 0.1) -> float | None:
     for r in fl._tgt_rows:
         if _is_nonzero(r.get("roll"), eps_deg) or _is_nonzero(r.get("pitch"), eps_deg):
             return r["t_sim"]
     return None
 
 
-def _first_df_des_nonzero_time(fl: FlightLog, eps_deg: float = 0.1) -> Optional[float]:
+def _first_df_des_nonzero_time(fl: FlightLog, eps_deg: float = 0.1) -> float | None:
     for r in fl._df_att_rows:
         if _is_nonzero(r.get("des_roll"), eps_deg) or _is_nonzero(r.get("des_pitch"), eps_deg):
             return r["t_s"]
     return None
 
 
-def _first_nonzero_tel_mav_rate_time(fl: FlightLog, eps_rads: float = 0.01) -> Optional[float]:
+def _first_nonzero_tel_mav_rate_time(fl: FlightLog, eps_rads: float = 0.01) -> float | None:
     for r in fl.tel_rows:
         if (
             _is_nonzero(r.mav_att_target_roll_rate_rads, eps_rads)
@@ -165,14 +163,14 @@ def _first_nonzero_tel_mav_rate_time(fl: FlightLog, eps_rads: float = 0.01) -> O
     return None
 
 
-def _first_nonzero_tel_ap_rate_sp_time(fl: FlightLog, eps_rads: float = 0.01) -> Optional[float]:
+def _first_nonzero_tel_ap_rate_sp_time(fl: FlightLog, eps_rads: float = 0.01) -> float | None:
     for r in fl.tel_rows:
         if _is_nonzero(r.roll_sp_rads, eps_rads) or _is_nonzero(r.pitch_sp_rads, eps_rads):
             return r.t_sim
     return None
 
 
-def _first_nonzero_df_pid_tar_time(fl: FlightLog, eps_deg_s: float = 0.1) -> Optional[float]:
+def _first_nonzero_df_pid_tar_time(fl: FlightLog, eps_deg_s: float = 0.1) -> float | None:
     ts: list[float] = []
     for r in fl._df_pidr_rows:
         if _is_nonzero(r.get("tar"), eps_deg_s):
@@ -185,14 +183,12 @@ def _first_nonzero_df_pid_tar_time(fl: FlightLog, eps_deg_s: float = 0.1) -> Opt
     return min(ts) if ts else None
 
 
-def _bucket_events_short(bucket) -> str:
+def _bucket_events_short(bucket: Bucket) -> str:
     if not bucket.events:
         return ""
     labels: list[str] = []
     for ev in bucket.events:
-        if ev.category == "ARM":
-            labels.append(ev.text)
-        elif ev.category == "MODE":
+        if ev.category == "ARM" or ev.category == "MODE":
             labels.append(ev.text)
         elif ev.category == "RAWES":
             labels.append(f"RAWES:{ev.text[:36]}")
@@ -252,7 +248,7 @@ def _print_key_order(fl: FlightLog, text_events: list[TextEvent]) -> None:
             print(f"{ev.source}:{ev.line_no:5d} [{ev.wall_ts}] {ev.kind}: {ev.text}")
 
 
-def _print_timeline_1s(fl: FlightLog, bucket_s: float, csv_path: Optional[Path]) -> None:
+def _print_timeline_1s(fl: FlightLog, bucket_s: float, csv_path: Path | None) -> None:
     buckets = fl.buckets(bucket_s=bucket_s)
     if not buckets:
         print("\nNo telemetry/dataflash buckets available.")

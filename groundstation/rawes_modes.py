@@ -24,8 +24,20 @@ Usage
 """
 
 import math
+from collections.abc import Mapping
+from typing import Protocol
 
-from linkhub_client.messages import MavCmd, MavResult, NamedValueInt
+from linkhub_client.messages import MavCmd, MavResult, NamedValueFloat, NamedValueInt
+
+
+class MessageSender(Protocol):
+    def send_message(self, msg: NamedValueFloat | NamedValueInt, /) -> object: ...
+
+
+class RawesCommander(Protocol):
+    def command(
+        self, command: MavCmd, params: list[float], *, timeout: float,
+    ) -> Mapping[str, object]: ...
 
 # ── Mode numbers (RAWES_MODE script-generated param) ──────────────────────────
 
@@ -54,7 +66,7 @@ def enter_passive_params(yaw_trim_seed: float | None = None) -> list[float]:
 
 
 def send_rawes_command(
-    gcs,
+    gcs: RawesCommander,
     command: MavCmd,
     params: list[float] | None = None,
     *,
@@ -121,7 +133,7 @@ def anchor_ned_to_gps(dn_m: float, de_m: float, dd_m: float) -> tuple[int, int, 
     return lat_e7, lon_e7, alt_cm
 
 
-def send_anchor_ned(sim, dn_m: float, de_m: float, dd_m: float) -> None:
+def send_anchor_ned(sim: MessageSender, dn_m: float, de_m: float, dd_m: float) -> None:
     """Send the anchor at NED offset (dn_m, de_m, dd_m) from MOCK_ORIGIN_* via NAMED_VALUE_INT.
 
     `sim` is anything with `send_message(msg)`, such as a LinkHubClient or the

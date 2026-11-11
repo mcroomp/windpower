@@ -1,3 +1,4 @@
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -34,6 +35,7 @@ from linkhub_client.messages import (
     decode_message,
     encode_enum,
     RawMessage,
+    Statustext,
 )
 
 _CLOCK_DICT = {
@@ -43,7 +45,9 @@ _CLOCK_DICT = {
 }
 
 
-def test_client_waits_for_mavlink_heartbeat_before_connecting(monkeypatch) -> None:
+def test_client_waits_for_mavlink_heartbeat_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     statuses = iter(
         [
@@ -71,7 +75,9 @@ def test_client_waits_for_mavlink_heartbeat_before_connecting(monkeypatch) -> No
     assert client._target_component == 7
 
 
-def test_client_preserves_per_message_rate_results(monkeypatch) -> None:
+def test_client_preserves_per_message_rate_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     configured = [{
         "message": "ATTITUDE",
@@ -88,7 +94,10 @@ def test_client_preserves_per_message_rate_results(monkeypatch) -> None:
     assert client.set_message_rates({"ATTITUDE": 100.0}) == configured
 
 
-def test_client_uploads_through_a_polled_transfer(monkeypatch, tmp_path) -> None:
+def test_client_uploads_through_a_polled_transfer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     client = LinkHubClient()
     source = tmp_path / "rawes.lua"
     source.write_bytes(b"print('rawes')")
@@ -117,7 +126,12 @@ def test_client_uploads_through_a_polled_transfer(monkeypatch, tmp_path) -> None
         ]
     )
 
-    def request(method, path, body=None, **kwargs):
+    def request(
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        **kwargs: object,
+    ):
         requests.append((method, path, body, kwargs))
         return next(replies)
 
@@ -133,7 +147,9 @@ def test_client_uploads_through_a_polled_transfer(monkeypatch, tmp_path) -> None
     assert requests[-1][0:2] == ("DELETE", "/v1/mavlink/transfers/7")
 
 
-def test_client_reads_authoritative_vehicle_state(monkeypatch) -> None:
+def test_client_reads_authoritative_vehicle_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     monkeypatch.setattr(
         client,
@@ -160,7 +176,9 @@ def test_client_reads_authoritative_vehicle_state(monkeypatch) -> None:
     assert status["custom_mode"] == 4
 
 
-def test_client_reports_disarmed_when_the_armed_flag_is_clear(monkeypatch) -> None:
+def test_client_reports_disarmed_when_the_armed_flag_is_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     monkeypatch.setattr(
         client,
@@ -175,7 +193,9 @@ def test_client_reports_disarmed_when_the_armed_flag_is_clear(monkeypatch) -> No
     assert not client.is_armed
 
 
-def test_client_decodes_component_heartbeat_state(monkeypatch) -> None:
+def test_client_decodes_component_heartbeat_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     monkeypatch.setattr(
         client,
@@ -205,12 +225,17 @@ def test_client_decodes_component_heartbeat_state(monkeypatch) -> None:
 
 
 def test_client_sends_typed_commands_and_decodes_the_acknowledgement(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = LinkHubClient()
     requests = []
 
-    def request(method, path, body=None, **kwargs):
+    def request(
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        **kwargs: object,
+    ):
         requests.append((method, path, body))
         return {
             "command": {"type": "MAV_CMD_COMPONENT_ARM_DISARM"},
@@ -232,7 +257,9 @@ def test_client_sends_typed_commands_and_decodes_the_acknowledgement(
     assert result["after_cursor"] == "v1:3"
 
 
-def test_client_rejects_a_refused_arm_command(monkeypatch) -> None:
+def test_client_rejects_a_refused_arm_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     monkeypatch.setattr(
         client,
@@ -247,7 +274,9 @@ def test_client_rejects_a_refused_arm_command(monkeypatch) -> None:
         client.arm()
 
 
-def test_read_messages_leaves_out_heartbeats_from_non_autopilot_components(monkeypatch) -> None:
+def test_read_messages_leaves_out_heartbeats_from_non_autopilot_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
 
     def heartbeat(component_id: int, autopilot: str, cursor: str) -> dict:
@@ -286,13 +315,16 @@ def test_read_messages_leaves_out_heartbeats_from_non_autopilot_components(monke
 
     batch = client.read_messages("v1:0", "HEARTBEAT", direction="rx")
 
-    assert [message.autopilot for message in batch.messages] == [
+    assert all(isinstance(message, Heartbeat) for message in batch.messages)
+    assert [message.autopilot for message in batch.messages if isinstance(message, Heartbeat)] == [
         MavAutopilot.ARDUPILOTMEGA
     ]
     assert batch.next_cursor == "v1:3"
 
 
-def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
+def test_client_reads_finite_server_filtered_message_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     record = {
         "received_time": "2026-01-01T00:00:00Z",
@@ -307,7 +339,12 @@ def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
     }
     requests = []
 
-    def request(method, path, body=None, **kwargs):
+    def request(
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        **kwargs: object,
+    ):
         requests.append((method, path, body, kwargs))
         return {
             "records": [record],
@@ -325,7 +362,8 @@ def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
         limit=10,
     )
 
-    assert [message.text for message in batch.messages] == ["ready"]
+    assert all(isinstance(message, Statustext) for message in batch.messages)
+    assert [message.text for message in batch.messages if isinstance(message, Statustext)] == ["ready"]
     assert batch.next_cursor == "v1:15"
     assert batch.next_clock == SimClock(
         epoch=1,
@@ -360,7 +398,7 @@ def test_client_reads_finite_server_filtered_message_batch(monkeypatch) -> None:
 
 
 def test_client_decodes_generated_enum_types_and_preserves_unknown_values(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = LinkHubClient()
     records = [
@@ -402,7 +440,9 @@ def test_client_decodes_generated_enum_types_and_preserves_unknown_values(
             landed_state=MavLandedState("MAV_LANDED_STATE_FUTURE"),
         ),
     )
-    assert batch.messages[1].landed_state.name == "MAV_LANDED_STATE_FUTURE"
+    state = batch.messages[1]
+    assert isinstance(state, ExtendedSysState)
+    assert state.landed_state.name == "MAV_LANDED_STATE_FUTURE"
 
 
 def test_decode_message_projects_bitmask_and_enumeration_fields() -> None:
@@ -496,7 +536,9 @@ def test_decode_message_keeps_sensor_flags_including_unknown_names() -> None:
     assert status.onboard_control_sensors_health == {MavSysStatusSensor.SENSOR_GPS}
 
 
-def test_request_data_stream_starts_the_stream_unless_the_rate_is_zero(monkeypatch) -> None:
+def test_request_data_stream_starts_the_stream_unless_the_rate_is_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient("http://127.0.0.1:8999")
     sent = []
     monkeypatch.setattr(client, "_send_raw", lambda name, payload: sent.append((name, payload)))
@@ -543,11 +585,18 @@ def test_generated_messages_encode_enumerations_and_bitmasks_for_requests() -> N
     )
 
 
-def test_client_propagates_parameter_operation_timeouts(monkeypatch) -> None:
+def test_client_propagates_parameter_operation_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     requests = []
 
-    def request(method, path, body=None, **kwargs):
+    def request(
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        **kwargs: object,
+    ):
         requests.append((method, path, body, kwargs))
         return {"value": 12.5}
 
@@ -571,11 +620,18 @@ def test_client_propagates_parameter_operation_timeouts(monkeypatch) -> None:
     assert requests[1][3] == {"timeout": 5.0}
 
 
-def test_client_reads_selected_parameter_records(monkeypatch) -> None:
+def test_client_reads_selected_parameter_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     requests = []
 
-    def request(method, path, body=None, **kwargs):
+    def request(
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        **kwargs: object,
+    ):
         requests.append((method, path, body, kwargs))
         return {"parameters": [
             {"name": "SERVO9_MIN", "value": 1000, "type": {"type": "MAV_PARAM_TYPE_INT16"},
@@ -595,11 +651,18 @@ def test_client_reads_selected_parameter_records(monkeypatch) -> None:
     assert records["RAWES_YAW_SLP"]["after_cursor"] == "v1:8"
 
 
-def test_client_encodes_and_decodes_parameter_types(monkeypatch) -> None:
+def test_client_encodes_and_decodes_parameter_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     requests = []
 
-    def request(method, path, body=None, **kwargs):
+    def request(
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        **kwargs: object,
+    ):
         requests.append((method, path, body))
         return {
             "parameters": [
@@ -639,7 +702,11 @@ def test_client_encodes_and_decodes_parameter_types(monkeypatch) -> None:
         (1.25, MavParamType.REAL32),
     ],
 )
-def test_parameter_clients_preserve_json_numeric_types(monkeypatch, value, param_type) -> None:
+def test_parameter_clients_preserve_json_numeric_types(
+    monkeypatch: pytest.MonkeyPatch,
+    value: int | float,
+    param_type: MavParamType,
+) -> None:
     client = LinkHubClient()
     record = {
         "name": "TEST",
@@ -651,7 +718,12 @@ def test_parameter_clients_preserve_json_numeric_types(monkeypatch, value, param
     }
     requests = []
 
-    def request(method, path, body=None, **kwargs):
+    def request(
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        **kwargs: object,
+    ):
         requests.append((method, path, body))
         if path.startswith("/v1/mavlink/parameters/"):
             return record.copy()
@@ -676,10 +748,12 @@ def test_parameter_clients_preserve_json_numeric_types(monkeypatch, value, param
     assert type(written["TEST"]["value"]) is type(value)
 
 
-def test_parameter_clients_preserve_existing_error_contract(monkeypatch) -> None:
+def test_parameter_clients_preserve_existing_error_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
 
-    def request(*args, **kwargs):
+    def request(*args: object, **kwargs: object):
         raise LinkHubError("integer cannot be represented exactly")
 
     monkeypatch.setattr(client, "_request_json", request)
@@ -692,11 +766,18 @@ def test_parameter_clients_preserve_existing_error_contract(monkeypatch) -> None
         client.fetch_all_params()
 
 
-def test_client_flushes_journal_and_returns_cursor(monkeypatch) -> None:
+def test_client_flushes_journal_and_returns_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = LinkHubClient()
     requests = []
 
-    def request(method, path, body=None, **kwargs):
+    def request(
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        **kwargs: object,
+    ):
         requests.append((method, path, body, kwargs))
         return {"cursor": "v1:42"}
 

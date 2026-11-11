@@ -49,24 +49,25 @@ gyro_sigma = accel_sigma = 0.0 — noiseless for determinism.
 """
 
 import math
-import sys
-from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 import pytest
 
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
-
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
-
-_ROTOR_S = load_default_rotor()
 from simulation.controller import (AltitudeHoldController, compute_rate_cmd,
                           damp_bz_eq_lateral, HeliCyclicController)
 from simulation.sensor import PhysicalSensor
-from simulation.simtest_log import BadEventLog
+from simulation.simtest_log import BadEventLog, SimtestLog
+from simulation.rotor_physics import require_mass_kg
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
+
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(120)]
+
+
+_ROTOR_S = load_default_rotor()
 
 _IC  = load_ic()
 
@@ -87,7 +88,13 @@ WIND.flags.writeable = False
 GYRO_MATCH_TOL_RAD_S = 1e-6
 
 
-def _run(t_sim: float = T_SIM):
+class _RunResult(TypedDict):
+    events: BadEventLog
+    history: list[dict]
+    sensor_log: list[dict]
+
+
+def _run(t_sim: float = T_SIM) -> _RunResult:
     """
     Run 60 s of flight with truth-state control.  PhysicalSensor runs in shadow.
 
@@ -139,7 +146,7 @@ def _run(t_sim: float = T_SIM):
         )
 
         prev_vel   = hub_state["vel"].copy()
-        body_z_eq  = alt_ctrl.update(hub_state["pos"], target_alt, runner.tension_now, float(_ROTOR_S.inertia.mass_kg), DT)
+        body_z_eq  = alt_ctrl.update(hub_state["pos"], target_alt, runner.tension_now, require_mass_kg(_ROTOR_S), DT)
         body_z_eq  = damp_bz_eq_lateral(
             body_z_eq, hub_state["pos"], hub_state["vel"], ANCHOR,
             runner.tension_now, KD_LAT,
@@ -181,7 +188,7 @@ def _run(t_sim: float = T_SIM):
         "pos":        runner.hub_state["pos"].copy(),
         "omega_spin": runner.omega_spin,
     })
-    return dict(events=events, history=history, sensor_log=sensor_log)
+    return {"events": events, "history": history, "sensor_log": sensor_log}
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +196,7 @@ def _run(t_sim: float = T_SIM):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skip(reason="KNOWN REGRESSION: rotation matrix drift with new IC orientation (orth_err ~1%, det~0.99); pre-existing in physics/control, not solver-caused. Diagnostic needed.")
-def test_sensor_closed_loop(simtest_log):
+def test_sensor_closed_loop(simtest_log: SimtestLog):
     """Flight stable and PhysicalSensor outputs physically consistent for 60 s."""
     r = _run()
     history    = r["history"]

@@ -21,11 +21,12 @@ import json
 import math
 import os
 import sys
+from analysis._telemetry_types import _NumericColumn, _TelemetryRow
 
 M_PER_DEG_LAT = 111_320.0
 
 
-def load_telemetry(csv_path):
+def load_telemetry(csv_path: str):
     rows = []
     STRING_COLS = {'phase', 'note'}
     with open(csv_path) as f:
@@ -38,7 +39,7 @@ def load_telemetry(csv_path):
     return rows
 
 
-def interp_telem(rows, t, fields):
+def interp_telem(rows: list[_TelemetryRow], t: float, fields: list[_NumericColumn]):
     lo, hi = 0, len(rows) - 1
     if t <= rows[lo]['t_sim']:
         return {f: rows[lo][f] for f in fields}
@@ -55,7 +56,7 @@ def interp_telem(rows, t, fields):
     return {f: rows[lo][f] * (1 - a) + rows[hi][f] * a for f in fields}
 
 
-def load_gps(jsonl_path):
+def load_gps(jsonl_path: str):
     out = []
     with open(jsonl_path) as f:
         for line in f:
@@ -65,7 +66,7 @@ def load_gps(jsonl_path):
     return out
 
 
-def main(log_dir):
+def main(log_dir: str):
     csv_path   = os.path.join(log_dir, 'telemetry.csv')
     jsonl_path = os.path.join(log_dir, 'mavlink.jsonl')
 
@@ -82,7 +83,7 @@ def main(log_dir):
     print(f'GPS packets    : {len(gps)} valid (lat!=0) out of {len(all_gps)}')
     print()
 
-    FIELDS = ['pos_x', 'pos_y', 'pos_z',
+    FIELDS: list[_NumericColumn] = ['pos_x', 'pos_y', 'pos_z',
               'vel_x', 'vel_y', 'vel_z',
               'sens_vel_n', 'sens_vel_e', 'sens_vel_d',
               'rpy_yaw', 'v_horiz_ms']
@@ -111,9 +112,6 @@ def main(log_dir):
         # GPS speed and heading from vel/cog
         gps_speed = r['vel'] / 100.0
         cog_deg   = r['cog'] / 100.0
-        cog_rad   = math.radians(cog_deg)
-        gps_vN    = gps_speed * math.cos(cog_rad)
-        gps_vE    = gps_speed * math.sin(cog_rad)
 
         # Simulation values
         sim_vN    = sim['sens_vel_n']
@@ -209,7 +207,7 @@ def main(log_dir):
     print('  POSITION DRIFT  (GPS NE vs sim NE, relative to reference t)')
     print(sep)
     print(f'  Reference point: t={ref_t:.2f}s')
-    print(f'  Note: assumes sim pos_x=East, pos_y=North')
+    print('  Note: assumes sim pos_x=East, pos_y=North')
     print()
     print(f'  {"t_sim":>8}  {"gps_N":>8}  {"gps_E":>8}  {"sim_N":>8}  {"sim_E":>8}  '
           f'{"pos_err":>8}  {"dup":>5}')

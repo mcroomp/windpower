@@ -16,30 +16,28 @@ makes ``test_create_ic`` settle (or not).
 """
 import pytest
 
-pytestmark = pytest.mark.expensive
-
 import math
-import sys
-from pathlib import Path
-
 import numpy as np
-import pytest
-
-
 from dynbem        import RotorInputs
 from simulation.controller import HeliCyclicController, compute_rate_cmd
 from simulation.dynamics import RigidBodyDynamics
 from simulation.frames import build_orb_frame
 from simulation.param_defaults import coll_rad_to_thrust
-from simulation.rotor_physics import resolve_i_spin_kgm2
-from tests.unit._aero_probe import load_rotor, make_probe
+from simulation.rotor_physics import require_mass_kg, resolve_i_spin_kgm2
+from tests.common.aero_probe import load_rotor, make_probe
+
+pytestmark = pytest.mark.expensive
+
+
+
+
 
 
 # ── Setup ───────────────────────────────────────────────────────────────────
 
 _ROTOR  = load_rotor("beaupoil_2026")
 _AERO   = make_probe(_ROTOR)
-_MASS   = float(_ROTOR.inertia.mass_kg)
+_MASS   = require_mass_kg(_ROTOR)
 _I_BODY = list(_ROTOR.inertia.I_body_kgm2)
 _I_SPIN = resolve_i_spin_kgm2(_ROTOR)
 
@@ -130,7 +128,7 @@ def _R_tilt_in_direction(tilt_angle_rad: float, azimuth_rad: float) -> np.ndarra
 
 
 @pytest.mark.parametrize("azimuth_deg", [0, 45, 90, 135, 180, 225, 270, 315])
-def test_attitude_loop_converges_from_all_directions(azimuth_deg):
+def test_attitude_loop_converges_from_all_directions(azimuth_deg: int):
     """Sweep initial body_z error around all 8 cardinal+diagonal directions.
 
     With gyroscopic precession (CCW spin, FRD body_z DOWN) the hub-moment ↔
@@ -224,6 +222,7 @@ def test_acro_trim_feedforward_cancels_baseline_disturbance():
     # Run a few steps with zero rate command so the servo settles to trim.
     omega_body_zero = np.zeros(3)
     trim_thrust = coll_rad_to_thrust(-0.05)
+    tlon, tlat = trim.tilt_lon, trim.tilt_lat
     for _ in range(200):
         tlon, tlat, _ = acro.step_from_thrust(
             thrust_cmd=trim_thrust,

@@ -4,8 +4,6 @@ test_controller.py — Unit tests for simulation/controller.py.
 Covers compute_bz_tether, slerp_body_z, compute_rate_cmd, and related
 geometry helpers.
 """
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -21,7 +19,7 @@ from simulation.controller import (
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _Rz(angle_rad):
+def _Rz(angle_rad: float):
     """Rotation matrix about Z axis."""
     c, s = np.cos(angle_rad), np.sin(angle_rad)
     return np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
@@ -41,12 +39,14 @@ def test_bz_tether_unit_vector():
 def test_bz_tether_direction():
     """FRD body_z points hub→anchor.  Hub along +X from anchor → [-1,0,0]."""
     bz = compute_bz_tether([10., 0., 0.], [0., 0., 0.])
+    assert bz is not None
     np.testing.assert_allclose(bz, [-1., 0., 0.], atol=1e-12)
 
 
 def test_bz_tether_with_nonzero_anchor():
     """Hub 5 m above anchor at [10,10,0] → FRD body_z points DOWN (anchor side)."""
     bz = compute_bz_tether([10., 10., 5.], [10., 10., 0.])
+    assert bz is not None
     np.testing.assert_allclose(bz, [0., 0., -1.], atol=1e-12)
 
 
@@ -59,6 +59,7 @@ def test_bz_tether_degenerate_returns_none():
 def test_bz_tether_ned_frame():
     """FRD body_z points hub→anchor: hub 30 m north of anchor → [-1,0,0]."""
     bz = compute_bz_tether([30., 0., 0.], [0., 0., 0.])
+    assert bz is not None
     np.testing.assert_allclose(bz, [-1., 0., 0.], atol=1e-12)
 
 

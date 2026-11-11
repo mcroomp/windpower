@@ -19,16 +19,14 @@ No ground command updates are sent after start.
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+from simulation.simtest_log import SimtestLog
 from scipy.spatial.transform import Rotation
 
-
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
 
 from arduloop import (
     GuidedAttitudeController,
@@ -44,6 +42,9 @@ from simulation.telemetry_csv import TelRow, write_csv
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.simtests._rotor_helpers import load_default_rotor
+
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(300)]
+
 
 
 _ROTOR = load_default_rotor()
@@ -191,7 +192,7 @@ def _run_angle_ic_only(steps: int = 4000):
     }
 
 
-def test_steady_flight_ic_angle_only(simtest_log):
+def test_steady_flight_ic_angle_only(simtest_log: SimtestLog):
     """IC-angle-only guided control remains stable from zero cyclic initialization."""
     STEPS = 4000  # 10 s
     DRIFT_MAX = 15.0

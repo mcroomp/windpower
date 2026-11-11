@@ -13,17 +13,13 @@ Phase sequence from steady_state_starting.json IC:
   descent    -- body_z fixed; winch tension-PI reels in; Lua VZ PI descends at v_land.
   final_drop -- collective=0; winch holds; hub drops onto catch pad.
 """
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
-
 from simulation.winch import WinchController
-from simulation.simtest_log import BadEventLog
+from simulation.simtest_log import BadEventLog, SimtestLog
 from tests.simtests.simtest_ic import load_ic
 from tests.simtests.simtest_runner import PhysicsRunner
 from tests.common.mock_ardupilot import MockArdupilot
@@ -33,37 +29,41 @@ from simulation.rawes_lua_harness import RawesLua
 from groundstation.rawes_modes import MODE_LANDING, LAND_FINAL_DROP
 from tests.simtests._rotor_helpers import load_default_rotor, BODY_Z_SLEW_RATE_RAD_S
 
-_IC    = load_ic()
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(600)]
+
+
+_IC = load_ic()
 _ROTOR = load_default_rotor()
 
 # ── Timing ─────────────────────────────────────────────────────────────────────
-DT         = 1.0 / 400.0
+DT = 1.0 / 400.0
 DT_PLANNER = 1.0 / 10.0
-LUA_PERIOD = 0.010          # 100 Hz Lua ticks
-LUA_EVERY  = round(LUA_PERIOD / DT)
+LUA_PERIOD = 0.010  # 100 Hz Lua ticks
+LUA_EVERY = round(LUA_PERIOD / DT)
 
 # ── Environment ────────────────────────────────────────────────────────────────
 WIND = np.array([0.0, 10.0, 0.0])
 WIND.flags.writeable = False
-BREAK_LOAD_N         = 620.0
+BREAK_LOAD_N = 620.0
 
 # ── Landing parameters (identical to test_landing.py) ─────────────────────────
-XI_REEL_IN_DEG  = 80.0
+XI_REEL_IN_DEG = 80.0
 COL_REEL_IN_RAD = 0.079
-COL_CRUISE      = 0.079
-TENSION_DESCENT = 140.0    # N  (natural~40N + V_LAND/kp = 40+100 = 140N)
-V_LAND          = 0.5
-MIN_TETHER_M    = 2.0
+COL_CRUISE = 0.079
+TENSION_DESCENT = 140.0  # N  (natural~40N + V_LAND/kp = 40+100 = 140N)
+V_LAND = 0.5
+MIN_TETHER_M = 2.0
 
-FLOOR_ALT_M          = 1.0
+FLOOR_ALT_M = 1.0
 ANCHOR_LAND_RADIUS_M = 20.0
-T_FINAL_DROP_MAX     = 15.0
+T_FINAL_DROP_MAX = 15.0
 
 # ---------------------------------------------------------------------------
 # Simulation
 # ---------------------------------------------------------------------------
 
-def _run_landing(log) -> dict:
+
+def _run_landing(log: SimtestLog) -> dict:
     runner = PhysicsRunner(_ROTOR, _IC, WIND)
 
     # Note: xi_reel_in_deg / col_cruise_rad were dropped from the planner
@@ -72,67 +72,74 @@ def _run_landing(log) -> dict:
     # call site here is updated mechanically so it collects — physics
     # tuning of the landing phases is its own task.
     ground = LandingGroundController(
-        initial_body_z   = _IC.R0[:, 2],
-        target_length_m  = 50.0,
-        slew_rate_rad_s  = BODY_Z_SLEW_RATE_RAD_S,
-        col_reel_in_rad  = COL_REEL_IN_RAD,
-        col_vertical_rad = COL_REEL_IN_RAD,
-        col_descent_rad  = COL_CRUISE,
-        tension_descent  = TENSION_DESCENT,
-        v_land           = V_LAND,
-        min_tether_m     = MIN_TETHER_M,
+        initial_body_z=_IC.R0[:, 2],
+        target_length_m=50.0,
+        slew_rate_rad_s=BODY_Z_SLEW_RATE_RAD_S,
+        col_reel_in_rad=COL_REEL_IN_RAD,
+        col_vertical_rad=COL_REEL_IN_RAD,
+        col_descent_rad=COL_CRUISE,
+        tension_descent=TENSION_DESCENT,
+        v_land=V_LAND,
+        min_tether_m=MIN_TETHER_M,
     )
 
     winch = WinchController(
-        rest_length     = _IC.rest_length,
-        kp_tension      = 0.005,
-        v_max_out       = 0.40,
-        v_max_in        = 0.80,
-        accel_limit_ms2 = 0.5,
-        min_length      = MIN_TETHER_M,
+        rest_length=_IC.rest_length,
+        kp_tension=0.005,
+        v_max_out=0.40,
+        v_max_in=0.80,
+        accel_limit_ms2=0.5,
+        min_length=MIN_TETHER_M,
     )
 
     # ── Lua harness (AP side) ──────────────────────────────────────────────
     sim = RawesLua(mode=MODE_LANDING)
-    sim.armed        = True
-    sim.healthy      = True
-    sim.vehicle_mode = 4   # GUIDED
+    sim.armed = True
+    sim.healthy = True
+    sim.vehicle_mode = 4  # GUIDED
 
     lua = MockArdupilot.for_lua(sim, initial_thrust=_IC.eq_thrust, wind=WIND, dt=DT)
-    lua.winch  = winch   # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()
+    lua.winch = (
+        winch  # centralized winch telemetry (winch_speed_ms) -- see MockArdupilot.log()
+    )
     lua.tel_fn = lambda r, sr: dict(phase=phase)
 
-    events    = BadEventLog()
+    events = BadEventLog()
     planner_every = max(1, round(DT_PLANNER / DT))
 
-    floor_hit       = False
-    t_final_start   = None
+    floor_hit = False
+    t_final_start = None
     final_drop_sent = False
 
     tensions_desc = []
-    altitudes     = []
-    vz_at_floor   = None
-    bz_at_floor   = None
-    pos_at_floor  = None
-    touchdown_time= None
+    altitudes = []
+    vz_at_floor = None
+    bz_at_floor = None
+    pos_at_floor = None
+    touchdown_time = None
 
     # Prime first ground command
-    cmd = ground.step(0.0, 0.0, rest_length=_IC.rest_length,
-                      hub_alt_m=float(-_IC.pos[2]))
+    cmd = ground.step(
+        0.0, 0.0, rest_length=_IC.rest_length, hub_alt_m=float(-_IC.pos[2])
+    )
     winch.set_target(ground.winch_target_length, ground.winch_target_tension)
 
     descent_time = _IC.rest_length / V_LAND * 2.0 + 30.0
-    max_steps    = int((120.0 + descent_time + T_FINAL_DROP_MAX) / DT) + 1
+    max_steps = int((120.0 + descent_time + T_FINAL_DROP_MAX) / DT) + 1
 
     t_sim = 0.0
     for i in range(max_steps):
-        t_sim    = i * DT
+        t_sim = i * DT
         altitude = runner.altitude
 
         # ── Ground 10 Hz ─────────────────────────────────────────────────
         if i % planner_every == 0:
-            cmd = ground.step(t_sim, runner.tension_now,
-                              rest_length=winch.rest_length, hub_alt_m=altitude)
+            cmd = ground.step(
+                t_sim,
+                runner.tension_now,
+                rest_length=winch.rest_length,
+                hub_alt_m=altitude,
+            )
             winch.set_target(ground.winch_target_length, ground.winch_target_tension)
 
         # ── Winch 400 Hz ──────────────────────────────────────────────────
@@ -146,7 +153,7 @@ def _run_landing(log) -> dict:
         if cmd.phase == "final_drop" and not final_drop_sent:
             sim.send_message(NamedValueFloat(name="RAWES_SUB", value=LAND_FINAL_DROP))
             final_drop_sent = True
-            t_final_start   = t_sim
+            t_final_start = t_sim
 
         # ── Inner physics step driven by GuidedAttitudeController ────────
         sr = lua.step(runner, DT, rest_length=winch.rest_length)
@@ -156,13 +163,16 @@ def _run_landing(log) -> dict:
         hub_state = runner.hub_state
         if phase == "final_drop":
             if not floor_hit and altitude <= FLOOR_ALT_M:
-                floor_hit      = True
-                vz_at_floor    = float(hub_state["vel"][2])
-                bz_at_floor    = hub_state["R"][:, 2].copy()
-                pos_at_floor   = hub_state["pos"].copy()
+                floor_hit = True
+                vz_at_floor = float(hub_state["vel"][2])
+                bz_at_floor = hub_state["R"][:, 2].copy()
+                pos_at_floor = hub_state["pos"].copy()
                 touchdown_time = t_sim
                 break
-            if t_final_start is not None and (t_sim - t_final_start) >= T_FINAL_DROP_MAX:
+            if (
+                t_final_start is not None
+                and (t_sim - t_final_start) >= T_FINAL_DROP_MAX
+            ):
                 break
         elif phase == "descent":
             tensions_desc.append(runner.tension_now)
@@ -172,21 +182,23 @@ def _run_landing(log) -> dict:
         if runner.tether_result.slack:
             events.record("slack", t_sim, phase, altitude)
         if runner.tension_now > BREAK_LOAD_N:
-            events.record("tension_spike", t_sim, phase, altitude,
-                          tension=runner.tension_now)
+            events.record(
+                "tension_spike", t_sim, phase, altitude, tension=runner.tension_now
+            )
 
         # ── Telemetry 20 Hz ───────────────────────────────────────────────
         lua.log(runner, sr)
 
     # ── Results ───────────────────────────────────────────────────────────────
-    anchor_dist    = None
+    anchor_dist = None
     touchdown_tilt = None
     if pos_at_floor is not None:
         anchor_dist = float(np.linalg.norm(pos_at_floor[:2]))
     if bz_at_floor is not None:
-        bz_level       = np.array([0.0, 0.0, 1.0])   # FRD: down through disk for level hover
-        touchdown_tilt = float(np.degrees(np.arccos(
-            np.clip(np.dot(bz_at_floor, bz_level), -1.0, 1.0))))
+        bz_level = np.array([0.0, 0.0, 1.0])  # FRD: down through disk for level hover
+        touchdown_tilt = float(
+            np.degrees(np.arccos(np.clip(np.dot(bz_at_floor, bz_level), -1.0, 1.0)))
+        )
 
     parts = [
         f"alt_start={-_IC.pos[2]:.1f}m",
@@ -194,27 +206,28 @@ def _run_landing(log) -> dict:
         f"floor_hit={floor_hit}",
         f"max_desc_tension={max(tensions_desc):.0f}N" if tensions_desc else "",
     ]
-    if anchor_dist    is not None: parts.append(f"anchor_dist={anchor_dist:.1f}m")
-    if touchdown_tilt is not None: parts.append(f"tilt={touchdown_tilt:.1f}deg")
+    if anchor_dist is not None:
+        parts.append(f"anchor_dist={anchor_dist:.1f}m")
+    if touchdown_tilt is not None:
+        parts.append(f"tilt={touchdown_tilt:.1f}deg")
     parts.append(f"t_end={t_sim:.1f}s")
     for level, msg in sim.messages:
         parts.append(f"[GCS {level}] {msg}")
 
     lua.write_telemetry(log.log_dir / "telemetry.csv")
-    log.write(["(telemetry: telemetry.csv)"],
-              "  ".join(p for p in parts if p))
+    log.write(["(telemetry: telemetry.csv)"], "  ".join(p for p in parts if p))
 
     return dict(
-        t_end            = t_sim,
-        events           = events,
-        floor_hit        = floor_hit,
-        touchdown_time   = touchdown_time,
-        vz_at_floor      = vz_at_floor,
-        anchor_dist      = anchor_dist,
-        touchdown_tilt   = touchdown_tilt,
-        max_desc_tension = max(tensions_desc) if tensions_desc else None,
-        min_altitude     = min(altitudes)     if altitudes     else None,
-        messages         = sim.messages,
+        t_end=t_sim,
+        events=events,
+        floor_hit=floor_hit,
+        touchdown_time=touchdown_time,
+        vz_at_floor=vz_at_floor,
+        anchor_dist=anchor_dist,
+        touchdown_tilt=touchdown_tilt,
+        max_desc_tension=max(tensions_desc) if tensions_desc else None,
+        min_altitude=min(altitudes) if altitudes else None,
+        messages=sim.messages,
     )
 
 
@@ -222,8 +235,9 @@ def _run_landing(log) -> dict:
 # Test
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skip(reason="Landing tests disabled pending landing controller rework")
-def test_landing_lua(simtest_log):
+def test_landing_lua(simtest_log: SimtestLog):
     """rawes.lua mode=4: floor reached within anchor radius, no descent bad events."""
     r = _run_landing(simtest_log)
     failures = []
@@ -236,7 +250,9 @@ def test_landing_lua(simtest_log):
     if not r["floor_hit"]:
         failures.append("hub did not reach floor during final_drop")
     if r["anchor_dist"] is not None and r["anchor_dist"] >= ANCHOR_LAND_RADIUS_M:
-        failures.append(f"anchor_dist={r['anchor_dist']:.1f}m >= {ANCHOR_LAND_RADIUS_M}m")
+        failures.append(
+            f"anchor_dist={r['anchor_dist']:.1f}m >= {ANCHOR_LAND_RADIUS_M}m"
+        )
     if r["vz_at_floor"] is not None and r["vz_at_floor"] >= 10.0:
         failures.append(f"touchdown_vz={r['vz_at_floor']:.2f} m/s >= 10 m/s")
 

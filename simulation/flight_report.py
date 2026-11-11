@@ -5,6 +5,11 @@ No test dependencies — safe to import from scripts, notebooks, or tests.
 """
 import logging
 import math
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
 
 
 def plot_flight_report(
@@ -13,10 +18,10 @@ def plot_flight_report(
     servo_history:    list,   # [(t, s1, s2, s3, s4_pwm), ...]
     events:           dict,   # {label: t_relative_to_obs_start}
     target:           tuple,  # (N, E, D) target position in LOCAL_NED from home
-    out_path,                 # Path or str
-    telemetry_path=None,      # Path or None — mediator per-step CSV
+    out_path: str | Path,                 # Path or str
+    telemetry_path: str | Path | None = None,      # Path or None — mediator per-step CSV
     tether_length_m: float = 200.0,
-    anchor_ned: tuple = None, # (N, E, D) anchor position in LOCAL_NED from home.
+    anchor_ned: tuple | None = None, # (N, E, D) anchor position in LOCAL_NED from home.
                               # When provided, space-time panel shows horizontal
                               # distance from anchor vs altitude above anchor.
 ) -> None:
@@ -103,7 +108,7 @@ def plot_flight_report(
     t_max = max(ts_pos) if ts_pos else 60.0
     x_min = min(min(events.values(), default=0.0) - 2.0, -2.0)
 
-    def _add_events(ax):
+    def _add_events(ax: Axes):
         ax.set_xlim(x_min, t_max + 1.0)
         ylo, yhi = ax.get_ylim()
         for label, t in sorted(events.items(), key=lambda x: x[1]):

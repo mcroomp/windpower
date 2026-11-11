@@ -11,13 +11,3 @@ Fixture definitions live in:
   sitl/torque/conftest.py  — torque_armed, torque_armed_profile, torque_armed_lua
 """
 from tests.sitl.stack_infra import *  # noqa: F401,F403  — re-export everything for test imports
-from tests.sitl.stack_infra import (
-    _sitl_stack,
-    _acro_stack,
-    _torque_stack,
-    _LUA_TORQUE_EXTRA_PARAMS,
-    _RAWES_DEFAULTS_PARM,
-    _install_lua_scripts,
-    _run_acro_setup,
-    _STARTUP_DAMP_S,
-)

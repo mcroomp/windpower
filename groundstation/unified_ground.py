@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from linkhub_client.messages import NamedValueFloat
 from groundstation.pumping_planner import TensionCommand
+from groundstation.rawes_modes import MessageSender
 
 _PHASE_TO_SUB: dict[str, int] = {
     "hold":       0,
@@ -43,7 +44,7 @@ class GcsComms:
     gcs: object with send_message(msg) — e.g. LinkHubClient.
     """
 
-    def __init__(self, gcs) -> None:
+    def __init__(self, gcs: MessageSender) -> None:
         self._gcs = gcs
 
     def send(self, cmd: TensionCommand, dt: float) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -21,10 +22,10 @@ def write_cmd(path: Path, source: str) -> None:
 
 
 @pytest.fixture
-def bootstrap(tmp_path):
+def bootstrap(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
     project = tmp_path / "project with spaces"
     project.mkdir()
-    for name in ("setup.cmd", "setup.sh", "run_linkhub_ui.cmd"):
+    for name in ("setup.cmd", "setup.sh", "run_linkhub_ui.cmd", ".node-version"):
         shutil.copy2(REPO / name, project / name)
     (project / "linkhub-ui").mkdir()
     (project / "linkhub" / "target" / "release").mkdir(parents=True)
@@ -62,6 +63,7 @@ def bootstrap(tmp_path):
     write_cmd(bin_dir / "uv.template", r"""
         @echo off
         echo uv %*>>"%MOCK_LOG%"
+        if "%MOCK_FAIL%"=="ruff" if "%~5"=="ruff" exit /b 19
         if "%MOCK_FAIL%"=="%~1" exit /b 13
         exit /b 0
     """)
@@ -69,6 +71,11 @@ def bootstrap(tmp_path):
         @echo off
         echo npm %*>>"%MOCK_LOG%"
         if "%MOCK_FAIL%"=="npm-%~1" exit /b 14
+        exit /b 0
+    """)
+    write_cmd(bin_dir / "node.template", r"""
+        @echo off
+        if "%MOCK_FAIL%"=="node-version" exit /b 1
         exit /b 0
     """)
     write_cmd(bin_dir / "cargo.template", r"""
@@ -95,6 +102,13 @@ def bootstrap(tmp_path):
         @echo off
         echo winget %*>>"%MOCK_LOG%"
         if "%MOCK_FAIL%"=="winget" exit /b 16
+        if "%~1"=="show" (
+            echo 26.13.0
+            if defined MOCK_NO_NODE24 exit /b 0
+            echo 24.22.1
+            echo 24.13.0
+            exit /b 0
+        )
         if defined MOCK_INSTALL_NOOP exit /b 0
         :find_id
         if "%~1"=="--id" goto install
@@ -114,6 +128,7 @@ def bootstrap(tmp_path):
         :node
         mkdir "%ProgramFiles%\nodejs" 2>nul
         copy /y "%MOCK_BIN%\npm.template" "%ProgramFiles%\nodejs\npm.cmd" >nul
+        copy /y "%MOCK_BIN%\node.template" "%ProgramFiles%\nodejs\node.cmd" >nul
         exit /b 0
         :rust
         mkdir "%USERPROFILE%\.cargo\bin" 2>nul
@@ -127,9 +142,11 @@ def bootstrap(tmp_path):
     return project, bin_dir, log, env
 
 
-def installed_tools(bootstrap, *, sdk: bool = True) -> None:
+def installed_tools(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], *, sdk: bool = True,
+) -> None:
     _, bin_dir, _, env = bootstrap
-    for name in ("uv", "npm", "cargo", "vswhere"):
+    for name in ("uv", "node", "npm", "cargo", "vswhere"):
         shutil.copy2(bin_dir / f"{name}.template", bin_dir / f"{name}.cmd")
     Path(env["MOCK_CPP_READY"]).touch()
     if sdk:
@@ -139,7 +156,11 @@ def installed_tools(bootstrap, *, sdk: bool = True) -> None:
             path.touch()
 
 
-def run_script(bootstrap, script="setup.cmd", *args):
+def run_script(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+    script: str = "setup.cmd",
+    *args: str,
+):
     project, _, _, env = bootstrap
     command = subprocess.list2cmdline([str(project / script), *args])
     return subprocess.run(
@@ -153,22 +174,25 @@ def run_script(bootstrap, script="setup.cmd", *args):
     )
 
 
-def commands(bootstrap) -> list[str]:
+def commands(bootstrap: tuple[Path, Path, Path, dict[str, str]]) -> list[str]:
     log = bootstrap[2]
     return log.read_text().splitlines() if log.exists() else []
 
 
 @WINDOWS_ONLY
-def test_setup_bootstraps_all_missing_tools_without_python(bootstrap):
+def test_setup_bootstraps_all_missing_tools_without_python(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     result = run_script(bootstrap)
     assert result.returncode == 0, result.stdout + result.stderr
     calls = commands(bootstrap)
-    installs = [line for line in calls if line.startswith("winget ")]
+    installs = [line for line in calls if line.startswith("winget install ")]
     assert len(installs) == 4
     for package in ("astral-sh.uv", "OpenJS.NodeJS.LTS", "Rustlang.Rustup", "Microsoft.VisualStudio.2022.BuildTools"):
         assert any(f"--id {package}" in line for line in installs)
     assert any("--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" in line for line in installs)
-    assert calls.index("uv python install 3.12") < next(i for i, line in enumerate(calls) if line.startswith("uv sync "))
+    assert any("--id OpenJS.NodeJS.LTS --version 24.22.1" in line for line in installs)
+    assert calls.index("uv python install 3.14.10") < next(i for i, line in enumerate(calls) if line.startswith("uv sync "))
     assert any("--managed-python --locked --dev --extra simulation" in line for line in calls)
     assert "npm ci --no-audit --no-fund" in calls
     assert "npm run build" in calls
@@ -176,8 +200,40 @@ def test_setup_bootstraps_all_missing_tools_without_python(bootstrap):
     assert "[INFO] Done." in result.stdout
 
 
+def test_node_version_policy_is_shared_by_npm_projects():
+    major = (REPO / ".node-version").read_text().strip()
+    assert major == "24"
+    for name in ("linkhub-ui", "presentations", "am32config"):
+        project = REPO / name
+        package = json.loads((project / "package.json").read_text())
+        lock = json.loads((project / "package-lock.json").read_text())
+        assert package["engines"]["node"] == f"{major}.x"
+        assert lock["packages"][""]["engines"] == package["engines"]
+        npm_config = (project / ".npmrc").read_text().splitlines()
+        assert "engine-strict=true" in npm_config
+        assert "registry=https://packagefeedproxy.microsoft.io/npm/" in npm_config
+        assert all(
+            record["resolved"].startswith("https://packagefeedproxy.microsoft.io/npm/")
+            for record in lock["packages"].values()
+            if "resolved" in record
+        )
+
+
 @WINDOWS_ONLY
-def test_setup_reuses_tools_without_winget_and_handles_spaces(bootstrap):
+def test_setup_stops_when_winget_has_no_supported_node_release(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
+    bootstrap[3]["MOCK_NO_NODE24"] = "1"
+    result = run_script(bootstrap)
+    assert result.returncode != 0
+    assert "WinGet did not list a Node.js 24.x release" in result.stdout
+    assert not any("--id OpenJS.NodeJS.LTS --version" in line for line in commands(bootstrap))
+
+
+@WINDOWS_ONLY
+def test_setup_reuses_tools_without_winget_and_handles_spaces(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     installed_tools(bootstrap)
     project, bin_dir, _, _ = bootstrap
     (bin_dir / "winget.cmd").unlink()
@@ -185,13 +241,16 @@ def test_setup_reuses_tools_without_winget_and_handles_spaces(bootstrap):
     assert result.returncode == 0, result.stdout + result.stderr
     calls = commands(bootstrap)
     assert not any(line.startswith("winget ") for line in calls)
-    assert f'uv sync --project "{project}" --python 3.12 --managed-python --locked --dev --extra simulation' in calls
+    assert f'uv sync --project "{project}" --python 3.14.10 --managed-python --locked --dev --extra simulation' in calls
+    assert f'uv run --no-sync --project "{project}" ruff check "{project}"' in calls
     assert f'uv run --no-sync --project "{project}" python --version' in calls
 
 
 @WINDOWS_ONLY
-@pytest.mark.parametrize("stage", ["winget", "python", "sync", "npm-ci", "npm-run", "cargo", "run"])
-def test_setup_stops_on_install_or_build_failure(bootstrap, stage):
+@pytest.mark.parametrize("stage", ["winget", "node-version", "python", "sync", "ruff", "npm-ci", "npm-run", "cargo", "run"])
+def test_setup_stops_on_install_or_build_failure(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], stage: str,
+):
     if stage != "winget":
         installed_tools(bootstrap)
     bootstrap[3]["MOCK_FAIL"] = stage
@@ -199,12 +258,14 @@ def test_setup_stops_on_install_or_build_failure(bootstrap, stage):
     assert result.returncode != 0
     assert "ERROR:" in result.stdout
     assert "[INFO] Done." not in result.stdout
-    if stage in ("winget", "python", "sync"):
+    if stage in ("winget", "node-version", "python", "sync", "ruff"):
         assert not any(line.startswith("npm ") or line.startswith("cargo ") for line in commands(bootstrap))
 
 
 @WINDOWS_ONLY
-def test_setup_reports_missing_winget(bootstrap):
+def test_setup_reports_missing_winget(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     (bootstrap[1] / "winget.cmd").unlink()
     result = run_script(bootstrap)
     assert result.returncode != 0
@@ -213,7 +274,9 @@ def test_setup_reports_missing_winget(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_setup_rejects_install_success_without_an_available_tool(bootstrap):
+def test_setup_rejects_install_success_without_an_available_tool(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     bootstrap[3]["MOCK_INSTALL_NOOP"] = "1"
     result = run_script(bootstrap)
     assert result.returncode != 0
@@ -222,7 +285,9 @@ def test_setup_rejects_install_success_without_an_available_tool(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_setup_repairs_an_existing_build_tools_installation_missing_sdk(bootstrap):
+def test_setup_repairs_an_existing_build_tools_installation_missing_sdk(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     installed_tools(bootstrap, sdk=False)
     _, bin_dir, _, env = bootstrap
     env["MOCK_EXISTING_VS"] = "1"
@@ -239,7 +304,7 @@ def test_setup_repairs_an_existing_build_tools_installation_missing_sdk(bootstra
     assert any(line.startswith("visual-studio modify ") for line in commands(bootstrap))
 
 
-def server_artifacts(bootstrap) -> None:
+def server_artifacts(bootstrap: tuple[Path, Path, Path, dict[str, str]]) -> None:
     project, _, _, env = bootstrap
     env["MOCK_SERVER_EXE"] = env["COMSPEC"]
     shutil.copy2(env["COMSPEC"], project / "linkhub" / "target" / "release" / "linkhub.exe")
@@ -249,7 +314,9 @@ def server_artifacts(bootstrap) -> None:
 
 @WINDOWS_ONLY
 @pytest.mark.parametrize("missing", [None, "binary", "ui"])
-def test_launcher_delegates_setup_and_preserves_connection_arguments(bootstrap, missing):
+def test_launcher_delegates_setup_and_preserves_connection_arguments(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], missing: str | None,
+):
     installed_tools(bootstrap)
     server_artifacts(bootstrap)
     project, _, _, env = bootstrap
@@ -263,7 +330,7 @@ def test_launcher_delegates_setup_and_preserves_connection_arguments(bootstrap, 
         args.insert(0, "--build")
     result = run_script(bootstrap, "run_linkhub_ui.cmd", *args)
     assert result.returncode == 7
-    assert "uv python install 3.12" in commands(bootstrap)
+    assert "uv python install 3.14.10" in commands(bootstrap)
     assert "http://127.0.0.1:9123/" in result.stdout
     assert "Connection: tcp:127.0.0.1:5760  Baud: auto" in result.stdout
     assert "MOCK_SERVER" in result.stdout
@@ -273,7 +340,9 @@ def test_launcher_delegates_setup_and_preserves_connection_arguments(bootstrap, 
 
 
 @WINDOWS_ONLY
-def test_prebuilt_launcher_does_not_require_python_uv_or_winget(bootstrap):
+def test_prebuilt_launcher_does_not_require_python_uv_or_winget(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     server_artifacts(bootstrap)
     result = run_script(bootstrap, "run_linkhub_ui.cmd", "auto")
     assert result.returncode == 7
@@ -283,7 +352,9 @@ def test_prebuilt_launcher_does_not_require_python_uv_or_winget(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_launcher_preserves_environment_defaults_and_explicit_baud(bootstrap):
+def test_launcher_preserves_environment_defaults_and_explicit_baud(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     server_artifacts(bootstrap)
     bootstrap[3].update({
         "LINKHUB_CONNECTION": "COM42",
@@ -299,7 +370,9 @@ def test_launcher_preserves_environment_defaults_and_explicit_baud(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_launcher_does_not_start_after_setup_failure(bootstrap):
+def test_launcher_does_not_start_after_setup_failure(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
     installed_tools(bootstrap)
     server_artifacts(bootstrap)
     bootstrap[3]["MOCK_FAIL"] = "sync"
@@ -310,8 +383,10 @@ def test_launcher_does_not_start_after_setup_failure(bootstrap):
 
 
 @WINDOWS_ONLY
-def test_git_bash_delegates_to_the_windows_bootstrap(bootstrap):
-    bash = Path(os.environ["ProgramFiles"]) / "Git" / "bin" / "bash.exe"
+def test_git_bash_delegates_to_the_windows_bootstrap(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]],
+):
+    bash = Path(os.environ["PROGRAMFILES"]) / "Git" / "bin" / "bash.exe"
     if not bash.is_file():
         pytest.skip("Git Bash is not installed")
     installed_tools(bootstrap)
@@ -326,7 +401,7 @@ def test_git_bash_delegates_to_the_windows_bootstrap(bootstrap):
         timeout=20,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "uv python install 3.12" in commands(bootstrap)
+    assert "uv python install 3.14.10" in commands(bootstrap)
 
 
 def test_uv_sync_includes_the_editable_linkhub_client():

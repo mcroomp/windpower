@@ -1,8 +1,17 @@
 """Rotor physics helpers shared by simulation and tests."""
 from __future__ import annotations
+from dynbem import RotorDefinition
 
 
-def resolve_i_spin_kgm2(rotor) -> float:
+def require_mass_kg(rotor: RotorDefinition) -> float:
+    """Return configured hub mass or fail explicitly for incomplete definitions."""
+    mass = rotor.inertia.mass_kg
+    if mass is None:
+        raise ValueError(f"rotor.inertia.mass_kg is required for {rotor.name}")
+    return float(mass)
+
+
+def resolve_i_spin_kgm2(rotor: RotorDefinition) -> float:
     """Return rotor spin-axis inertia, deriving it when YAML sets null.
 
     ``I_spin_kgm2: null`` in the Beaupoil rotor definition means compute the

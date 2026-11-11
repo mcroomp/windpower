@@ -19,7 +19,36 @@ This module is a standalone analysis tool — not part of the simulation runtime
 
 import math
 import numpy as np
-from typing import Optional
+from typing import Protocol
+
+
+class _StripRotor(Protocol):
+    @property
+    def n_blades(self) -> int: ...
+
+    @property
+    def root_cutout_m(self) -> float: ...
+
+    @property
+    def radius_m(self) -> float: ...
+
+    @property
+    def chord_m(self) -> float: ...
+
+    @property
+    def rho_kg_m3(self) -> float: ...
+
+    @property
+    def CL0(self) -> float: ...
+
+    @property
+    def CL_alpha_per_rad(self) -> float: ...
+
+    @property
+    def CD0(self) -> float: ...
+
+    @property
+    def alpha_stall_deg(self) -> float: ...
 
 
 class StripThrust:
@@ -135,13 +164,15 @@ class StripThrust:
 
         # Glauert induced velocity on whole disk
         v_i = 0.0
+        Q_strips = np.zeros(self.n_strips)
+        CL_vals: list[float] = []
         for _ in range(n_iter):
             v_i = self._glauert_vi(T_total, v_ax, v_ip)
             v_eff = v_ax + v_i
 
             T_strips = np.zeros(self.n_strips)
             Q_strips = np.zeros(self.n_strips)
-            CL_vals  = []
+            CL_vals = []
             for idx, r in enumerate(self.r_i):
                 v_tan   = omega * r
                 v_loc   = math.sqrt(v_tan**2 + v_eff**2)
@@ -171,7 +202,7 @@ class StripThrust:
         }
 
 
-def from_rotor(rotor, n_strips: int = 20) -> "StripThrust":
+def from_rotor(rotor: _StripRotor, n_strips: int = 20) -> StripThrust:
     """Build a StripThrust from a RotorDefinition."""
     return StripThrust(
         n_blades      = rotor.n_blades,

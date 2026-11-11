@@ -8,26 +8,26 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 from datetime import datetime
+from pathlib import Path
 
-# msvcrt is Windows stdlib -- used for non-blocking ESC/key reads.
-# Falls back to a stub on non-Windows so the rest of the module still imports.
-try:
+if sys.platform == "win32":
     import msvcrt
-except ImportError:
-    class _MsvcrtStub:
-        def kbhit(self):    return False
-        def getch(self):    return b""
-    msvcrt = _MsvcrtStub()  # type: ignore[assignment]
 
 from .constants import _LOG_DIR
+import contextlib
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from _csv import Writer
 
 
 # ---------------------------------------------------------------------------
 # CSV cell formatter
 # ---------------------------------------------------------------------------
 
-def _fmt(v):
+def _fmt(v: object):
     """CSV cell formatter: '' for None, otherwise the value's natural repr."""
     if v is None:
         return ""
@@ -122,7 +122,7 @@ class _RunLog:
         log.row([0.0, 1, +0.02])
         log.close()
     """
-    def __init__(self, path: str, fh, writer):
+    def __init__(self, path: str, fh: TextIO, writer: Writer):
         self.path = path
         self._fh = fh
         self._w  = writer
@@ -136,9 +136,9 @@ class _RunLog:
         meta: dict,
         *,
         directory: str | Path | None = None,
-    ) -> "_RunLog":
+    ) -> _RunLog:
         path = _log_path(verb, name, directory)
-        fh = open(path, "w", newline="")
+        fh = open(path, "w", newline="")  # noqa: SIM115 - ownership transfers to _RunLog.close()
         fh.write(f"# {verb}.csv -- written by calibrate.py {verb}\n")
         for k, v in meta.items():
             fh.write(f"# {k}: {v}\n")
@@ -154,27 +154,23 @@ class _RunLog:
         self.n_rows += 1
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self._fh.close()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
-# Key polling (Windows msvcrt; stub on other platforms)
+# Key polling (Windows msvcrt; no keyboard input on other platforms)
 # ---------------------------------------------------------------------------
 
 def _esc_check() -> bool:
     """Non-blocking ESC-key check.  Returns True if ESC was pressed."""
-    seen = False
-    while msvcrt.kbhit():
-        if msvcrt.getch() == b"\x1b":
-            seen = True
-    return seen
+    return b"\x1b" in _poll_keys()
 
 
 def _poll_keys() -> list[bytes]:
     """Non-blocking: drain and return all pending keypresses (one byte each)."""
+    if sys.platform != "win32":
+        return []
     keys = []
     while msvcrt.kbhit():
         keys.append(msvcrt.getch())

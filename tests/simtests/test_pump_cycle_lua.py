@@ -19,19 +19,15 @@ Division of labour (mirrors real stack):
                           wind oracle), per the AGENTS.md no-truth-wind invariant.
 """
 import os
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-pytestmark = [pytest.mark.simtest,
-              pytest.mark.timeout(int(os.environ.get("RAWES_PUMP_TIMEOUT", "600")))]
-
 from simulation.winch import TorqueWinchController
 from simulation.winch_node import GovernedWinchNode, Anemometer
 from groundstation.winch_protocol import WinchCommand
+from simulation.simtest_log import SimtestLog
 from tests.simtests.simtest_ic import load_ic
 from simulation.simtest_log import BadEventLog
 from tests.simtests.simtest_runner import PhysicsRunner
@@ -41,6 +37,10 @@ from simulation.rawes_lua_harness import RawesLua
 from groundstation.rawes_modes import MODE_STEADY, send_anchor_ned
 from groundstation.unified_ground import GcsComms
 from tests.simtests._rotor_helpers import load_default_rotor
+
+pytestmark = [pytest.mark.simtest,
+              pytest.mark.timeout(int(os.environ.get("RAWES_PUMP_TIMEOUT", "600")))]
+
 
 _IC    = load_ic()
 _ROTOR = load_default_rotor()
@@ -77,7 +77,7 @@ T_REEL_IN_MAX  = 300.0
 T_END_SIM      = N_CYCLES * (T_REEL_OUT_MAX + T_REEL_IN_MAX) * 1.2
 
 
-def _run_pumping(log, aero_model: "str | None" = None) -> dict:
+def _run_pumping(log: SimtestLog, aero_model: str | None = None) -> dict:
     # Aero model: explicit arg wins; otherwise the RAWES_AERO env var
     # (quasi_static [default] / pitt_peters / oye / vpm) selects it.
     if aero_model is None:
@@ -172,17 +172,17 @@ def _run_pumping(log, aero_model: "str | None" = None) -> dict:
     t_sim = 0.0
     for i in range(max_steps):
         t_sim       = i * DT
-        tension_now = runner.tension_now
         altitude    = runner.altitude
 
         # Winch node feels its load cell + anemometer (physics side).
         node.update_sensors(runner.anchor_tension, WIND)
 
         # ── Detect Lua steady capture and gate the planner ───────────────
-        if not captured:
-            if any("RAWES steady: captured" in msg for _, msg in sim.messages):
-                captured = True
-                planner.notify_captured(t_sim)
+        if not captured and any(
+            "RAWES steady: captured" in msg for _, msg in sim.messages
+        ):
+            captured = True
+            planner.notify_captured(t_sim)
 
         # ── Ground 10 Hz: step planner, exchange over the cable, cmd Lua ───
         if i % planner_every == 0:
@@ -306,7 +306,7 @@ def test_lua_pumping_constants():
     assert float(f.KD_VZ)                 == pytest.approx(0.105, rel=1e-3)
 
 
-def test_lua_pumping_unified(simtest_log):
+def test_lua_pumping_unified(simtest_log: SimtestLog):
     """3 pumping cycles with rawes.lua (steady mode) + TorqueWinchController.
     Pass if no bad events (no tension spike, slack, or floor hit) -- mirrors
     test_pumping_unified."""
@@ -319,7 +319,7 @@ def test_lua_pumping_unified(simtest_log):
 
 
 @pytest.mark.skip(reason="Dynamic-inflow comparison only; quasi_static is the default flight model")
-def test_lua_pumping_unified_peters_he(simtest_log):
+def test_lua_pumping_unified_peters_he(simtest_log: SimtestLog):
     """Same as test_lua_pumping_unified but with Pitt-Peters aero (no xi limit)."""
     r = _run_pumping(simtest_log, aero_model="pitt_peters")
     failures = []

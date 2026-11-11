@@ -30,9 +30,12 @@ Shared between mediator.py (production loop) and unit/simtests (no Docker).
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
-from typing import Any, Callable, Tuple
+from numpy.typing import ArrayLike
+from typing import Any
+from collections.abc import Callable
 
 
 # ---------------------------------------------------------------------------
@@ -40,8 +43,8 @@ from typing import Any, Callable, Tuple
 # ---------------------------------------------------------------------------
 
 def compute_launch_position(
-    target_pos,
-    target_vel,
+    target_pos: ArrayLike,
+    target_vel: ArrayLike,
     damp_seconds: float,
     ramp_s: float = 0.0,
 ) -> np.ndarray:
@@ -79,12 +82,24 @@ def compute_launch_position(
 # Trajectory factory — linear + optional ramp
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class _Trajectory:
+    position_velocity: Callable[[float], tuple[np.ndarray, np.ndarray]]
+    acceleration: Callable[[float], np.ndarray]
+
+    def __call__(self, t_sim: float) -> tuple[np.ndarray, np.ndarray]:
+        return self.position_velocity(t_sim)
+
+    def accel(self, t_sim: float) -> np.ndarray:
+        return self.acceleration(t_sim)
+
+
 def make_linear_traj(
-    target_pos,
-    target_vel,
+    target_pos: ArrayLike,
+    target_vel: ArrayLike,
     duration: float,
     ramp_s: float = 0.0,
-) -> "Callable[[float], Tuple[np.ndarray, np.ndarray]]":
+) -> _Trajectory:
     """
     Return a trajectory callable for the classic linear+ramp kinematic path.
 
@@ -109,9 +124,10 @@ def make_linear_traj(
 
     Returns
     -------
-    fn : Callable[[float], tuple[ndarray, ndarray]]
-        ``fn(t_sim)`` → ``(pos, vel)`` in NED.  Caller is responsible for
-        bounding ``t_sim`` to ``[0, duration)``.
+    fn : callable
+        ``fn(t_sim)`` returns ``(pos, vel)`` in NED and ``fn.accel(t_sim)``
+        returns the NED acceleration. Caller bounds ``t_sim`` to
+        ``[0, duration)``.
     """
     target_pos   = np.asarray(target_pos, dtype=float).copy()
     target_vel   = np.asarray(target_vel, dtype=float).copy()
@@ -120,7 +136,7 @@ def make_linear_traj(
     t_ramp_start = duration - ramp_s
     ramp_start_pos = launch_pos + target_vel * t_ramp_start
 
-    def _fn(t_sim: float) -> "Tuple[np.ndarray, np.ndarray]":
+    def _fn(t_sim: float) -> tuple[np.ndarray, np.ndarray]:
         if ramp_s > 0.0 and t_sim >= t_ramp_start:
             u         = t_sim - t_ramp_start
             ramp_frac = max(0.0, (ramp_s - u) / ramp_s)
@@ -131,26 +147,25 @@ def make_linear_traj(
             vel = target_vel.copy()
         return pos, vel
 
-    def _accel(t_sim: float) -> "np.ndarray":
+    def _accel(t_sim: float) -> np.ndarray:
         if ramp_s > 0.0 and t_sim >= t_ramp_start:
             return -target_vel / ramp_s
         return np.zeros(3)
 
-    _fn.accel = _accel  # type: ignore[attr-defined]
-    return _fn
+    return _Trajectory(_fn, _accel)
 
 # ---------------------------------------------------------------------------
 # Smooth trapezoidal trajectory — raised-cosine accel/decel, ends at target_pos
 # ---------------------------------------------------------------------------
 
 def make_smooth_trapezoid_traj(
-    target_pos,
-    direction,
+    target_pos: ArrayLike,
+    direction: ArrayLike,
     duration: float,
     cruise_speed: float,
     accel_s: float,
     decel_s: float,
-) -> "Callable[[float], Tuple[np.ndarray, np.ndarray]]":
+) -> _Trajectory:
     """
     Smooth trapezoidal-speed kinematic trajectory that ends exactly at
     ``target_pos`` with zero velocity.
@@ -188,9 +203,9 @@ def make_smooth_trapezoid_traj(
 
     Returns
     -------
-    fn : Callable[[float], tuple[ndarray, ndarray]]
-        ``fn(t_sim)`` -> ``(pos, vel)`` in NED, with an ``fn.accel(t_sim)``
-        attribute returning the NED acceleration [m/s^2].
+    fn : callable
+        ``fn(t_sim)`` returns ``(pos, vel)`` in NED and ``fn.accel(t_sim)``
+        returns the NED acceleration [m/s^2].
     """
     target_pos = np.asarray(target_pos, dtype=float).copy()
     direction  = np.asarray(direction, dtype=float).copy()
@@ -211,7 +226,7 @@ def make_smooth_trapezoid_traj(
     D            = s_cruise_end + 0.5 * vmax * td
     launch_pos   = target_pos - D * direction
 
-    def _speed_dist(t: float) -> "Tuple[float, float]":
+    def _speed_dist(t: float) -> tuple[float, float]:
         if t <= 0.0:
             return 0.0, 0.0
         if t < ta:
@@ -228,11 +243,11 @@ def make_smooth_trapezoid_traj(
             return v, s
         return 0.0, D
 
-    def _fn(t_sim: float) -> "Tuple[np.ndarray, np.ndarray]":
+    def _fn(t_sim: float) -> tuple[np.ndarray, np.ndarray]:
         v, s = _speed_dist(t_sim)
         return launch_pos + s * direction, v * direction
 
-    def _accel(t_sim: float) -> "np.ndarray":
+    def _accel(t_sim: float) -> np.ndarray:
         if 0.0 < t_sim < ta:
             a = vmax * 0.5 * (math.pi / ta) * math.sin(math.pi * t_sim / ta)
             return a * direction
@@ -242,8 +257,7 @@ def make_smooth_trapezoid_traj(
             return a * direction
         return np.zeros(3)
 
-    _fn.accel = _accel  # type: ignore[attr-defined]
-    return _fn
+    return _Trajectory(_fn, _accel)
 
 # ---------------------------------------------------------------------------
 # KinematicStartup
@@ -303,13 +317,13 @@ class KinematicStartup:
 
     def __init__(
         self,
-        target_pos = None,
-        target_vel = None,
+        target_pos: ArrayLike | None = None,
+        target_vel: ArrayLike | None = None,
         duration:  float = 0.0,
         ramp_s:    float = 0.0,
-        R0:        "np.ndarray | None" = None,
-        traj_fn:   "Callable[[float], Tuple[np.ndarray, np.ndarray]] | None" = None,
-        R_fn:      "Callable[[float], np.ndarray] | None" = None,
+        R0:        np.ndarray | None = None,
+        traj_fn:   Callable[[float], tuple[np.ndarray, np.ndarray]] | None = None,
+        R_fn:      Callable[[float], np.ndarray] | None = None,
     ) -> None:
         self.duration = float(duration)
         self.R0       = (np.asarray(R0, dtype=float).copy()
@@ -376,7 +390,7 @@ class KinematicStartup:
         return max(0.0, 1.0 - t_sim / self.duration)
 
     # ------------------------------------------------------------------
-    def state_at(self, t_sim: float) -> "tuple[np.ndarray, np.ndarray] | None":
+    def state_at(self, t_sim: float) -> tuple[np.ndarray, np.ndarray] | None:
         """
         Return (pos, vel) for the kinematic trajectory at t_sim, or None if the
         kinematic phase has ended (caller should run free-flight physics).

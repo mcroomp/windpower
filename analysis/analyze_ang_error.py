@@ -59,6 +59,7 @@ from pathlib import Path
 import numpy as np
 
 import simulation as _simulation_pkg
+import contextlib
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 _LOGS_DIR = _SIM_DIR / "logs"
 
@@ -123,12 +124,12 @@ def _quat_from_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
 
 def _quat_to_axis_angle(q: np.ndarray) -> np.ndarray:
     """Return axis * angle (angle wrapped to [-pi, pi]), matching to_axis_angle()."""
-    l = math.sqrt(q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
+    norm = math.sqrt(q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
     v = np.array([q[1], q[2], q[3]])
-    if l < 1e-12:
+    if norm < 1e-12:
         return np.zeros(3)
-    ang = _wrap_pi(2.0 * math.atan2(l, q[0]))
-    return (v / l) * ang
+    ang = _wrap_pi(2.0 * math.atan2(norm, q[0]))
+    return (v / norm) * ang
 
 
 def _disk_axis(q: np.ndarray) -> np.ndarray:
@@ -263,10 +264,8 @@ def _load_dataflash(bin_path: Path, t_dyn_start_s: float) -> dict:
         if mtype == "PARM":
             name = d.get("Name", "")
             if name:
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     params[name] = float(d.get("Value", 0.0))
-                except (TypeError, ValueError):
-                    pass
             continue
         if mtype not in wanted:
             continue
@@ -297,7 +296,6 @@ def analyze(log_dir: Path, settle_s: float, observe_s: float,
     df = _load_dataflash(log_dir / "dataflash.BIN", t_dyn_start)
     att = df.get("ATT", [])
     pidy = df.get("PIDY", [])
-    rate = df.get("RATE", [])
     sim = df.get("SIM", [])
     parm = df.get("PARM", {})
     if not att:

@@ -18,20 +18,17 @@ Exported names (imported by conftest.py via ``from stack_infra import *``):
     _TORQUE_STARTUP_HOLD_S
     _STARTUP_TIMEOUT, _ARM_TIMEOUT, _MODE_TIMEOUT, _STARTUP_DAMP_S
     _static_stack
-    HOME_LAT_DEG, HOME_LON_DEG, HOME_ALT_M
 """
 import contextlib
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import json
 import logging
 import math
 import os
-import re
 import shutil
 import socket as _socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -41,12 +38,58 @@ import simulation as _simulation_pkg
 from analysis.enrich_sitl_telemetry import enrich_sitl_telemetry_from_journal
 from analysis.linkhub_journal import cursor_sequence
 
+import numpy as _np
+from tests.sitl.stack_utils import (
+    ARDUPILOT_ENV,
+    STACK_ENV_FLAG,
+    SIM_VEHICLE_ENV,
+    ParamSetup,
+    SITL_UNSUPPORTED_PARAMS,
+    _check_ardupilot_version,
+    _launch_mediator,
+    _launch_mediator_torque,
+    _launch_mediator_static,
+    _launch_linkhub,
+    _launch_sitl,
+    _resolve_sim_vehicle,
+    _terminate_process,
+    _kill_by_port,
+    _configure_logging,
+    copy_logs_to_dir,
+    make_test_log_dir,
+)
+from linkhub_client.mav_constants import GUIDED, GUIDED_NOGPS
+from linkhub_client.messages import (
+    Attitude,
+    Heartbeat,
+    AttitudeTargetTypemask,
+    decode_message,
+    EkfStatusFlags,
+    EkfStatusReport,
+    GlobalPositionInt,
+    LocalPositionNed,
+    Message,
+    NamedValueFloat,
+    ParamRequestRead,
+    Statustext,
+    SetAttitudeTarget,
+    RawMessage,
+)
+from linkhub_client.client import LinkHubClient
+from groundstation.ekf_flags import flags_to_mask
+from groundstation.rawes_modes import (
+    CMD_ENTER_PASSIVE,
+    enter_passive_params,
+    send_rawes_command,
+)
+from simulation.mediator_events import MediatorEventLog
+from simulation.ic import load_ic_dict, IC_JSON_PATH
+
 _SIM_DIR    = Path(_simulation_pkg.__file__).resolve().parent
 _SITL_DIR   = Path(__file__).resolve().parent
 _TORQUE_DIR = _SIM_DIR   # mediator_torque.py now lives in simulation/
 
 
-import numpy as _np
 
 # Optional: dynbem rotor_definition for test scripts that need it.
 # Stack tests use mediator_static.py and do not need dynbem.
@@ -61,55 +104,7 @@ def _project_default_rotor():
     from tests.simtests._rotor_helpers import load_default_rotor
     return load_default_rotor()
 
-from tests.sitl.stack_utils import (
-    ARDUPILOT_ENV,
-    STACK_ENV_FLAG,
-    SIM_VEHICLE_ENV,
-    HOME_LAT_DEG,
-    HOME_LON_DEG,
-    HOME_ALT_M,
-    ParamSetup,
-    SITL_UNSUPPORTED_PARAMS,
-    _check_ardupilot_version,
-    _launch_mediator,
-    _launch_mediator_torque,
-    _launch_mediator_static,
-    _launch_linkhub,
-    _launch_sitl,
-    _prime_sitl_eeprom,
-    _resolve_sim_vehicle,
-    _terminate_process,
-    _kill_by_port,
-    _configure_logging,
-    copy_logs_to_dir,
-    make_test_log_dir,
-    check_ports_free,
-)
 
-from linkhub_client.mav_constants import GUIDED, GUIDED_NOGPS, STABILIZE
-from linkhub_client.messages import (
-    Attitude,
-    AttitudeTargetTypemask,
-    decode_message,
-    EkfStatusFlags,
-    EkfStatusReport,
-    GlobalPositionInt,
-    LocalPositionNed,
-    ParamValue,
-    NamedValueFloat,
-    ParamRequestRead,
-    Statustext,
-    SetAttitudeTarget,
-)
-from linkhub_client.client import LinkHubClient
-from groundstation.ekf_flags import flags_to_mask
-from groundstation.rawes_modes import (
-    CMD_ENTER_PASSIVE,
-    enter_passive_params,
-    send_rawes_command,
-)
-from simulation.mediator_events import MediatorEventLog
-from simulation.ic import load_ic_dict, IC_JSON_PATH
 
 _STARTING_STATE       = IC_JSON_PATH
 _RAWES_COMMON_PARM    = _SITL_DIR / "rawes_common_defaults.parm"
@@ -242,7 +237,6 @@ class StackConfig:
         5. If still busy, restart the container (last resort).
         """
         import time as _time
-        import subprocess as _sp
         import logging as _log
 
         _clog = _log.getLogger("conftest")
@@ -264,7 +258,7 @@ class StackConfig:
             try:
                 s.bind((host, port))
                 s.close()
-            except OSError as exc:
+            except OSError:
                 s.close()
                 # Step 5: final check after a short settle; stack restart is handled
                 # by the external test orchestrator, not from inside this process.
@@ -375,7 +369,7 @@ class StackContext:
     def wait_drain(
         self,
         *,
-        until=None,
+        until: Callable[[str | None], bool] | None = None,
         timeout: float = 3.0,
         drain_s: float = 0.0,
         check_procs: bool = False,
@@ -529,10 +523,10 @@ class SitlContext:
 
 @contextlib.contextmanager
 def _sitl_stack(
-    tmp_path, *,
+    tmp_path: Path, *,
     test_name:          str = "",
-    extra_boot_params:  "dict[str, float] | None" = None,
-    base_params:        "ParamSetup | None" = None,
+    extra_boot_params:  dict[str, float] | None = None,
+    base_params:        ParamSetup | None = None,
 ):
     """
     Minimal SITL lifecycle: pre-checks → boot params → launch SITL → yield → teardown.
@@ -698,15 +692,15 @@ def _sitl_stack(
 
 @contextlib.contextmanager
 def _static_stack(
-    tmp_path,
+    tmp_path: Path,
     *,
-    pos:        "_np.ndarray",
-    vel:        "_np.ndarray",
-    rpy:        "_np.ndarray",
-    accel_body: "_np.ndarray",
-    gyro:       "_np.ndarray",
+    pos:        _np.ndarray,
+    vel:        _np.ndarray,
+    rpy:        _np.ndarray,
+    accel_body: _np.ndarray,
+    gyro:       _np.ndarray,
     test_name:          str = "",
-    extra_boot_params:  "dict[str, float] | None" = None,
+    extra_boot_params:  dict[str, float] | None = None,
 ):
     """
     SITL + static-sensor mediator: pre-checks -> boot params -> SITL ->
@@ -759,10 +753,8 @@ def _static_stack(
         except Exception as _exc:
             ctx.log.warning("_static_stack: param dump skipped: %s", _exc)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 _static_gcs.close()
-            except Exception:
-                pass
         try:
             yield ctx
         finally:
@@ -778,12 +770,12 @@ def _static_stack(
 # ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
-def _acro_stack(tmp_path, *, extra_config=None,
+def _acro_stack(tmp_path: Path, *, extra_config: dict | None = None,
                 arm: bool = True, with_mediator: bool = True, test_name: str = "",
-                extra_boot_params: "dict[str, float] | None" = None,
-                rawes_params: "dict[str, float] | None" = None,
-                arm_at_sim_s: "float | None" = None,
-                message_rates: "Mapping[str, float | None] | None" = None,
+                extra_boot_params: dict[str, float] | None = None,
+                rawes_params: dict[str, float] | None = None,
+                arm_at_sim_s: float | None = None,
+                message_rates: Mapping[str, float | None] | None = None,
                 require_yaw_alignment: bool = False):
     """
     Core GUIDED_NOGPS stack lifecycle: pre-checks → launch → [arm] → yield ctx → teardown.
@@ -967,16 +959,16 @@ def _install_lua_scripts(*names: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _arm_sequence(
-    gcs: "LinkHubClient",
-    log,
+    gcs: LinkHubClient,
+    log: logging.Logger,
     *,
-    armon_ms: "int | None" = None,
-    procs_alive=None,
-    fail=None,
+    armon_ms: int | None = None,
+    procs_alive: Callable[[], None] | None = None,
+    fail: Callable[[str], None] | None = None,
     mode_timeout: float = _MODE_TIMEOUT,
     arm_timeout: float = _ARM_TIMEOUT,
     target_mode: int = GUIDED_NOGPS,
-    pre_arm_attitude_rpy: "tuple[float, float, float] | None" = None,
+    pre_arm_attitude_rpy: tuple[float, float, float] | None = None,
 ) -> None:
     """
     Canonical arm sequence for all SITL stack tests.
@@ -1031,7 +1023,7 @@ def _arm_sequence(
     _hb, _ = _read_one(
         gcs, gcs.current_cursor(), "HEARTBEAT", wait=0.5,
     )
-    if _hb is not None:
+    if isinstance(_hb, Heartbeat):
         _actual = int(_hb.custom_mode)
     if _actual is None:
         log.info("[arm] %s confirmed by set_mode(); no immediate heartbeat for re-check.", _mode_name)
@@ -1074,7 +1066,7 @@ def _arm_sequence(
             target_system=gcs._target_system,
             target_component=gcs._target_component,
             type_mask=mask,
-            q=q,
+            q=tuple(q),
             body_roll_rate=0.0,
             body_pitch_rate=0.0,
             body_yaw_rate=0.0,
@@ -1110,7 +1102,9 @@ def _arm_sequence(
 # Setup sequence
 # ---------------------------------------------------------------------------
 
-def _dump_params_to_log(gcs, log_dir: Path, log) -> None:
+def _dump_params_to_log(
+    gcs: LinkHubClient, log_dir: Path, log: logging.Logger
+) -> None:
     """Fetch all ArduPilot params and write params.json to log_dir."""
     log.info("[params] Fetching full param dump for log ...")
     try:
@@ -1124,12 +1118,12 @@ def _dump_params_to_log(gcs, log_dir: Path, log) -> None:
 
 def _run_acro_setup(
     ctx: StackContext,
-    _procs_alive,
-    boot_setup: "ParamSetup | None" = None,
-    rawes_params: "dict[str, float] | None" = None,
-    arm_at_sim_s: "float | None" = None,
+    _procs_alive: Callable[[], None],
+    boot_setup: ParamSetup | None = None,
+    rawes_params: dict[str, float] | None = None,
+    arm_at_sim_s: float | None = None,
     use_ic_pre_arm_attitude: bool = True,
-    message_rates: "Mapping[str, float | None] | None" = None,
+    message_rates: Mapping[str, float | None] | None = None,
     require_yaw_alignment: bool = False,
 ) -> None:
     """
@@ -1483,7 +1477,7 @@ def _run_acro_setup(
             arm_timeout=_ARM_TIMEOUT,
             pre_arm_attitude_rpy=pre_arm_target_rpy,
         )
-    except Exception as exc:
+    except Exception:
         all_statustext += drain_statustext(gcs, log)
         dump_startup_diagnostics(ctx)
         raise
@@ -1653,7 +1647,7 @@ def dump_startup_diagnostics(ctx: StackContext) -> None:
     print(f"\n▶ Mediator ERROR/CRITICAL ({len(diag['mediator_errors'])}):")
     for line in diag["mediator_errors"][:10]:
         print(f"  {line}")
-    print(f"\n▶ Mediator tail (last 30 lines):")
+    print("\n▶ Mediator tail (last 30 lines):")
     for line in diag["mediator_tail"]:
         print(f"  {line}")
 
@@ -1666,7 +1660,9 @@ def dump_startup_diagnostics(ctx: StackContext) -> None:
 # Shared helpers (importable by tests)
 # ---------------------------------------------------------------------------
 
-def wait_for_acro_stability(gcs, log, timeout: float = 5.0) -> bool:
+def wait_for_acro_stability(
+    gcs: LinkHubClient, log: logging.Logger, timeout: float = 5.0
+) -> bool:
     """
     Drain MAVLink until a finite ATTITUDE message arrives or timeout.
     Returns True if a clean ATTITUDE was received.
@@ -1688,7 +1684,7 @@ def wait_for_acro_stability(gcs, log, timeout: float = 5.0) -> bool:
     return False
 
 
-def drain_statustext(gcs, log) -> list[str]:
+def drain_statustext(gcs: LinkHubClient, log: logging.Logger) -> list[str]:
     """Drain all buffered STATUSTEXT messages; return them as a list."""
     texts = []
     cursor = gcs.current_cursor()
@@ -1704,11 +1700,11 @@ def drain_statustext(gcs, log) -> list[str]:
 
 
 def observe(
-    ctx: "StackContext",
+    ctx: StackContext,
     duration_s: float,
-    on_message,
+    on_message: Callable[[Message | RawMessage | None, float], bool | None],
     *,
-    msg_types: "list[str]",
+    msg_types: list[str],
     label: str = "observation",
     recv_timeout: float = 0.2,
 ) -> None:
@@ -1744,7 +1740,7 @@ def observe(
             break
 
 
-def get_arducopter_crash_info(ctx) -> str:
+def get_arducopter_crash_info(ctx: StackContext | SitlContext) -> str:
     """
     Extract ArduPilot crash details from arducopter.log if present.
 
@@ -1772,7 +1768,9 @@ def get_arducopter_crash_info(ctx) -> str:
         return ""
 
 
-def assert_procs_alive(ctx, label: str = "observation") -> None:
+def assert_procs_alive(
+    ctx: StackContext, label: str = "observation"
+) -> None:
     """
     pytest.fail() immediately if either mediator or SITL process has exited.
 
@@ -1814,7 +1812,13 @@ def assert_no_mediator_criticals(mediator_log: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _read_one(gcs, after: str, message_types, *, wait: float):
+def _read_one(
+    gcs: LinkHubClient,
+    after: str,
+    message_types: str | list[str] | tuple[str, ...] | set[str] | None,
+    *,
+    wait: float,
+):
     batch = gcs.read_messages(
         after,
         message_types,
@@ -1826,8 +1830,8 @@ def _read_one(gcs, after: str, message_types, *, wait: float):
 
 
 def _wait_params_ready(
-    gcs,
-    log,
+    gcs: LinkHubClient,
+    log: logging.Logger,
     timeout: float = 15.0,
     *,
     param_name: str = "MAV_SYSID",
@@ -2018,22 +2022,22 @@ def _torque_stack(
     omega_rotor: float,
     profile: str = "constant",
     tail_channel: int = 8,
-    extra_params=(),
+    extra_params: ParamSetup | tuple[()] = (),
     test_name: str = "",
     install_scripts: tuple = (),
-    boot_params: "dict | None" = None,
+    boot_params: dict | None = None,
     startup_hold_s: float = _TORQUE_STARTUP_HOLD_S,
     startup_yaw_rate_deg_s: float = 0.0,
-    armon_ms: "int | None" = None,
+    armon_ms: int | None = None,
     target_mode: int = GUIDED_NOGPS,
     passive_init: bool = False,
     passive_thrust: float = 0.263,
     passive_roll_rad: float = 0.0,
     passive_pitch_rad: float = 0.0,
-    passive_yaw_rad: "float | None" = None,
+    passive_yaw_rad: float | None = None,
     use_vanilla_boot_defaults: bool = False,
     motor_delay_ms: float = 0.0,
-    mutable_param_names: "set[str] | frozenset[str]" = frozenset(),
+    mutable_param_names: set[str] | frozenset[str] = frozenset(),
 ):
     """
     Full torque-test stack lifecycle: pre-checks -> launch -> arm -> yield -> teardown.
@@ -2299,7 +2303,7 @@ def _torque_stack(
                 _att, message_cursor = _read_one(
                     gcs, message_cursor, "ATTITUDE", wait=2.0,
                 )
-                if _att is not None and all(
+                if isinstance(_att, Attitude) and all(
                     math.isfinite(v) for v in (_att.roll, _att.pitch, _att.yaw)
                 ):
                     _pre_arm_roll = float(_att.roll)
@@ -2314,7 +2318,7 @@ def _torque_stack(
                 log.info(
                     "PASSIVE seed: RAWES_THR=%.3f, ROFF=%+.4f, POFF=%+.4f, YOFF=%s; pre-arm yaw=%.1f deg",
                     passive_thrust, passive_roll_rad, passive_pitch_rad,
-                    ("%+.4f" % passive_yaw_rad) if passive_yaw_rad is not None else "capture",
+                    (f"{passive_yaw_rad:+.4f}") if passive_yaw_rad is not None else "capture",
                     math.degrees(_pre_arm_yaw),
                 )
                 _pre_arm_rpy = (_pre_arm_roll, _pre_arm_pitch, _pre_arm_yaw)

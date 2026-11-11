@@ -60,10 +60,13 @@ def test_lua_emits_set_keys_in_one_array_at_tel_hz():
     sim.vehicle_mode = 20
     sim.healthy = True
     sim.armed = True
-    assert sim.diag_array is None
+    initial_packet = sim.diag_array
+    assert initial_packet is None
     sim.run(1.2)
 
-    array_id, name, data = sim.diag_array
+    packet = sim.diag_array
+    assert packet is not None
+    array_id, name, data = packet
     assert (array_id, name) == (DIAG_ARRAY_ID, DIAG_ARRAY_NAME)
     assert len(data) == len(DIAG_KEYS) + 1
     values = sim.diag_values()

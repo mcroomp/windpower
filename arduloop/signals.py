@@ -9,6 +9,7 @@ directly comparable to logs collected from ArduPilot SITL or hardware.
 from __future__ import annotations
 
 import numpy as np
+from collections.abc import Sequence
 
 
 def step(t: np.ndarray, amplitude: float = 1.0, t0: float = 0.5) -> np.ndarray:
@@ -26,7 +27,7 @@ def logarithmic_chirp(t: np.ndarray, f0: float, f1: float,
     return amplitude * np.sin(phase)
 
 
-def multisine(t: np.ndarray, freqs_hz, amplitude: float = 1.0,
+def multisine(t: np.ndarray, freqs_hz: Sequence[float] | np.ndarray, amplitude: float = 1.0,
               seed: int | None = 0) -> np.ndarray:
     """Sum of equal-amplitude sinusoids with randomised phases.
 

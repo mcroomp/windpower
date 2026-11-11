@@ -27,11 +27,11 @@ import json
 import logging
 import socket
 import struct
-from typing import Optional
 
 import numpy as np
 
 from simulation.servo_pwm import SWASH_PWM_NEUTRAL, SWASH_PWM_RANGE
+import contextlib
 
 log = logging.getLogger(__name__)
 
@@ -100,10 +100,8 @@ class SITLInterface:
 
     def close(self) -> None:
         if self._sock is not None:
-            try:
+            with contextlib.suppress(OSError):
                 self._sock.close()
-            except OSError:
-                pass
             self._sock = None
         log.info("SITLInterface socket closed.")
 
@@ -126,7 +124,7 @@ class SITLInterface:
         accel_body:  np.ndarray,   # [ax, ay, az] m/s² in body frame
         gyro_body:   np.ndarray,   # [gx, gy, gz] rad/s in body frame
         rpm_rad_s:   float = 0.0,  # rotor spin rate [rad/s] → sent as RPM for RPM1_TYPE=10
-        battery_voltage: "float | None" = None,  # if set, overrides SITL battery sim [V]
+        battery_voltage: float | None = None,  # if set, overrides SITL battery sim [V]
     ) -> None:
         """
         Send a JSON physics state packet back to ArduPilot SITL.
@@ -191,7 +189,7 @@ class SITLInterface:
     # Servos ← SITL
     # ------------------------------------------------------------------
 
-    def recv_servos(self) -> Optional[np.ndarray]:
+    def recv_servos(self) -> np.ndarray | None:
         """
         Blocking receive of binary servo data from SITL (lockstep).
 
@@ -215,7 +213,7 @@ class SITLInterface:
 
         try:
             data, addr = self._sock.recvfrom(4096)
-        except socket.timeout:
+        except TimeoutError:
             return None
         except OSError as exc:
             log.warning("SITL recv error: %s", exc)

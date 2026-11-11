@@ -26,17 +26,19 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import FrameType
 
 # ---------------------------------------------------------------------------
 # Path setup — reach simulation/ and tests/sitl/ from any CWD
 # ---------------------------------------------------------------------------
+import contextlib
+
 _SCRIPTS_DIR = Path(__file__).resolve().parent          # scripts/
 _REPO_ROOT   = _SCRIPTS_DIR.parent                      # repo root
 _SIM_DIR     = _REPO_ROOT / "simulation"                # simulation/
 _SITL_DIR    = _REPO_ROOT / "tests" / "sitl"            # tests/sitl/
 
 from tests.sitl.stack_utils import (   # noqa: E402
-    ParamSetup,
     _launch_sitl,
     _prime_sitl_eeprom,
     _resolve_sim_vehicle,
@@ -129,14 +131,13 @@ def main() -> None:
     # Prime EEPROM: boot once with heli model to flush SCR_ENABLE=1, then kill.
     # _prime_sitl_eeprom wipes eeprom.bin before the prime boot, then kills SITL.
     print("[sitl_bench] Priming EEPROM (wipe + prime boot) ...")
-    _prime_sitl_eeprom(sim_vehicle, add_param_file=boot_parm)
+    _prime_sitl_eeprom(sim_vehicle)
     print("[sitl_bench] EEPROM primed.")
 
     # Launch SITL (--model JSON, no eeprom wipe — eeprom is already primed)
     sitl_log = tmp / "sitl.log"
     print("[sitl_bench] Launching SITL (--model JSON) ...")
-    sitl_proc = _launch_sitl(sim_vehicle, sitl_log,
-                             add_param_file=boot_parm, wipe_eeprom=False)
+    sitl_proc = _launch_sitl(sim_vehicle, sitl_log, add_param_file=boot_parm)
 
     # Launch mediator_torque (omega_rotor=0, startup hold = 24 h)
     mediator_log = tmp / "mediator.log"
@@ -171,13 +172,11 @@ def main() -> None:
 
     procs = [sitl_proc, mediator_proc, tail_proc]
 
-    def _cleanup(signum=None, frame=None):
+    def _cleanup(signum: int | None = None, frame: FrameType | None = None):
         print("\n[sitl_bench] Shutting down ...")
         for p in procs:
-            try:
+            with contextlib.suppress(Exception):
                 _terminate_process(p)
-            except Exception:
-                pass
         _kill_by_port(5760, "tcp")
         _kill_by_port(9002, "udp")
         sys.exit(0)

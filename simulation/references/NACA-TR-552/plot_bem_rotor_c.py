@@ -20,18 +20,21 @@ Shaft angle convention (alpha_s from horizontal):
     At mu=0.10, alpha_s≈58 (steeply tilted); at mu=0.90, alpha_s≈13 (nearly edge-on).
 """
 
-import sys, math, csv
+import math
 from pathlib import Path
 import numpy as np
 import matplotlib
+from dynbem import rotor_definition as rd
+from dynbem import create_aero
+from matplotlib.lines import Line2D
+from matplotlib.axes import Axes
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 HERE = Path(__file__).parent
 REPO = HERE.parents[2]
 
-from dynbem import rotor_definition as rd
-from dynbem import create_aero
 
 # ---------------------------------------------------------------------------
 # Rotor and model setup
@@ -39,8 +42,8 @@ from dynbem import create_aero
 rotor = rd.load("naca_tr_552_c")
 aero  = create_aero(rotor, model="rotor")
 
-RHO   = rotor.rho_kg_m3
-R     = rotor.radius_m
+RHO   = 1.225  # kg/m^3, NACA sea-level wind-tunnel condition
+R     = rotor.blade.radius_m
 D     = 2.0 * R                      # 3.05 m diameter
 RPM   = 99.6
 OMEGA = RPM * 2.0 * math.pi / 60.0  # 10.43 rad/s
@@ -190,7 +193,7 @@ fig.suptitle(
 Y_MIN, Y_MAX = -0.08, 0.35
 X_MIN, X_MAX =  0.0,  0.92
 
-def setup_ax(ax, title):
+def setup_ax(ax: Axes, title: str):
     ax.set_xlim(X_MIN, X_MAX)
     ax.set_ylim(Y_MIN, Y_MAX)
     ax.set_xlabel(r"Advance ratio  $\mu$", fontsize=10)
@@ -215,7 +218,7 @@ for i, pitch in enumerate(PITCHES):
 
 ax_bem.legend(title="Pitch setting", fontsize=7, title_fontsize=8,
               loc='upper right', ncol=2)
-ax_bem.annotate(f"CL_alpha={rotor.CL_alpha_per_rad:.1f}/rad\nCL0={rotor.CL0:.2f}\nCD0={rotor.CD0:.3f}",
+ax_bem.annotate(f"CL_alpha={rotor.airfoil.CL_alpha_per_rad:.1f}/rad\nCL0={rotor.airfoil.CL0:.2f}\nCD0={rotor.airfoil.CD0:.3f}",
                 xy=(0.55, 0.26), fontsize=7.5, color='#333333',
                 bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', ec='gray', alpha=0.85))
 
@@ -247,7 +250,6 @@ for i, pitch in enumerate(PITCHES):
                      color=c, lw=2.0, marker='o', ms=4, ls='-', zorder=4)
 
 # Legend proxies
-from matplotlib.lines import Line2D
 handles = [Line2D([0],[0], color='gray', lw=2, ls='--', label='BEM prediction'),
            Line2D([0],[0], color='gray', lw=2, ls='-', marker='o', ms=4, label='NACA TR-552')]
 ax_both.legend(handles=handles, fontsize=8, loc='upper right')

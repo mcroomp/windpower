@@ -31,10 +31,13 @@ import json
 import math
 import logging
 import socket
-import sys
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from simulation.planner import TrajectoryPlanner
 
 import numpy as np
 
@@ -50,10 +53,11 @@ from simulation.winch_node import GovernedWinchNode, Anemometer
 from groundstation.winch_protocol import WinchCommand
 import simulation.config as _mcfg
 from dynbem import rotor_definition as _rd
-from simulation.telemetry_csv import COLUMNS as _TEL_COLUMNS, ASYNC_MAV_COLUMNS
+from simulation.telemetry_columns import COLUMNS as _TEL_COLUMNS, ASYNC_MAV_COLUMNS
 from simulation.mediator_base import install_sigterm_handler, run_lockstep, setup_logging
 from simulation.mediator_events import MediatorEventLog
 from types import SimpleNamespace
+import contextlib
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -115,7 +119,7 @@ def _parse_args():
 # ---------------------------------------------------------------------------
 # Main mediator loop
 # ---------------------------------------------------------------------------
-def run_mediator(args, trajectory=None):
+def run_mediator(args: argparse.Namespace, trajectory: TrajectoryPlanner | None = None):
     """
     Run the mediator loop.
 
@@ -192,7 +196,10 @@ def run_mediator(args, trajectory=None):
                      decel_s=round(float(cfg["kinematic_decel_s"]), 1),
                      heading_deg=round(math.degrees(_ic_yaw), 1),
                      launch_pos=[round(v, 3) for v in _startup.launch_pos])
-        _dyn_vel0 = _startup.state_at(0.0)[1]
+        _initial_state = _startup.state_at(0.0)
+        if _initial_state is None:
+            raise RuntimeError("Kinematic startup has no initial state")
+        _dyn_vel0 = _initial_state[1]
     else:
         _startup = KinematicStartup(
             target_pos = _pos0_arr,
@@ -215,13 +222,14 @@ def run_mediator(args, trajectory=None):
     # form (e.g. "beaupoil_2026") by resolving against the project's
     # rotor_definitions/ directory.
     _rotor_spec = str(cfg["rotor_definition"])
-    if not _rotor_spec.endswith(".yaml") and not os.path.sep in _rotor_spec:
+    if not _rotor_spec.endswith(".yaml") and os.path.sep not in _rotor_spec:
         _rotor_spec = str(Path(__file__).resolve().parent
                           / "rotor_definitions" / f"{_rotor_spec}.yaml")
     rotor  = _rd.load(_rotor_spec)
     log.info("Rotor: %s (N=%d, R=%.2fm)",
              rotor.name, rotor.blade.n_blades, rotor.blade.radius_m)
-    issues = rotor.validate()
+    # dynbem attaches validate dynamically to its Python rotor class.
+    issues = getattr(rotor, "validate")()
     for issue in issues:
         if issue.level == "ERROR":
             log.error("Rotor validation: %s", issue)
@@ -300,7 +308,7 @@ def run_mediator(args, trajectory=None):
     _telemetry_file   = None
     _telemetry_writer = None
     if args.telemetry_log:
-        _telemetry_file = open(args.telemetry_log, "w", newline="", encoding="utf-8")  # noqa: WPS515
+        _telemetry_file = open(args.telemetry_log, "w", newline="", encoding="utf-8")  # noqa: SIM115 - closed in the loop's finally block
         _telemetry_writer = csv.DictWriter(_telemetry_file, fieldnames=_TEL_COLUMNS)
         _telemetry_writer.writeheader()
         log.info("Telemetry logging -> %s", args.telemetry_log)
@@ -381,7 +389,7 @@ def run_mediator(args, trajectory=None):
     # Called by run_lockstep once per servo packet. Closes over all subsystems
     # and mutable state declared above. Returns the state dict for send_state().
 
-    def step_fn(servos, t_sim):
+    def step_fn(servos: np.ndarray, t_sim: float):
         nonlocal step, last_log_time, _t_step0
         nonlocal s1, s2, s3, _traj_cmd, _logged_transition
         nonlocal _ff_t0, _blend_logged
@@ -730,10 +738,8 @@ def run_mediator(args, trajectory=None):
                 pass
 
         log.info("Closing connections ...")
-        try:
+        with contextlib.suppress(Exception):
             sitl.close()
-        except Exception:
-            pass
         log.info("Mediator stopped.")
 
 

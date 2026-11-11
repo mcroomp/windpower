@@ -30,10 +30,9 @@
   "extraPaths": [
     "linkhub_client/src"
   ],
-  "venvPath": ".",
-  "venv": ".venv",
-  "pythonVersion": "3.12",
-  "typeCheckingMode": "basic",
+  "pythonVersion": "3.14",
+  "typeCheckingMode": "standard",
+  "reportMissingParameterType": "error",
   "reportMissingImports": "warning",
   "reportMissingModuleSource": "none"
 }

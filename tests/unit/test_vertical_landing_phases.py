@@ -25,14 +25,12 @@ Phases tested (all instantaneous force balance, no dynamics loop):
     Hub in fast descent (3 m/s); tether goes slack; increase collective +0.05 rad.
     Does the flare produce sufficient net upward force to arrest the descent?
 """
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
-from tests.unit._aero_probe import load_rotor, make_probe, probe_steady
+from tests.common.aero_probe import load_rotor, make_probe, probe_steady
 
 _ROTOR = load_rotor("beaupoil_2026")
 _AERO  = make_probe(_ROTOR)
@@ -153,7 +151,7 @@ def test_vertical_hover_feasibility():
     (2.0, 100.0),
     (3.0, 150.0),
 ])
-def test_powered_descent_force_balance(v_desc_ms, tether_n):
+def test_powered_descent_force_balance(v_desc_ms: float, tether_n: float):
     """
     Hub descending at v_desc_ms m/s (NED vel_z = +v_desc_ms).
     Winch tether pulls down at tether_n N.

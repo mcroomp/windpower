@@ -130,8 +130,8 @@ def save_csv(filename, headers, *columns):
         w = csv.writer(f)
         w.writerow(headers)
         for row in zip(*columns):
-            w.writerow(["%.6f" % v for v in row])
-    print("  saved %s (%d rows)" % (filename, len(columns[0])))
+            w.writerow([f"{v:.6f}" for v in row])
+    print(f"  saved {filename} ({len(columns[0])} rows)")
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +210,12 @@ def digitize_fig10(img_path, out_dir):
                     if bid in all_t and len(all_t[bid]) > 3:
                         v_interp = np.interp(t_common, all_t[bid], all_v[bid])
                         cols.append(v_interp)
-                        headers.append("blade_%d" % bid)
+                        headers.append(f"blade_{bid}")
                     else:
                         cols.append(np.full_like(t_common, np.nan))
-                        headers.append("blade_%d" % bid)
+                        headers.append(f"blade_{bid}")
 
-                save_csv(os.path.join(out_dir, "orig_fig10_%s.csv" % name),
+                save_csv(os.path.join(out_dir, f"orig_fig10_{name}.csv"),
                          headers, *cols)
 
 def extract_curve_with_margin(img_rgb, color_name, x_range, y_range, margin=5):
@@ -291,7 +291,7 @@ def digitize_fig14(img_path, out_dir):
             else:
                 cols_out.append(np.full_like(t_common, np.nan))
 
-        save_csv(os.path.join(out_dir, "orig_fig14_%s.csv" % panel_name),
+        save_csv(os.path.join(out_dir, f"orig_fig14_{panel_name}.csv"),
                  headers, *cols_out)
 
 
@@ -345,7 +345,7 @@ def digitize_fig15(img_path, out_dir):
             else:
                 cols_out.append(np.full_like(t_common, np.nan))
 
-        save_csv(os.path.join(out_dir, "orig_fig15_%s.csv" % panel_name),
+        save_csv(os.path.join(out_dir, f"orig_fig15_{panel_name}.csv"),
                  headers, *cols_out)
 
 
@@ -362,4 +362,4 @@ if __name__ == "__main__":
     digitize_fig14(os.path.join(orig_dir, "fig14_original.png"), csv_dir)
     digitize_fig15(os.path.join(orig_dir, "fig15_original.png"), csv_dir)
 
-    print("\nDone. CSVs in %s/" % csv_dir)
+    print(f"\nDone. CSVs in {csv_dir}/")

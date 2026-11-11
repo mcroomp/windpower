@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 
 import simulation
-from dynbem import RotorInputs, create_aero, rotor_definition
+from dynbem import QuasiStaticRotorState, RotorInputs, create_aero, rotor_definition
+from dynbem._dynbem import _QuasiStaticBEMLinear
 from simulation.ic import load_ic
 
 
@@ -33,7 +34,13 @@ def _load_ic() -> SimpleNamespace:
     )
 
 
-def _moment_body(aero, state, ic: SimpleNamespace, tilt_lon: float, tilt_lat: float) -> np.ndarray:
+def _moment_body(
+    aero: _QuasiStaticBEMLinear,
+    state: QuasiStaticRotorState,
+    ic: SimpleNamespace,
+    tilt_lon: float,
+    tilt_lat: float,
+) -> np.ndarray:
     inputs = RotorInputs(
         collective_rad=ic.coll_eq_rad,
         tilt_lon=tilt_lon,

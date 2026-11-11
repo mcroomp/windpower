@@ -83,16 +83,17 @@ def _accel_param_to_radss(value: float) -> float:
 _THRUST_ERROR_ANGLE = math.radians(30.0)
 
 # Accel limits for sqrt controller (AC_AttitudeControl.h)
-_ACCEL_RP_MIN = math.radians(40.0)    # AC_ATTITUDE_ACCEL_RP_CONTROLLER_MIN_RADSS
-_ACCEL_RP_MAX = math.radians(720.0)   # AC_ATTITUDE_ACCEL_RP_CONTROLLER_MAX_RADSS
-_ACCEL_Y_MIN  = math.radians(10.0)    # AC_ATTITUDE_ACCEL_Y_CONTROLLER_MIN_RADSS
-_ACCEL_Y_MAX  = math.radians(120.0)   # AC_ATTITUDE_ACCEL_Y_CONTROLLER_MAX_RADSS
+_ACCEL_RP_MIN = math.radians(40.0)  # AC_ATTITUDE_ACCEL_RP_CONTROLLER_MIN_RADSS
+_ACCEL_RP_MAX = math.radians(720.0)  # AC_ATTITUDE_ACCEL_RP_CONTROLLER_MAX_RADSS
+_ACCEL_Y_MIN = math.radians(10.0)  # AC_ATTITUDE_ACCEL_Y_CONTROLLER_MIN_RADSS
+_ACCEL_Y_MAX = math.radians(120.0)  # AC_ATTITUDE_ACCEL_Y_CONTROLLER_MAX_RADSS
 _YAW_MAX_ERROR_ANGLE_RAD = math.radians(45.0)  # AC_ATTITUDE_YAW_MAX_ERROR_ANGLE_RAD
 
 
 # ---------------------------------------------------------------------------
 # sqrt_controller  (AP_Math/control.cpp)
 # ---------------------------------------------------------------------------
+
 
 def _sqrt_controller(error: float, p: float, accel_max: float, dt: float) -> float:
     """Piecewise proportional/sqrt controller.
@@ -103,7 +104,11 @@ def _sqrt_controller(error: float, p: float, accel_max: float, dt: float) -> flo
     if accel_max <= 0.0:
         rate = error * p
     elif p == 0.0:
-        rate = math.copysign(math.sqrt(2.0 * accel_max * abs(error)), error) if error != 0.0 else 0.0
+        rate = (
+            math.copysign(math.sqrt(2.0 * accel_max * abs(error)), error)
+            if error != 0.0
+            else 0.0
+        )
     else:
         linear_dist = accel_max / (p * p)
         if error > linear_dist:
@@ -122,7 +127,10 @@ def _sqrt_controller(error: float, p: float, accel_max: float, dt: float) -> flo
 # shape_accel  (AP_Math/control.cpp)
 # ---------------------------------------------------------------------------
 
-def _shape_accel(accel_desired: float, accel: float, jerk_max: float, dt: float) -> float:
+
+def _shape_accel(
+    accel_desired: float, accel: float, jerk_max: float, dt: float
+) -> float:
     """Jerk-limited acceleration update.  Port of shape_accel()."""
     if jerk_max <= 0.0 or dt <= 0.0:
         return accel
@@ -133,6 +141,7 @@ def _shape_accel(accel_desired: float, accel: float, jerk_max: float, dt: float)
 # ---------------------------------------------------------------------------
 # sqrt_controller_accel  (AP_Math/control.cpp)
 # ---------------------------------------------------------------------------
+
 
 def _sqrt_controller_accel(
     error: float,
@@ -147,7 +156,9 @@ def _sqrt_controller_accel(
     if second_ord_lim <= 0.0:
         return -p * rate_state if p > 0.0 else 0.0
     if p <= 0.0:
-        return 0.0 if rate_cmd == 0.0 else -(second_ord_lim / abs(rate_cmd)) * rate_state
+        return (
+            0.0 if rate_cmd == 0.0 else -(second_ord_lim / abs(rate_cmd)) * rate_state
+        )
     linear_dist = second_ord_lim / (p * p)
     if abs(error) <= linear_dist:
         return -p * rate_state
@@ -157,6 +168,7 @@ def _sqrt_controller_accel(
 # ---------------------------------------------------------------------------
 # attitude_command_model  (AC_AttitudeControl.cpp)
 # ---------------------------------------------------------------------------
+
 
 def _attitude_command_model(
     error_angle: float,
@@ -217,6 +229,7 @@ def _attitude_command_model(
 # input_shaping_ang_vel  (AC_AttitudeControl.cpp)
 # ---------------------------------------------------------------------------
 
+
 def _input_shaping_ang_vel(
     target_ang_vel: float,
     desired_ang_vel: float,
@@ -231,17 +244,23 @@ def _input_shaping_ang_vel(
     """
     if input_tc > 0.0:
         error_rate = desired_ang_vel - target_ang_vel
-        desired_ang_accel = _sqrt_controller(error_rate, 1.0 / max(input_tc, 0.01), 0.0, dt)
+        desired_ang_accel = _sqrt_controller(
+            error_rate, 1.0 / max(input_tc, 0.01), 0.0, dt
+        )
         desired_ang_vel = target_ang_vel + desired_ang_accel * dt
     if accel_max > 0.0:
         delta_ang_vel = accel_max * dt
-        return max(target_ang_vel - delta_ang_vel, min(target_ang_vel + delta_ang_vel, desired_ang_vel))
+        return max(
+            target_ang_vel - delta_ang_vel,
+            min(target_ang_vel + delta_ang_vel, desired_ang_vel),
+        )
     return desired_ang_vel
 
 
 # ---------------------------------------------------------------------------
 # inv_sqrt_controller  (AP_Math/control.cpp)
 # ---------------------------------------------------------------------------
+
 
 def _inv_sqrt_controller(output: float, p: float, D_max: float) -> float:
     """Inverse of sqrt_controller: distance -> stopping distance.  Port of inv_sqrt_controller()."""
@@ -263,6 +282,7 @@ def _inv_sqrt_controller(output: float, p: float, D_max: float) -> float:
 # thrust_vector_rotation_angles  (AC_AttitudeControl.cpp)
 # ---------------------------------------------------------------------------
 
+
 def _thrust_vector_rotation_angles(
     q_target: np.ndarray,
     q_body: np.ndarray,
@@ -281,16 +301,18 @@ def _thrust_vector_rotation_angles(
     thrust_angle       : current lean angle from vertical (rad)
     thrust_error_angle : angle between body and target thrust vectors (rad)
     """
-    rot_body   = Rotation.from_quat(q_body)
+    rot_body = Rotation.from_quat(q_body)
     rot_target = Rotation.from_quat(q_target)
 
     thrust_up = np.array([0.0, 0.0, -1.0])
 
-    body_thrust_vec   = rot_body.apply(thrust_up)
+    body_thrust_vec = rot_body.apply(thrust_up)
     target_thrust_vec = rot_target.apply(thrust_up)
 
     # Current lean angle (from vertical [0,0,-1] in NED)
-    thrust_angle = math.acos(float(np.clip(np.dot(thrust_up, body_thrust_vec), -1.0, 1.0)))
+    thrust_angle = math.acos(
+        float(np.clip(np.dot(thrust_up, body_thrust_vec), -1.0, 1.0))
+    )
 
     # Thrust-vector error angle
     cos_err = float(np.clip(np.dot(body_thrust_vec, target_thrust_vec), -1.0, 1.0))
@@ -324,6 +346,7 @@ def _thrust_vector_rotation_angles(
 # thrust_heading_rotation_angles  (AC_AttitudeControl.cpp)
 # ---------------------------------------------------------------------------
 
+
 def _thrust_heading_rotation_angles(
     q_target: np.ndarray,
     q_body: np.ndarray,
@@ -346,7 +369,9 @@ def _thrust_heading_rotation_angles(
     thrust_error_angle : angle between body and target thrust vectors (rad)
     new_q_target       : updated q_target (== q_target unless yaw was clamped)
     """
-    att_error, thrust_angle, thrust_error_angle = _thrust_vector_rotation_angles(q_target, q_body)
+    att_error, thrust_angle, thrust_error_angle = _thrust_vector_rotation_angles(
+        q_target, q_body
+    )
 
     # heading_accel_max: half of yaw accel limit, clamped to physical bounds.
     # AP: constrain(accel_max * 0.5, AC_ATTITUDE_ACCEL_Y_CONTROLLER_MIN_RADSS,
@@ -362,8 +387,10 @@ def _thrust_heading_rotation_angles(
         if abs(att_error[2]) > heading_error_max:
             # Clamp yaw error and re-derive attitude_target so the shaper
             # does not integrate unbounded yaw offset.
-            yaw_clamped = max(-heading_error_max, min(heading_error_max,
-                              _wrap_pi_scalar(att_error[2])))
+            yaw_clamped = max(
+                -heading_error_max,
+                min(heading_error_max, _wrap_pi_scalar(att_error[2])),
+            )
             att_error[2] = yaw_clamped
 
             rot_body = Rotation.from_quat(q_body)
@@ -399,6 +426,7 @@ def _wrap_pi_scalar(x: float) -> float:
 # GuidedAttitudeParams
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GuidedAttitudeParams:
     """Parameters for the GUIDED attitude outer loop.
@@ -406,6 +434,7 @@ class GuidedAttitudeParams:
     All field names match ArduPilot parameter names 1:1 so gains tuned in
     SITL transfer directly.
     """
+
     # Outer attitude P gains [rad/s per rad].  ATC_ANG_RLL/PIT/YAW_P
     ATC_ANG_RLL_P: float = 0.0
     ATC_ANG_PIT_P: float = 0.0
@@ -457,25 +486,27 @@ class GuidedAttitudeParams:
             self.ATC_INPUT_TC_YAW = self.ATC_INPUT_TC
 
     @classmethod
-    def from_ap_dict(cls, params: dict[str, float]) -> "GuidedAttitudeParams":
+    def from_ap_dict(cls, params: dict[str, float]) -> GuidedAttitudeParams:
         """Build from a flat AP params dict (e.g. from param_defaults.load_ap_params())."""
+
         def _f(key: str, default: float = 0.0) -> float:
             return float(params.get(key, default))
+
         return cls(
-            ATC_ANG_RLL_P   = _f("ATC_ANG_RLL_P"),
-            ATC_ANG_PIT_P   = _f("ATC_ANG_PIT_P"),
-            ATC_ANG_YAW_P   = _f("ATC_ANG_YAW_P"),
-            ATC_ACCEL_R_MAX = _f("ATC_ACC_R_MAX") or _f("ATC_ACCEL_R_MAX"),
-            ATC_ACCEL_P_MAX = _f("ATC_ACC_P_MAX") or _f("ATC_ACCEL_P_MAX"),
-            ATC_ACCEL_Y_MAX = _f("ATC_ACC_Y_MAX") or _f("ATC_ACCEL_Y_MAX"),
-            ATC_RATE_R_MAX  = _f("ATC_RATE_R_MAX"),
-            ATC_RATE_P_MAX  = _f("ATC_RATE_P_MAX"),
-            ATC_RATE_Y_MAX  = _f("ATC_RATE_Y_MAX"),
-            ATC_INPUT_TC    = _f("ATC_INPUT_TC"),
+            ATC_ANG_RLL_P=_f("ATC_ANG_RLL_P"),
+            ATC_ANG_PIT_P=_f("ATC_ANG_PIT_P"),
+            ATC_ANG_YAW_P=_f("ATC_ANG_YAW_P"),
+            ATC_ACCEL_R_MAX=_f("ATC_ACC_R_MAX") or _f("ATC_ACCEL_R_MAX"),
+            ATC_ACCEL_P_MAX=_f("ATC_ACC_P_MAX") or _f("ATC_ACCEL_P_MAX"),
+            ATC_ACCEL_Y_MAX=_f("ATC_ACC_Y_MAX") or _f("ATC_ACCEL_Y_MAX"),
+            ATC_RATE_R_MAX=_f("ATC_RATE_R_MAX"),
+            ATC_RATE_P_MAX=_f("ATC_RATE_P_MAX"),
+            ATC_RATE_Y_MAX=_f("ATC_RATE_Y_MAX"),
+            ATC_INPUT_TC=_f("ATC_INPUT_TC"),
         )
 
     @classmethod
-    def from_heli_params(cls, p: HeliParams) -> "GuidedAttitudeParams":
+    def from_heli_params(cls, p: HeliParams) -> GuidedAttitudeParams:
         return cls(
             ATC_ANG_RLL_P=p.ATC_ANG_RLL_P,
             ATC_ANG_PIT_P=p.ATC_ANG_PIT_P,
@@ -494,6 +525,7 @@ class GuidedAttitudeParams:
 # ---------------------------------------------------------------------------
 # GuidedAttitudeController
 # ---------------------------------------------------------------------------
+
 
 class GuidedAttitudeController:
     """Full GUIDED-mode attitude controller: slewed target + outer P + rate PIDs.
@@ -599,11 +631,13 @@ class GuidedAttitudeController:
         radians(yaw))`` which is intrinsic XYZ = extrinsic ZYX.
         ang_vel_body is zero (Copter.cpp: mode_guided.set_angle(q, Vector3f{}, ...)).
         """
-        r = Rotation.from_euler('ZYX', [yaw_deg, pitch_deg, roll_deg], degrees=True)
+        r = Rotation.from_euler("ZYX", [yaw_deg, pitch_deg, roll_deg], degrees=True)
         self._q_commanded = r.as_quat()
         self._ang_vel_body_rads[:] = 0.0
         self._rate_command_rads[:] = 0.0
-        self._last_rate_target_rads: np.ndarray = np.zeros(3)  # Initialize last rate target
+        self._last_rate_target_rads: np.ndarray = np.zeros(
+            3
+        )  # Initialize last rate target
         self._thrust_direct = None
         self._target_set = True
         self._last_target_time = sim_time
@@ -637,13 +671,15 @@ class GuidedAttitudeController:
             attitude_control->set_throttle_out(thrust_norm, apply_angle_boost=true, filt)
                 -- direct to collective; Z PID chain completely bypassed.
         """
-        r = Rotation.from_euler('ZYX', [yaw_deg, pitch_deg, roll_deg], degrees=True)
+        r = Rotation.from_euler("ZYX", [yaw_deg, pitch_deg, roll_deg], degrees=True)
         self._q_commanded = r.as_quat()
-        self._ang_vel_body_rads = np.array([
-            math.radians(roll_rate_degs),
-            math.radians(pitch_rate_degs),
-            math.radians(yaw_rate_degs),
-        ])
+        self._ang_vel_body_rads = np.array(
+            [
+                math.radians(roll_rate_degs),
+                math.radians(pitch_rate_degs),
+                math.radians(yaw_rate_degs),
+            ]
+        )
         self._rate_command_rads[:] = 0.0
         self._rate_only = False
         self._thrust_direct = float(throttle)
@@ -681,11 +717,13 @@ class GuidedAttitudeController:
         attitude and the commanded body-rate vector is shaped by the same
         acceleration/time-constant path ArduPilot uses.
         """
-        self._rate_command_rads = np.array([
-            math.radians(roll_rate_degs),
-            math.radians(pitch_rate_degs),
-            math.radians(yaw_rate_degs),
-        ])
+        self._rate_command_rads = np.array(
+            [
+                math.radians(roll_rate_degs),
+                math.radians(pitch_rate_degs),
+                math.radians(yaw_rate_degs),
+            ]
+        )
         self._ang_vel_body_rads[:] = 0.0
         self._rate_only = True
         self._thrust_direct = float(throttle)
@@ -704,7 +742,9 @@ class GuidedAttitudeController:
 
         ``R_body_ned[:,2]`` = body_z pointing toward anchor for tethered hover.
         """
-        r = Rotation.from_matrix(R_body_ned)  # body-to-NED, same convention as q_body in update()
+        r = Rotation.from_matrix(
+            R_body_ned
+        )  # body-to-NED, same convention as q_body in update()
         self._q_commanded = r.as_quat()
         self._rate_command_rads[:] = 0.0
         self._rate_only = False
@@ -737,8 +777,8 @@ class GuidedAttitudeController:
         sim_time       : current sim time (s) for timeout detection.
         """
         q_body = np.asarray(q_body_ned, dtype=float)
-        gyro   = np.asarray(gyro_body_rads, dtype=float)
-        gp     = self._gp
+        gyro = np.asarray(gyro_body_rads, dtype=float)
+        gp = self._gp
 
         # Initialise _attitude_target to body attitude on first tick (avoids
         # a step transient from identity to actual attitude at t=0).
@@ -750,7 +790,10 @@ class GuidedAttitudeController:
             self._initialized = True
 
         # Timeout: snap everything to current body and wipe slew state.
-        if self._last_target_time >= 0.0 and sim_time - self._last_target_time > self.timeout_s:
+        if (
+            self._last_target_time >= 0.0
+            and sim_time - self._last_target_time > self.timeout_s
+        ):
             self._q_commanded = q_body.copy()
             self._attitude_target = q_body.copy()
             self._ang_vel_target[:] = 0.0
@@ -785,23 +828,55 @@ class GuidedAttitudeController:
             # _attitude_target.  RATE_FF_ENAB=false is not modeled separately;
             # ArduCopter defaults it on and this is the path used by Copter.
             self._ang_vel_target[0] = _input_shaping_ang_vel(
-                self._ang_vel_target[0], self._rate_command_rads[0], accel_r, dt, gp.ATC_INPUT_TC)
+                self._ang_vel_target[0],
+                self._rate_command_rads[0],
+                accel_r,
+                dt,
+                gp.ATC_INPUT_TC,
+            )
             self._ang_vel_target[1] = _input_shaping_ang_vel(
-                self._ang_vel_target[1], self._rate_command_rads[1], accel_p, dt, gp.ATC_INPUT_TC)
+                self._ang_vel_target[1],
+                self._rate_command_rads[1],
+                accel_p,
+                dt,
+                gp.ATC_INPUT_TC,
+            )
             self._ang_vel_target[2] = _input_shaping_ang_vel(
-                self._ang_vel_target[2], self._rate_command_rads[2], accel_y, dt, gp.ATC_INPUT_TC_YAW)
+                self._ang_vel_target[2],
+                self._rate_command_rads[2],
+                accel_y,
+                dt,
+                gp.ATC_INPUT_TC if gp.ATC_INPUT_TC_YAW is None else gp.ATC_INPUT_TC_YAW,
+            )
 
-            att_error, _thrust_angle, thrust_error_angle, self._attitude_target = \
+            att_error, _thrust_angle, thrust_error_angle, self._attitude_target = (
                 _thrust_heading_rotation_angles(
-                    self._attitude_target, q_body,
-                    self._hp.yaw.P, gp.ATC_ANG_YAW_P, accel_y)
+                    self._attitude_target,
+                    q_body,
+                    self._hp.yaw.P,
+                    gp.ATC_ANG_YAW_P,
+                    accel_y,
+                )
+            )
 
-            rate_roll = _sqrt_controller(att_error[0], gp.ATC_ANG_RLL_P,
-                                         max(_ACCEL_RP_MIN, min(_ACCEL_RP_MAX, accel_r * 0.5)), dt)
-            rate_pitch = _sqrt_controller(att_error[1], gp.ATC_ANG_PIT_P,
-                                          max(_ACCEL_RP_MIN, min(_ACCEL_RP_MAX, accel_p * 0.5)), dt)
-            rate_yaw = _sqrt_controller(att_error[2], gp.ATC_ANG_YAW_P,
-                                        max(_ACCEL_Y_MIN, min(_ACCEL_Y_MAX, accel_y * 0.5)), dt)
+            rate_roll = _sqrt_controller(
+                att_error[0],
+                gp.ATC_ANG_RLL_P,
+                max(_ACCEL_RP_MIN, min(_ACCEL_RP_MAX, accel_r * 0.5)),
+                dt,
+            )
+            rate_pitch = _sqrt_controller(
+                att_error[1],
+                gp.ATC_ANG_PIT_P,
+                max(_ACCEL_RP_MIN, min(_ACCEL_RP_MAX, accel_p * 0.5)),
+                dt,
+            )
+            rate_yaw = _sqrt_controller(
+                att_error[2],
+                gp.ATC_ANG_YAW_P,
+                max(_ACCEL_Y_MIN, min(_ACCEL_Y_MAX, accel_y * 0.5)),
+                dt,
+            )
             ang_vel_body = np.array([rate_roll, rate_pitch, rate_yaw])
 
             rot_body = Rotation.from_quat(q_body)
@@ -810,17 +885,25 @@ class GuidedAttitudeController:
             if thrust_error_angle > _THRUST_ERROR_ANGLE * 2.0:
                 ang_vel_body[2] = gyro[2]
             elif thrust_error_angle > _THRUST_ERROR_ANGLE:
-                ff_scalar = 1.0 - (thrust_error_angle - _THRUST_ERROR_ANGLE) / _THRUST_ERROR_ANGLE
+                ff_scalar = (
+                    1.0
+                    - (thrust_error_angle - _THRUST_ERROR_ANGLE) / _THRUST_ERROR_ANGLE
+                )
                 ang_vel_body[0] += ang_vel_ff[0] * ff_scalar
                 ang_vel_body[1] += ang_vel_ff[1] * ff_scalar
                 ang_vel_body[2] += ang_vel_ff[2]
-                ang_vel_body[2] = gyro[2] * (1.0 - ff_scalar) + ang_vel_body[2] * ff_scalar
+                ang_vel_body[2] = (
+                    gyro[2] * (1.0 - ff_scalar) + ang_vel_body[2] * ff_scalar
+                )
             else:
                 ang_vel_body += ang_vel_ff
 
-            if max_r > 0.0: ang_vel_body[0] = max(-max_r, min(max_r, ang_vel_body[0]))
-            if max_p > 0.0: ang_vel_body[1] = max(-max_p, min(max_p, ang_vel_body[1]))
-            if max_y > 0.0: ang_vel_body[2] = max(-max_y, min(max_y, ang_vel_body[2]))
+            if max_r > 0.0:
+                ang_vel_body[0] = max(-max_r, min(max_r, ang_vel_body[0]))
+            if max_p > 0.0:
+                ang_vel_body[1] = max(-max_p, min(max_p, ang_vel_body[1]))
+            if max_y > 0.0:
+                ang_vel_body[2] = max(-max_y, min(max_y, ang_vel_body[2]))
             self._last_rate_target_rads = ang_vel_body.copy()
 
             out = self._rate_ctrl.update(
@@ -855,32 +938,63 @@ class GuidedAttitudeController:
         max_y = math.radians(gp.ATC_RATE_Y_MAX) if gp.ATC_RATE_Y_MAX > 0.0 else 0.0
 
         self._ang_vel_target[0], self._ang_accel_target[0] = _attitude_command_model(
-            _wrap_pi_scalar(err_rotvec[0]), self._ang_vel_target[0], self._ang_accel_target[0],
-            max_r, accel_r, gp.ATC_INPUT_TC, dt)
+            _wrap_pi_scalar(err_rotvec[0]),
+            self._ang_vel_target[0],
+            self._ang_accel_target[0],
+            max_r,
+            accel_r,
+            gp.ATC_INPUT_TC,
+            dt,
+        )
         self._ang_vel_target[1], self._ang_accel_target[1] = _attitude_command_model(
-            _wrap_pi_scalar(err_rotvec[1]), self._ang_vel_target[1], self._ang_accel_target[1],
-            max_p, accel_p, gp.ATC_INPUT_TC, dt)
+            _wrap_pi_scalar(err_rotvec[1]),
+            self._ang_vel_target[1],
+            self._ang_accel_target[1],
+            max_p,
+            accel_p,
+            gp.ATC_INPUT_TC,
+            dt,
+        )
         self._ang_vel_target[2], self._ang_accel_target[2] = _attitude_command_model(
-            _wrap_pi_scalar(err_rotvec[2]), self._ang_vel_target[2], self._ang_accel_target[2],
-            max_y, accel_y, gp.ATC_INPUT_TC_YAW, dt)
+            _wrap_pi_scalar(err_rotvec[2]),
+            self._ang_vel_target[2],
+            self._ang_accel_target[2],
+            max_y,
+            accel_y,
+            gp.ATC_INPUT_TC if gp.ATC_INPUT_TC_YAW is None else gp.ATC_INPUT_TC_YAW,
+            dt,
+        )
 
         # === Step 4: attitude_controller_run_quat() (thrust_heading_rotation_angles) ===
         # Error between slewed _attitude_target and actual body attitude.
         # Also clamps yaw error to prevent saturation and re-derives _attitude_target.
-        att_error, _thrust_angle, thrust_error_angle, self._attitude_target = \
+        att_error, _thrust_angle, thrust_error_angle, self._attitude_target = (
             _thrust_heading_rotation_angles(
-                self._attitude_target, q_body,
-                self._hp.yaw.P, gp.ATC_ANG_YAW_P, accel_y)
+                self._attitude_target, q_body, self._hp.yaw.P, gp.ATC_ANG_YAW_P, accel_y
+            )
+        )
 
         # Outer P-loop: attitude error -> body-frame rate correction.
         # AP: update_ang_vel_target_from_att_error(attitude_error)
         # Accel limit is halved (as in AP) and clamped to physical bounds.
-        rate_roll  = _sqrt_controller(att_error[0], gp.ATC_ANG_RLL_P,
-                                      max(_ACCEL_RP_MIN, min(_ACCEL_RP_MAX, accel_r * 0.5)), dt)
-        rate_pitch = _sqrt_controller(att_error[1], gp.ATC_ANG_PIT_P,
-                                      max(_ACCEL_RP_MIN, min(_ACCEL_RP_MAX, accel_p * 0.5)), dt)
-        rate_yaw   = _sqrt_controller(att_error[2], gp.ATC_ANG_YAW_P,
-                                      max(_ACCEL_Y_MIN,  min(_ACCEL_Y_MAX,  accel_y * 0.5)), dt)
+        rate_roll = _sqrt_controller(
+            att_error[0],
+            gp.ATC_ANG_RLL_P,
+            max(_ACCEL_RP_MIN, min(_ACCEL_RP_MAX, accel_r * 0.5)),
+            dt,
+        )
+        rate_pitch = _sqrt_controller(
+            att_error[1],
+            gp.ATC_ANG_PIT_P,
+            max(_ACCEL_RP_MIN, min(_ACCEL_RP_MAX, accel_p * 0.5)),
+            dt,
+        )
+        rate_yaw = _sqrt_controller(
+            att_error[2],
+            gp.ATC_ANG_YAW_P,
+            max(_ACCEL_Y_MIN, min(_ACCEL_Y_MAX, accel_y * 0.5)),
+            dt,
+        )
         ang_vel_body = np.array([rate_roll, rate_pitch, rate_yaw])
 
         # Feedforward: rotate _ang_vel_target from target frame into body frame.
@@ -896,7 +1010,9 @@ class GuidedAttitudeController:
             # Too much tilt error: disable roll/pitch ff entirely; lock yaw to gyro.
             ang_vel_body[2] = gyro[2]
         elif thrust_error_angle > _THRUST_ERROR_ANGLE:
-            ff_scalar = 1.0 - (thrust_error_angle - _THRUST_ERROR_ANGLE) / _THRUST_ERROR_ANGLE
+            ff_scalar = (
+                1.0 - (thrust_error_angle - _THRUST_ERROR_ANGLE) / _THRUST_ERROR_ANGLE
+            )
             ang_vel_body[0] += ang_vel_ff[0] * ff_scalar
             ang_vel_body[1] += ang_vel_ff[1] * ff_scalar
             ang_vel_body[2] += ang_vel_ff[2]
@@ -905,9 +1021,12 @@ class GuidedAttitudeController:
             ang_vel_body += ang_vel_ff
 
         # Final rate limits (ang_vel_limit)
-        if max_r > 0.0: ang_vel_body[0] = max(-max_r, min(max_r, ang_vel_body[0]))
-        if max_p > 0.0: ang_vel_body[1] = max(-max_p, min(max_p, ang_vel_body[1]))
-        if max_y > 0.0: ang_vel_body[2] = max(-max_y, min(max_y, ang_vel_body[2]))
+        if max_r > 0.0:
+            ang_vel_body[0] = max(-max_r, min(max_r, ang_vel_body[0]))
+        if max_p > 0.0:
+            ang_vel_body[1] = max(-max_p, min(max_p, ang_vel_body[1]))
+        if max_y > 0.0:
+            ang_vel_body[2] = max(-max_y, min(max_y, ang_vel_body[2]))
         self._last_rate_target_rads = ang_vel_body.copy()
 
         # === Step 5: Advance _q_commanded by ang_vel_body feedforward ===
@@ -919,7 +1038,9 @@ class GuidedAttitudeController:
         if np.any(self._ang_vel_body_rads != 0.0):
             rot_cmd_now = Rotation.from_quat(self._q_commanded)
             ang_vel_world = rot_cmd_now.apply(self._ang_vel_body_rads)
-            self._q_commanded = (rot_cmd_now * Rotation.from_rotvec(ang_vel_world * dt)).as_quat()
+            self._q_commanded = (
+                rot_cmd_now * Rotation.from_rotvec(ang_vel_world * dt)
+            ).as_quat()
 
         # === Step 6: HeliRateController (rate PIDs + swash) ===
         out = self._rate_ctrl.update(
@@ -936,7 +1057,9 @@ class GuidedAttitudeController:
             # Mirrors AP: set_throttle_out(thrust_norm, apply_angle_boost=true, filt)
             # _thrust_angle_rad is the current lean angle computed in Step 4.
             out.collective_norm_cmd = self._apply_throttle_out(
-                self._thrust_direct, q_body, _thrust_angle,
+                self._thrust_direct,
+                q_body,
+                _thrust_angle,
             )
         else:
             # set_target_angle_and_climbrate path: closed-loop altitude PID.
@@ -979,7 +1102,9 @@ class GuidedAttitudeController:
             cos_tilt_target = abs(math.cos(thrust_angle_rad))
             boost_factor = 1.0 / max(0.1, cos_tilt_target)
             coll_mid = gp.H_COL_MID_norm
-            throttle_in = (throttle_in - coll_mid) * inverted_factor * boost_factor + coll_mid
+            throttle_in = (
+                throttle_in - coll_mid
+            ) * inverted_factor * boost_factor + coll_mid
 
         throttle_in = max(0.0, min(1.0, throttle_in))
         # Convert [0,1] throttle to arduloop [-1,1] collective_norm_cmd.
@@ -1001,7 +1126,9 @@ class GuidedAttitudeController:
             self._z_target_up_m = float(pos_z_up_m)
 
         climb_rate_cms = float(self.climbrate_ms * 100.0)
-        climb_rate_cms = max(-gp.WPNAV_SPEED_DN_CMS, min(gp.WPNAV_SPEED_UP_CMS, climb_rate_cms))
+        climb_rate_cms = max(
+            -gp.WPNAV_SPEED_DN_CMS, min(gp.WPNAV_SPEED_UP_CMS, climb_rate_cms)
+        )
         climb_rate_mps = climb_rate_cms * 0.01
 
         # Integrate commanded climb-rate into a moving altitude target.
@@ -1056,13 +1183,13 @@ class GuidedAttitudeController:
     @property
     def target_euler_deg(self) -> np.ndarray:
         """Commanded target as ZYX Euler [roll, pitch, yaw] in degrees."""
-        zyx = self.target_rotation.as_euler('ZYX', degrees=True)
+        zyx = self.target_rotation.as_euler("ZYX", degrees=True)
         return np.array([zyx[2], zyx[1], zyx[0]])
 
     @property
     def attitude_target_euler_deg(self) -> np.ndarray:
         """Internal slewed _attitude_target as ZYX Euler [roll, pitch, yaw] in degrees."""
-        zyx = self.attitude_target_rotation.as_euler('ZYX', degrees=True)
+        zyx = self.attitude_target_rotation.as_euler("ZYX", degrees=True)
         return np.array([zyx[2], zyx[1], zyx[0]])
 
     @property

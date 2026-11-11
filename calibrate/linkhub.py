@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
 
 from .constants import _REPO_ROOT
 
@@ -153,7 +153,7 @@ def ensure_linkhub(
         status = _read_link_status(server)
         raise RuntimeError(
             "LinkHub could not find a Pixhawk: "
-            + (status.get("error") or "heartbeat timeout")
+            + str(status.get("error") or "heartbeat timeout")
         )
     finally:
         _stop_process(process)

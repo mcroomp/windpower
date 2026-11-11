@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import simulation
-from dynbem import rotor_definition as _rd
+from dynbem import RotorDefinition, rotor_definition as _rd
 from simulation.rotor_physics import resolve_i_spin_kgm2
 
 
@@ -28,7 +28,7 @@ def load_rotor(name: str):
     return _rd.load(str(_ROTOR_DEFS / f"{name}.yaml"))
 
 
-def dynamics_kwargs(rotor) -> dict:
+def dynamics_kwargs(rotor: RotorDefinition) -> dict:
     """Mass / inertia kwargs in the shape RigidBodyDynamics expects."""
     inertia = rotor.inertia
     if inertia.mass_kg is None:

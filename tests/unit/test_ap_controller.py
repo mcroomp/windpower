@@ -1,6 +1,4 @@
 """Unit tests for MockArdupilot's pumping Python altitude-PID collective mode."""
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -46,7 +44,7 @@ def _make_ap():
     )
 
 
-def _cmd(target=T_IC, alt=50.0, phase="reel-out"):
+def _cmd(target: float = T_IC, alt: float = 50.0, phase: str = "reel-out"):
     return TensionCommand(
         tension_target_n   = target,
         alt_m              = alt,
@@ -131,5 +129,4 @@ class TestCommsDropout:
 
         ap.receive_command(_cmd(), DT_CMD)
         assert ap.comms_ok
-
 

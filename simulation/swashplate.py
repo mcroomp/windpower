@@ -32,6 +32,7 @@ This is the single source of truth for swashplate arithmetic.
 import math
 import yaml
 import numpy as np
+from dynbem import RotorDefinition
 from simulation.param_defaults import load_collective_phys_range as _load_col_range, _resolve_default_rotor_yaml
 
 
@@ -325,10 +326,10 @@ class SwashplateServoModel:
 
     def __init__(
         self,
-        slew_rate_deg_s: "float | None" = None,
-        travel_deg:      "float | None" = None,
-        col_min_rad:     "float | None" = None,
-        col_max_rad:     "float | None" = None,
+        slew_rate_deg_s: float | None = None,
+        travel_deg:      float | None = None,
+        col_min_rad:     float | None = None,
+        col_max_rad:     float | None = None,
         h_col_min:       float = 1000.0,
         h_col_max:       float = 2000.0,
     ):
@@ -353,9 +354,9 @@ class SwashplateServoModel:
         ))
 
     @classmethod
-    def from_rotor(cls, rotor,
+    def from_rotor(cls, rotor: RotorDefinition,
                    h_col_min: float = 1000.0,
-                   h_col_max: float = 2000.0) -> "SwashplateServoModel":
+                   h_col_max: float = 2000.0) -> SwashplateServoModel:
         if rotor.control is None:
             raise ValueError("rotor.control must be set to construct SwashplateServoModel")
         slew = rotor.control.servo_slew_rate_deg_s
@@ -373,7 +374,7 @@ class SwashplateServoModel:
         )
 
     def step(self, collective_rad_cmd: float, tilt_lon_cmd: float,
-             tilt_lat_cmd: float, dt: float) -> "tuple[float, float, float]":
+             tilt_lat_cmd: float, dt: float) -> tuple[float, float, float]:
         """
         Advance one timestep.
 
@@ -400,7 +401,7 @@ class SwashplateServoModel:
         col_rad = collective_out_to_rad(col_out, self._col_min, self._col_max)
         return float(col_rad), float(tlon), float(tlat)
 
-    def reset(self, collective_rad: float = None, tilt_lon: float = 0.0,
+    def reset(self, collective_rad: float | None = None, tilt_lon: float = 0.0,
               tilt_lat: float = 0.0) -> None:
         if collective_rad is None:
             collective_rad = self._col_min

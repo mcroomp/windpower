@@ -76,7 +76,7 @@ class VirtualComms:
         # deque of (t_injected, raw_hub_alt_m)
         self._down_buf: deque[tuple[float, float]] = deque()
         # deque of (t_sent, TensionCommand)
-        self._up_buf:   deque[tuple[float, object]] = deque()
+        self._up_buf:   deque[tuple[float, TensionCommand]] = deque()
 
     def inject(self, t_sim: float, hub_alt_m: float) -> None:
         """Feed current physics truth into the downlink buffer (call every 400 Hz step)."""
@@ -98,11 +98,11 @@ class VirtualComms:
             raw_alt += float(self._rng.normal(0.0, self._alt_noise))
         return HubTelemetry(hub_alt_m=raw_alt)
 
-    def send_command(self, t_sim: float, cmd: "TensionCommand") -> None:
+    def send_command(self, t_sim: float, cmd: TensionCommand) -> None:
         """Queue a TensionCommand for delivery to the AP after one-way latency."""
         self._up_buf.append((float(t_sim), cmd))
 
-    def poll_ap_command(self, t_now: float) -> "TensionCommand | None":
+    def poll_ap_command(self, t_now: float) -> TensionCommand | None:
         """
         Return the oldest queued command whose latency has elapsed, or None.
         Call at 10 Hz in the test loop; forward result to ap.receive_command().
@@ -112,4 +112,3 @@ class VirtualComms:
             _, cmd = self._up_buf.popleft()
             return cmd
         return None
-

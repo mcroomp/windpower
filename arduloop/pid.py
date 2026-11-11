@@ -31,7 +31,7 @@ Notes
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .filters import LowPassFilter1p, NotchFilter
 from .params import RateAxisParams
@@ -168,7 +168,7 @@ class PIDDebug:
     actual:    float = 0.0
     error:     float = 0.0
     P:         float = 0.0
-    I:         float = 0.0
+    I:         float = 0.0  # noqa: E741 - mirrors ArduPilot's PID component names
     D:         float = 0.0
     FF:        float = 0.0
     DFF:       float = 0.0
@@ -303,12 +303,13 @@ class AC_PID:
                 self._target_derivative = (self._target - target_last) / dt
 
         # I-term update (anti-windup via `limit`)
-        if p.I != 0.0 and dt > 0.0:
-            if not limit or (self._error * self._integrator) < 0.0:
-                self._integrator += p.I * self._error * dt
-                imax = abs(p.IMAX)
-                if imax > 0.0:
-                    self._integrator = max(-imax, min(imax, self._integrator))
+        if p.I != 0.0 and dt > 0.0 and (
+            not limit or (self._error * self._integrator) < 0.0
+        ):
+            self._integrator += p.I * self._error * dt
+            imax = abs(p.IMAX)
+            if imax > 0.0:
+                self._integrator = max(-imax, min(imax, self._integrator))
 
         P_out  = p.P  * self._error
         D_out  = p.D  * self._derivative

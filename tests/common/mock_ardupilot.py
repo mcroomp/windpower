@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Callable
+from collections.abc import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypedDict, Unpack, overload
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -24,6 +26,60 @@ from simulation.physics_core import HubObservation
 from groundstation.pumping_planner import TensionCommand
 from simulation.param_defaults import get_ap_param, load_ap_params, load_rawes_lua_constants, load_collective_phys_range
 from simulation.telemetry_csv import TelRow, write_csv
+from simulation.winch import WinchController, GovernedWinchController, TorqueWinchController
+
+if TYPE_CHECKING:
+    from simulation.rawes_lua_harness import RawesLua
+    from simulation.simtest_log import BadEventLog
+    from tests.simtests.simtest_runner import PhysicsRunner
+
+
+class _PumpingModeOptions(TypedDict, total=False):
+    cmd_timeout_s: float
+    kp_outer: float
+    kp_alt: float
+    ki_alt: float
+    kd_vz: float
+    rate_accel_max_radss: float
+    az_ref_tau_s: float
+    events: BadEventLog | None
+
+
+class _PumpingModeKwargs(_PumpingModeOptions):
+    ic_pos: np.ndarray
+    mass_kg: float
+    slew_rate_rad_s: float
+    warm_thrust: float
+    tension_ic: float
+
+
+class _LandingModeKwargs(TypedDict):
+    ic_body_z: np.ndarray
+    slew_rate_rad_s: float
+    warm_coll_rad: float
+    kp_vz: float
+    ki_vz: float
+    kp_outer: float
+
+
+class _PythonModeKwargs(TypedDict, total=False):
+    ic_pos: np.ndarray
+    mass_kg: float
+    slew_rate_rad_s: float
+    warm_thrust: float
+    tension_ic: float
+    cmd_timeout_s: float
+    kp_outer: float
+    kp_alt: float
+    ki_alt: float
+    kd_vz: float
+    rate_accel_max_radss: float
+    az_ref_tau_s: float
+    events: BadEventLog | None
+    ic_body_z: np.ndarray
+    warm_coll_rad: float
+    kp_vz: float
+    ki_vz: float
 
 
 def _load_rawes_pumping_constants() -> dict[str, float]:
@@ -79,7 +135,9 @@ def rawes_sitl_heli_params(loop_rate_hz: float) -> HeliParams:
     return HeliParams.from_ap_dict(load_ap_params(), loop_rate_hz=loop_rate_hz)
 
 
-def _feed_obs(sim, obs, accel_body: "np.ndarray | None" = None) -> None:
+def _feed_obs(
+    sim: RawesLua, obs: HubObservation, accel_body: np.ndarray | None = None
+) -> None:
     """Write HubObservation-like state into a RawesLua mock."""
     sim.R = obs.R
     sim.pos_ned = obs.pos.tolist()
@@ -98,24 +156,24 @@ _YAW_MOTOR_FUNC = 36
 class _MockArdupilotBase:
     """Common adapter utilities shared by lua/python backends."""
 
-    def __init__(self, *, wind: "np.ndarray", dt: float, initial_thrust: float = 0.263) -> None:
+    def __init__(self, *, wind: np.ndarray, dt: float, initial_thrust: float = 0.263) -> None:
         self._last_thrust = float(initial_thrust)
         self.roll_sp = 0.0
         self.pitch_sp = 0.0
         self._col_min, self._col_max = load_collective_phys_range()
         self._wind = wind
         self._tel_every = _tel_every_from_env(dt)
-        self.tel_fn: "Callable[..., dict] | None" = None
+        self.tel_fn: Callable[..., dict] | None = None
         # Optional winch object (WinchController/GovernedWinchController/...)
         # attached by the test.  When set, its log_fields() is merged into
         # every log() call automatically -- see log() below -- so winch
         # telemetry (winch_speed_ms, ...) is centralized the same way as the
         # backend-specific _telemetry_overrides() instead of every test
         # needing to thread it through its own tel_fn.
-        self.winch = None
+        self.winch: WinchController | GovernedWinchController | TorqueWinchController | None = None
         self._telemetry: list = []
         self._log_step = 0
-        self._guided_ctrl: "GuidedAttitudeController | None" = None
+        self._guided_ctrl: GuidedAttitudeController | None = None
         # Anti-rotation feedforward trim. Default: Python port of rawes.lua's
         # yaw_trim_step/run_yaw_trim (see controller.YawTrimObserver), used by
         # the pure-Python backend which has no real Lua VM to run the actual
@@ -123,11 +181,13 @@ class _MockArdupilotBase:
         # the REAL rawes.lua run_yaw_trim() instead of this Python duplicate.
         self._yaw_trim = YawTrimObserver()
 
-    def enable_guided(self, heli_params: "HeliParams | None" = None) -> None:
+    def enable_guided(self, heli_params: HeliParams | None = None) -> None:
         hp = heli_params or HeliParams.from_ap_dict(load_ap_params())
         self._guided_ctrl = GuidedAttitudeController(hp)
 
-    def step_physics(self, runner, dt: float, *, rest_length: "float | None" = None) -> dict:
+    def step_physics(
+        self, runner: PhysicsRunner, dt: float, *, rest_length: float | None = None
+    ) -> dict:
         if self._guided_ctrl is None:
             raise RuntimeError("Call enable_guided() before step_physics()")
         obs = runner.observe()
@@ -173,7 +233,7 @@ class _MockArdupilotBase:
         """Backend-specific telemetry field overrides."""
         return {}
 
-    def log(self, runner, sr: dict, *, force: bool = False) -> None:
+    def log(self, runner: PhysicsRunner, sr: dict, *, force: bool = False) -> None:
         if self.tel_fn is None or self._tel_every is None:
             return
         if force or self._log_step % self._tel_every == 0 or sr.get("ground_contact", False):
@@ -281,7 +341,7 @@ class _MockArdupilotBase:
             self._telemetry.append(row)
         self._log_step += 1
 
-    def write_telemetry(self, path) -> None:
+    def write_telemetry(self, path: Path | str) -> None:
         if self._telemetry:
             write_csv(self._telemetry, path)
 
@@ -295,7 +355,14 @@ class _MockArdupilotBase:
 
 
 class _LuaBackend(_MockArdupilotBase):
-    def __init__(self, sim, *, initial_thrust: float = 0.263, wind: "np.ndarray", dt: float) -> None:
+    def __init__(
+        self,
+        sim: RawesLua,
+        *,
+        initial_thrust: float = 0.263,
+        wind: np.ndarray,
+        dt: float,
+    ) -> None:
         super().__init__(wind=wind, dt=dt, initial_thrust=initial_thrust)
         self._sim = sim
         hz = round(1.0 / dt)
@@ -360,7 +427,14 @@ class _LuaBackend(_MockArdupilotBase):
         self._sim.set_srv_out(_YAW_MOTOR_FUNC, pwm)
         return u_applied
 
-    def tick(self, t_sim: float, runner, *, inject=None, accel_ned: "np.ndarray | None" = None) -> None:
+    def tick(
+        self,
+        t_sim: float,
+        runner: PhysicsRunner,
+        *,
+        inject: Callable[[RawesLua, PhysicsRunner], None] | None = None,
+        accel_ned: np.ndarray | None = None,
+    ) -> None:
         self._sim._mock.millis_val = int(t_sim * 1000)
         obs = runner.observe()
         accel_body = obs.R.T @ np.asarray(accel_ned, dtype=float) if accel_ned is not None else None
@@ -402,14 +476,16 @@ class _LuaBackend(_MockArdupilotBase):
                 sim_time=t_sim,
             )
 
-    def step(self, runner, dt: float, *, rest_length: "float | None" = None) -> dict:
+    def step(
+        self, runner: PhysicsRunner, dt: float, *, rest_length: float | None = None
+    ) -> dict:
         if not self._ctrl._target_set:
             obs = runner.observe()
             self._ctrl.set_target_rotation(obs.R, sim_time=runner.t_sim)
         return self.step_physics(runner, dt, rest_length=rest_length)
 
 
-def _blend_bz(bz_now: "np.ndarray", bz_goal: "np.ndarray", alpha: float) -> "np.ndarray":
+def _blend_bz(bz_now: np.ndarray, bz_goal: np.ndarray, alpha: float) -> np.ndarray:
     """Normalised linear blend from bz_now toward bz_goal. Mirrors rawes.lua blend_bz()."""
     a = max(0.0, min(1.0, alpha))
     v = (1.0 - a) * np.asarray(bz_now, dtype=float) + a * np.asarray(bz_goal, dtype=float)
@@ -455,7 +531,7 @@ class _PumpingPythonMode:
         kd_vz               : float = KD_VZ,
         rate_accel_max_radss: float = 0.0,
         az_ref_tau_s        : float = AZ_REF_TAU_S,
-        events              = None,
+        events: BadEventLog | None = None,
     ) -> None:
         self._mass_kg        = float(mass_kg)
         self._timeout        = float(cmd_timeout_s)
@@ -492,7 +568,7 @@ class _PumpingPythonMode:
         self._pos_ned        = np.asarray(ic_pos, dtype=float)
 
         # Mirror rawes.lua: _capture_ms (None = not-yet-captured → recovery_alpha stays 1.0)
-        self._capture_t: "float | None" = None
+        self._capture_t: float | None = None
 
         self._bz_goal        = None
         self._last_roll_sp   = 0.0
@@ -555,8 +631,8 @@ class _PumpingPythonMode:
         obs      : HubObservation,
         dt       : float,
         *,
-        accel_ned: "np.ndarray | None" = None,  # noqa: ARG002
-    ) -> "tuple[float, float, float]":
+        accel_ned: np.ndarray | None = None,  # noqa: ARG002
+    ) -> tuple[float, float, float]:
         self._pos_ned  = obs.pos
         self._cmd_age += dt
         self._t_sim   += dt
@@ -714,8 +790,8 @@ class _LandingPythonMode:
         obs: HubObservation,
         dt:  float,
         *,
-        accel_ned: "np.ndarray | None" = None,  # noqa: ARG002
-    ) -> "tuple[float, float, float]":
+        accel_ned: np.ndarray | None = None,  # noqa: ARG002
+    ) -> tuple[float, float, float]:
         R      = obs.R
         bz_now = R[:, 2]
         self._bz_current = slerp_body_z(self._bz_current, self._bz_target, self._slew, dt)
@@ -761,8 +837,17 @@ class _LandingPythonMode:
 class _PythonBackend(_MockArdupilotBase):
     AP_HZ: float = 50.0
 
-    def __init__(self, mode, *, wind: "np.ndarray", dt: float) -> None:
-        super().__init__(wind=wind, dt=dt, initial_thrust=float(mode._thrust_held))
+    def __init__(
+        self, mode: _PumpingPythonMode | _LandingPythonMode,
+        *,
+        wind: np.ndarray, dt: float
+    ) -> None:
+        initial_thrust = (
+            mode._thrust_held
+            if isinstance(mode, _PumpingPythonMode)
+            else mode._C_held
+        )
+        super().__init__(wind=wind, dt=dt, initial_thrust=float(initial_thrust))
         self._mode = mode
         self._t_last = None
 
@@ -778,16 +863,26 @@ class _PythonBackend(_MockArdupilotBase):
     def elevation_rad(self) -> float:
         return float(getattr(self._mode, "elevation_rad"))
 
-    def receive_command(self, cmd, dt_cmd: float) -> None:
-        self._mode.receive_command(cmd, dt_cmd)
+    def receive_command(
+        self, cmd: TensionCommand | LandingCommand, dt_cmd: float
+    ) -> None:
+        match self._mode:
+            case _PumpingPythonMode() if isinstance(cmd, TensionCommand):
+                self._mode.receive_command(cmd, dt_cmd)
+            case _LandingPythonMode() if isinstance(cmd, LandingCommand):
+                self._mode.receive_command(cmd, dt_cmd)
+            case _:
+                raise TypeError(
+                    f"{type(cmd).__name__} is not valid for {type(self._mode).__name__}"
+                )
 
     def controller_step(
         self,
         obs: HubObservation,
         dt: float,
         *,
-        accel_ned: "np.ndarray | None" = None,
-    ) -> "tuple[float, float, float]":
+        accel_ned: np.ndarray | None = None,
+    ) -> tuple[float, float, float]:
         thrust, roll_sp, pitch_sp = self._mode.step(obs, dt, accel_ned=accel_ned)
         self._last_thrust = float(thrust)
         self.roll_sp = roll_sp
@@ -804,7 +899,14 @@ class _PythonBackend(_MockArdupilotBase):
         # to remember to splat **ap.log_fields() themselves.
         return self.log_fields()
 
-    def tick(self, t_sim: float, runner, *, inject=None, accel_ned: "np.ndarray | None" = None) -> None:
+    def tick(
+        self,
+        t_sim: float,
+        runner: PhysicsRunner,
+        *,
+        inject: Callable[[_PythonBackend, PhysicsRunner], None] | None = None,
+        accel_ned: np.ndarray | None = None,
+    ) -> None:
         dt = 1.0 / self.AP_HZ if self._t_last is None else t_sim - self._t_last
         self._t_last = t_sim
 
@@ -856,15 +958,91 @@ class MockArdupilot:
     }
 
     @classmethod
-    def for_lua(cls, sim, *, initial_thrust: float = 0.263, wind: "np.ndarray", dt: float):
+    def for_lua(
+        cls,
+        sim: RawesLua,
+        *,
+        initial_thrust: float = 0.263,
+        wind: np.ndarray,
+        dt: float,
+    ):
         return _LuaBackend(sim, initial_thrust=initial_thrust, wind=wind, dt=dt)
 
     @classmethod
-    def for_python(cls, *, mode: str, wind: "np.ndarray", dt: float, **kwargs):
+    @overload
+    def for_python(
+        cls,
+        *,
+        mode: Literal["pumping", "tension"],
+        wind: np.ndarray,
+        dt: float,
+        **kwargs: Unpack[_PumpingModeKwargs],
+    ) -> _PythonBackend: ...
+
+    @classmethod
+    @overload
+    def for_python(
+        cls,
+        *,
+        mode: Literal["landing"],
+        wind: np.ndarray,
+        dt: float,
+        **kwargs: Unpack[_LandingModeKwargs],
+    ) -> _PythonBackend: ...
+
+    @classmethod
+    def for_python(
+        cls,
+        *,
+        mode: str,
+        wind: np.ndarray,
+        dt: float,
+        **kwargs: Unpack[_PythonModeKwargs],
+    ) -> _PythonBackend:
         if mode in ("pumping", "tension"):
-            backend_mode = _PumpingPythonMode(**kwargs)
+            if (
+                "ic_pos" not in kwargs
+                or "mass_kg" not in kwargs
+                or "slew_rate_rad_s" not in kwargs
+                or "warm_thrust" not in kwargs
+                or "tension_ic" not in kwargs
+            ):
+                raise TypeError("pumping mode requires ic_pos, mass_kg, slew_rate_rad_s, warm_thrust, and tension_ic")
+            backend_mode = _PumpingPythonMode(
+                ic_pos=kwargs["ic_pos"],
+                mass_kg=kwargs["mass_kg"],
+                slew_rate_rad_s=kwargs["slew_rate_rad_s"],
+                warm_thrust=kwargs["warm_thrust"],
+                tension_ic=kwargs["tension_ic"],
+                cmd_timeout_s=kwargs.get(
+                    "cmd_timeout_s", _PumpingPythonMode.CMD_TIMEOUT_S
+                ),
+                kp_outer=kwargs.get("kp_outer", _PumpingPythonMode.KP_OUTER),
+                kp_alt=kwargs.get("kp_alt", _PumpingPythonMode.KP_ALT),
+                ki_alt=kwargs.get("ki_alt", _PumpingPythonMode.KI_ALT),
+                kd_vz=kwargs.get("kd_vz", _PumpingPythonMode.KD_VZ),
+                rate_accel_max_radss=kwargs.get("rate_accel_max_radss", 0.0),
+                az_ref_tau_s=kwargs.get("az_ref_tau_s", AZ_REF_TAU_S),
+                events=kwargs.get("events"),
+            )
         elif mode == "landing":
-            backend_mode = _LandingPythonMode(**kwargs)
+            if (
+                "ic_body_z" not in kwargs
+                or "slew_rate_rad_s" not in kwargs
+                or "warm_coll_rad" not in kwargs
+                or "kp_vz" not in kwargs
+                or "ki_vz" not in kwargs
+                or "kp_outer" not in kwargs
+            ):
+                raise TypeError("landing mode requires all landing parameters")
+            backend_mode = _LandingPythonMode(
+                ic_body_z=kwargs["ic_body_z"],
+                slew_rate_rad_s=kwargs["slew_rate_rad_s"],
+                warm_coll_rad=kwargs["warm_coll_rad"],
+                kp_vz=kwargs["kp_vz"],
+                ki_vz=kwargs["ki_vz"],
+                kp_outer=kwargs["kp_outer"],
+            )
         else:
             raise ValueError(f"Unsupported MockArdupilot Python mode: {mode!r}")
         return _PythonBackend(backend_mode, wind=wind, dt=dt)
@@ -886,9 +1064,9 @@ class MockArdupilot:
         slew_rate_rad_s: float,
         warm_thrust: float,
         tension_ic: float,
-        wind: "np.ndarray",
+        wind: np.ndarray,
         dt: float,
-        **kwargs,
+        **kwargs: Unpack[_PumpingModeOptions],
     ):
         return cls.for_python(
             mode="pumping",
@@ -909,7 +1087,7 @@ class MockArdupilot:
         ic_body_z: np.ndarray,
         slew_rate_rad_s: float,
         warm_coll_rad: float,
-        wind: "np.ndarray",
+        wind: np.ndarray,
         dt: float,
         kp_vz: float = _LandingPythonMode.KP_VZ,
         ki_vz: float = _LandingPythonMode.KI_VZ,

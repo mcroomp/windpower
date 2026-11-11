@@ -17,31 +17,14 @@ from linkhub_client.messages import (
     MavParamType,
     MavResult,
     MavSysStatusSensor,
-    ParamSet,
     ServoOutputRaw,
+    Message,
+    RawMessage,
 )
 
-from .constants import (
-    LinkHubClient,
-    LinkHubGenerationChanged,
-    CommandAck,
-    EscTelemetry,
-    PidTuning,
-    RcChannels,
-    CommandLong,
-    decode_message,
-    Heartbeat,
-    Statustext,
-    GB4008_KV, GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO,
-    SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
-    SWASH_SERVOS,
-    MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
-    _ESC_TELEM_MSGS,
-    PWM_MIN, PWM_MAX, PWM_NEUTRAL,
-    _AZ_S1, _AZ_S2, _AZ_S3,
-    _COPTER_MODES, _LUA_MODES,
-    _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES, _MOTOR_PATH_PARAM_NAMES,
-)
+from linkhub_client.client import LinkHubClient, LinkHubGenerationChanged
+from linkhub_client.messages import BatteryStatus, EkfStatusReport, SysStatus, EscTelemetry, CommandLong, decode_message, Heartbeat, Statustext
+from .constants import GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO, SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR, MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL, _ESC_TELEM_MSGS, PWM_MIN, PWM_MAX, PWM_NEUTRAL, _AZ_S1, _AZ_S2, _AZ_S3, _COPTER_MODES, _LUA_MODES, _KEY_PARAM_NAMES, _TAIL_PARAM_NAMES, _MOTOR_PATH_PARAM_NAMES
 from .messages import read_one
 
 # ---------------------------------------------------------------------------
@@ -54,7 +37,7 @@ _motor_pole_pairs = GB4008_POLE_PAIRS
 # ESC telemetry helpers
 # ---------------------------------------------------------------------------
 
-def _esc_telem_msg_for_channel(channel: int) -> "tuple[str, int]":
+def _esc_telem_msg_for_channel(channel: int) -> tuple[str, int]:
     """(msg_name, msg_id) of the ESC_TELEMETRY block covering 1-based `channel`."""
     base = ((channel - 1) // 4) * 4 + 1
     for name, (mid, b) in _ESC_TELEM_MSGS.items():
@@ -63,7 +46,7 @@ def _esc_telem_msg_for_channel(channel: int) -> "tuple[str, int]":
     raise ValueError(f"no ESC_TELEMETRY message for output channel {channel}")
 
 
-def _esc_erpm(msg, channel: int) -> "float | None":
+def _esc_erpm(msg: EscTelemetry | Message | RawMessage, channel: int) -> float | None:
     """eRPM for 1-based output `channel` from an ESC_TELEMETRY_* msg, else None."""
     if isinstance(msg, EscTelemetry):
         base = msg.first_channel
@@ -82,7 +65,7 @@ def _esc_erpm(msg, channel: int) -> "float | None":
     return rpm[idx]
 
 
-def _rpm_triplet(erpm: "float | None") -> tuple:
+def _rpm_triplet(erpm: float | None) -> tuple:
     """eRPM -> (erpm, mech_rpm, rotor_rpm).  (None, None, None) if erpm is None.
     Uses the live SERVO_BLH_POLES-derived pole-pair count (_motor_pole_pairs)."""
     if erpm is None:
@@ -127,7 +110,7 @@ def _h3_forward_mix(coll: float, tilt_lon: float, tilt_lat: float):
     For S3 at 0 deg with tlon > 0 (nose-down), its command decreases while the
     two rear commands increase.
     """
-    def _mix(az):
+    def _mix(az: float):
         return coll - math.sin(az) * tilt_lat - math.cos(az) * tilt_lon
     return _mix(_AZ_S1), _mix(_AZ_S2), _mix(_AZ_S3)
 
@@ -191,7 +174,7 @@ def _print_status(session: LinkHubClient) -> None:
     print("VEHICLE")
     print(sep)
     hb, cursor = read_one(session, cursor, "HEARTBEAT", wait=5.0)
-    if hb is None:
+    if not isinstance(hb, Heartbeat):
         print("  (no HEARTBEAT received)")
     else:
         armed   = MavModeFlag.SAFETY_ARMED in hb.base_mode
@@ -207,7 +190,7 @@ def _print_status(session: LinkHubClient) -> None:
     print("BATTERY")
     print(sep)
     batt, cursor = read_one(session, cursor, "BATTERY_STATUS", wait=2.0)
-    if batt:
+    if isinstance(batt, BatteryStatus):
         cells = [v for v in batt.voltages if v != 65535]
         total_v   = sum(cells) / 1000.0 if cells else None
         current_a = batt.current_battery / 100.0 if batt.current_battery >= 0 else None
@@ -222,7 +205,7 @@ def _print_status(session: LinkHubClient) -> None:
             print(f"  [WARN] avg cell {total_v/len(cells):.3f} V -- low")
     else:
         ss, cursor = read_one(session, cursor, "SYS_STATUS", wait=1.0)
-        if ss and ss.voltage_battery != 65535:
+        if isinstance(ss, SysStatus) and ss.voltage_battery != 65535:
             v = ss.voltage_battery / 1000.0
             i = ss.current_battery / 100.0 if ss.current_battery >= 0 else None
             r = ss.battery_remaining
@@ -236,7 +219,7 @@ def _print_status(session: LinkHubClient) -> None:
     print("EKF")
     print(sep)
     ekf, cursor = read_one(session, cursor, "EKF_STATUS_REPORT", wait=2.0)
-    if ekf:
+    if isinstance(ekf, EkfStatusReport):
         flags  = ekf.flags
         att_ok = EkfStatusFlags.ATTITUDE in flags
         vel_ok = EkfStatusFlags.VELOCITY_HORIZ in flags
@@ -309,7 +292,7 @@ def _print_status(session: LinkHubClient) -> None:
             print(f"  {name:<22} {val:<8.4g}  OK{suffix}")
 
     ss2, cursor = read_one(session, cursor, "SYS_STATUS", wait=2.0)
-    if ss2:
+    if isinstance(ss2, SysStatus):
         present = MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS in ss2.onboard_control_sensors_present
         enabled = MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS in ss2.onboard_control_sensors_enabled
         healthy = MavSysStatusSensor.SENSOR_MOTOR_OUTPUTS in ss2.onboard_control_sensors_health
@@ -357,7 +340,7 @@ def _print_status(session: LinkHubClient) -> None:
 # Drain helper
 # ---------------------------------------------------------------------------
 
-def _drain(session: LinkHubClient, msg_types, duration: float) -> list:
+def _drain(session: LinkHubClient, msg_types: str | list[str] | tuple[str, ...] | set[str], duration: float) -> list:
     """Collect all messages of given types for `duration` wall-clock seconds."""
     msgs = []
     deadline = time.monotonic() + duration
@@ -459,7 +442,7 @@ def _monitor_esc(session: LinkHubClient, duration: float = 10.0) -> None:
             msg, cursor = read_one(
                 session, cursor, esc_name, wait=min(0.5, remaining),
             )
-            if msg is None:
+            if not isinstance(msg, EscTelemetry):
                 continue
             now = time.monotonic()
             if now - last_print < 0.25:   # print at ~4 Hz max
@@ -853,7 +836,7 @@ def _set_heli_servo_mode(session: LinkHubClient, value: float) -> bool:
 
 def _release_servo_functions(
     session: LinkHubClient, outputs: tuple[int, ...]
-) -> "dict[int, float] | None":
+) -> dict[int, float] | None:
     """Set outputs to disabled and return their original functions."""
     saved_functions: dict[int, float] = {}
     changed = False

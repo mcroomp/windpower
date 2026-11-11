@@ -30,6 +30,11 @@ its own prerequisites.
 
 From the repo root:
 
+Python dependencies are declared only in `pyproject.toml` and resolved in `uv.lock`.
+Use `uv add` (with the appropriate `--dev` or `--optional` selection) to change
+dependencies, and commit both files. Setup, CI, and Docker consume the lockfile
+with `uv sync --locked`; there are no separate requirements files.
+
 ```powershell
 uv sync --dev
 uv sync --dev --extra simulation   # required for physics-heavy simtests
@@ -49,6 +54,60 @@ uv run python -m pytest tests\unit tests\simtests -q
 Do **not** run `tests/sitl/` with host-side `pytest`; use
 [sitl_testing.md](sitl_testing.md).
 
+The streaming wrapper is also available as
+`uv run python simulation/run_tests.py --filter summary tests/unit -q`.
+It launches pytest through the project uv environment without synchronizing;
+run `uv sync --dev --extra simulation` explicitly after dependency changes.
+
+## Python linting
+
+Python 3.14 is the minimum runtime. Local setup, CI, and simulation containers
+use Python 3.14.10; `.python-version` selects that interpreter for `uv run`.
+Development dependencies include Ruff, with configuration in `pyproject.toml`.
+The **Modernization + simplification** profile selects Ruff's default correctness
+rules (`E4`, `E7`, `E9`, `F`), pyupgrade (`UP`), and flake8-simplify (`SIM`),
+targeting Python 3.14. It does not impose a formatter gate.
+
+```powershell
+uv run ruff check .
+uv run ruff check . --fix   # safe fixes only; review changes before committing
+uv run python -m pytest tests/lint --run-lint -m lint -v
+```
+
+Archived code, scratch files, and generated run logs are excluded. Protocol
+enum names retain their generated spelling; narrowly documented inline
+exceptions preserve optional-dependency skips, ArduPilot gain names, and file
+handles whose ownership spans multiple calls.
+
+`setup.cmd` and the default `setup.sh` setup/build flow fail before UI/LinkHub
+builds if Ruff or Pyright fails. CI's lint job gates both Python tests and the stack image
+build. Docker `build` and `build-lite` commands lint a read-only mount of the
+repository with the image's Python, Ruff, and Pyright before reporting success, including
+cache-hit builds.
+
+Ruff and Pyright are tests under `tests/lint/`, marked `lint` and skipped by
+default. Pass `--run-lint` to enable them; `-m lint` alone does not enable them.
+CI's dedicated lint job explicitly runs this category and gates downstream jobs.
+Ordinary unit/simtest sessions, collection-only invocations, and Docker stack
+workers do not launch static checks. The stack runner's pre-worker build check
+still validates the image/source combination once before starting workers.
+Lint/type errors, warnings, or missing tools fail the enabled lint tests.
+
+For standalone type diagnostics, install development dependencies and the simulation
+extra (`uv sync --dev --extra simulation`), then run `uv run pyright --warnings`.
+The standard-mode configuration in `pyrightconfig.json` also enables
+`reportMissingParameterType` as an error: function parameters must have explicit
+annotations (apart from inferred `self`/`cls` and contextual callbacks).
+It gates builds, CI, and opt-in lint tests with no baseline error allowance.
+Gates pass the active interpreter explicitly
+so Docker checks never resolve packages from a mounted Windows virtual environment.
+Simulation dependencies
+include NeuralFoil for the SG6042 polar analysis.
+Pyright uses the same system Node.js 24.x as npm builds; install/select the
+major in `.node-version` before invoking it, rather than installing `pyright[nodejs]`.
+Shared helpers used across test tiers belong in `tests/common/`; stack workers
+do not synchronize `tests/unit/`.
+
 ## Markers and timeouts
 
 `pyproject.toml` currently defines:
@@ -56,6 +115,7 @@ Do **not** run `tests/sitl/` with host-side `pytest`; use
 | Setting | Current value |
 |---|---|
 | Global pytest timeout | `600` seconds |
+| `lint` marker | repository-wide Ruff/Pyright checks; skipped unless `--run-lint` is passed |
 | `simtest` marker | full physics simulation |
 | `sitl` marker | Docker-backed ArduPilot SITL test |
 | `expensive` marker | loop-heavy unit test that is useful to exclude during quick local runs |

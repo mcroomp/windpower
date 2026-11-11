@@ -11,6 +11,8 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
+from matplotlib.axes import Axes
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
@@ -48,7 +50,7 @@ def load(csv: Path) -> dict:
     return d
 
 
-def shade_phases(ax, t, phases):
+def shade_phases(ax: Axes, t: NDArray[np.float64], phases: NDArray[np.str_]):
     """Draw a thin colored background stripe for each phase."""
     if len(t) == 0:
         return
@@ -85,7 +87,7 @@ def main():
     t  = t[mask]
     ph = d["phase"][mask]
 
-    def col(name):
+    def col(name: str):
         return d[name][mask]
 
     fig, axes = plt.subplots(5, 1, figsize=(14, 12), sharex=True)
@@ -151,7 +153,7 @@ def main():
     fig.legend(handles=patches, loc="lower center", ncol=len(PHASE_COLORS),
                fontsize=8, framealpha=0.8)
 
-    plt.tight_layout(rect=[0, 0.04, 1, 0.97])
+    plt.tight_layout(rect=(0, 0.04, 1, 0.97))
     plt.show()
 
 

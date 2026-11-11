@@ -6,9 +6,11 @@ import os
 import signal
 import sys
 import time
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 if TYPE_CHECKING:
+    import numpy as np
     from simulation.mediator_events import MediatorEventLog
     from simulation.sitl_interface import SITLInterface
 
@@ -55,13 +57,13 @@ def install_sigterm_handler() -> Callable[[], bool]:
 
 
 def run_lockstep(
-    sitl: "SITLInterface",
-    step_fn: "Callable[[object, float], dict]",
-    is_stopped: "Callable[[], bool]",
+    sitl: SITLInterface,
+    step_fn: Callable[[np.ndarray, float], dict],
+    is_stopped: Callable[[], bool],
     *,
-    log: "logging.Logger",
-    ev: "MediatorEventLog | None" = None,
-    heartbeat_fields: "Callable[[], dict] | None" = None,
+    log: logging.Logger,
+    ev: MediatorEventLog | None = None,
+    heartbeat_fields: Callable[[], dict] | None = None,
 ) -> int:
     """Core SITL lockstep loop shared by all mediators.
 

@@ -22,14 +22,10 @@ import argparse
 import sys
 from pathlib import Path
 
-# Ensure simulation/ is on sys.path when run from anywhere
-_HERE = Path(__file__).resolve().parent
-_SIM  = _HERE.parent
-
 try:
     import pyvista as pv  # noqa: F401 — fail fast with a clear message
 except ImportError:
-    sys.exit("PyVista not found.  pip install pyvista")
+    sys.exit("PyVista not found. Run: uv sync --dev --extra simulation")
 
 from viz3d.telemetry import CSVSource
 from viz3d.visualize_3d import RAWESVisualizer

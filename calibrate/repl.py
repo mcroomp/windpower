@@ -1,40 +1,37 @@
 """
 calibrate/repl.py -- All _cmd_* handlers, REPL loop, CLI parser, main().
 """
+
 from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Protocol
 
 from linkhub_client.client import LinkHubError
 from linkhub_client.messages import MavCmd, MavDataStream, MavModeFlag
 
-from .constants import (
-    LinkHubClient, WallClock, CommandLong,
-    SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR,
-    MOTOR_OFF_US, MOTOR_FULL_US, MOTOR_ESC_CHANNEL,
-    SWASH_SERVOS,
-    PWM_MIN, PWM_MAX, PWM_NEUTRAL,
-    _COPTER_MODES,
-    _LOG_DIR,
-    _AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH, _RAWES_HARDWARE_PARM_PATH,
-    _AZ_S1, _AZ_S2, _AZ_S3,
-    _RUN_MODES, _WATCH_STREAMS,
-)
+from linkhub_client.client import LinkHubClient
+from .constants import SERVO_S1, SERVO_S2, SERVO_S3, SERVO_MOTOR, MOTOR_OFF_US, MOTOR_FULL_US, SWASH_SERVOS, PWM_MIN, PWM_MAX, PWM_NEUTRAL, _LOG_DIR, _AP_BASE_PARM_PATH, _RAWES_COMMON_PARM_PATH, _RAWES_HARDWARE_PARM_PATH, _AZ_S1, _AZ_S2, _AZ_S3
 from .hw import (
-    _arm, _disarm, _send_set_servo, _send_motor_test,
+    _arm,
+    _disarm,
+    _send_set_servo,
     _print_status,
-    _h3_forward_mix, _norm_to_pwm,
-    _release_servo_functions, _restore_servo_functions, _set_heli_servo_mode,
-    _refresh_pole_pairs, _monitor_esc, _set_safe_off_state,
+    _h3_forward_mix,
+    _norm_to_pwm,
+    _release_servo_functions,
+    _restore_servo_functions,
+    _set_heli_servo_mode,
+    _refresh_pole_pairs,
+    _set_safe_off_state,
 )
 from .linkhub import ensure_linkhub
 from .messages import read_one
+from linkhub_client.messages import Heartbeat
 from .params import (
     _config_target_params,
     _fetch_dataflash_log,
@@ -44,10 +41,12 @@ from .params import (
     _upload_script,
 )
 from .run import (
-    _cmd_run, _observation_loop, _take_servo4, _safety_shutdown,
+    _cmd_run,
+    _take_servo4,
+    _safety_shutdown,
     _run_observation,
 )
-from .util import _RunLog, _parse_flags, _parse_kv_list, _log_path, _esc_check
+from .util import _RunLog, _parse_flags, _esc_check
 from .watch import _cmd_watch
 
 
@@ -184,8 +183,10 @@ class _BatteryParameterSession(Protocol):
 # Dispatch
 # ---------------------------------------------------------------------------
 
-def _run_command(session: LinkHubClient, tokens: list[str],
-                 force: bool = False) -> bool:
+
+def _run_command(
+    session: LinkHubClient, tokens: list[str], force: bool = False
+) -> bool:
     """
     Execute one calibration command.
 
@@ -201,22 +202,38 @@ def _run_command(session: LinkHubClient, tokens: list[str],
     if verb == "param" and args:
         verb, args = args[0].lower(), args[1:]
 
-    if   verb == "status":   _print_status(session)
-    elif verb == "reboot":   _cmd_reboot(session)
-    elif verb == "disarm":   _cmd_disarm(session)
-    elif verb == "arm":      _cmd_arm(session, args)
-    elif verb == "battery":  _cmd_battery(session, args)
-    elif verb == "set":      _cmd_set(session, args)
-    elif verb == "get":      _cmd_get(session, args)
-    elif verb == "swash":    _cmd_swash(session, args)
-    elif verb == "servo":    _cmd_servo(session, args)
-    elif verb == "motor":    _cmd_motor(session, args, force=force)
-    elif verb == "run":      _cmd_run(session, args)
-    elif verb == "watch":    _cmd_watch(session, args)
-    elif verb == "script":   _cmd_script(session, args)
-    elif verb == "logs":     _cmd_logs(session, args)
-    elif verb == "config":   _cmd_config(session, args)
-    elif verb == "help":     print(_HELP)
+    if verb == "status":
+        _print_status(session)
+    elif verb == "reboot":
+        _cmd_reboot(session)
+    elif verb == "disarm":
+        _cmd_disarm(session)
+    elif verb == "arm":
+        _cmd_arm(session, args)
+    elif verb == "battery":
+        _cmd_battery(session, args)
+    elif verb == "set":
+        _cmd_set(session, args)
+    elif verb == "get":
+        _cmd_get(session, args)
+    elif verb == "swash":
+        _cmd_swash(session, args)
+    elif verb == "servo":
+        _cmd_servo(session, args)
+    elif verb == "motor":
+        _cmd_motor(session, args, force=force)
+    elif verb == "run":
+        _cmd_run(session, args)
+    elif verb == "watch":
+        _cmd_watch(session, args)
+    elif verb == "script":
+        _cmd_script(session, args)
+    elif verb == "logs":
+        _cmd_logs(session, args)
+    elif verb == "config":
+        _cmd_config(session, args)
+    elif verb == "help":
+        print(_HELP)
     else:
         return False
     return True
@@ -225,6 +242,7 @@ def _run_command(session: LinkHubClient, tokens: list[str],
 # ---------------------------------------------------------------------------
 # One-shot verb implementations
 # ---------------------------------------------------------------------------
+
 
 def _cmd_reboot(session: LinkHubClient) -> None:
     print("  Sending reboot command ...")
@@ -252,20 +270,25 @@ def _cmd_disarm(session: LinkHubClient) -> None:
 def _cmd_set(session: LinkHubClient, args: list[str]) -> None:
     """set <name> <value>"""
     if len(args) < 2:
-        print("  Usage: set <name> <value>"); return
+        print("  Usage: set <name> <value>")
+        return
     name = args[0].upper()
     try:
         value = float(args[1])
     except ValueError:
-        print("  Error: value must be a number"); return
+        print("  Error: value must be a number")
+        return
     ok = session.set_param(name, value)
     if not ok:
-        print(f"  [FAIL] {name}: no ACK within timeout"); return
+        print(f"  [FAIL] {name}: no ACK within timeout")
+        return
     actual = session.get_param(name)
     if actual is None:
         print(f"  [WARN] {name}: set ACK'd but readback failed")
     elif abs(actual - value) > 1e-6:
-        print(f"  [FAIL] {name}: wrote {value}, read back {actual}  (likely silently rejected)")
+        print(
+            f"  [FAIL] {name}: wrote {value}, read back {actual}  (likely silently rejected)"
+        )
     else:
         print(f"  [OK]   {name} = {actual}")
 
@@ -325,7 +348,8 @@ def _cmd_battery(session: _BatteryParameterSession, args: list[str]) -> None:
 def _cmd_get(session: LinkHubClient, args: list[str]) -> None:
     """get <name> [<name> ...]"""
     if not args:
-        print("  Usage: get <name> [<name> ...]"); return
+        print("  Usage: get <name> [<name> ...]")
+        return
     for raw_name in args:
         name = raw_name.upper()
         v = session.get_param(name)
@@ -337,27 +361,28 @@ def _cmd_get(session: LinkHubClient, args: list[str]) -> None:
 
 def _print_swash_layout(session: LinkHubClient) -> None:
     """Print the configured mixer and RAWES physical HR3-120 geometry."""
-    def g(name, default=None):
+
+    def g(name: str, default: float | None=None):
         v = session.get_param(name)
         return float(v) if v is not None else default
 
-    sw_type   = g("H_SW_TYPE")
-    sv1_pos   = g("H_SW_H3_SV1_POS")
-    sv2_pos   = g("H_SW_H3_SV2_POS")
-    sv3_pos   = g("H_SW_H3_SV3_POS")
-    phang     = g("H_SW_H3_PHANG")
-    ahrs_orn  = g("AHRS_ORIENTATION")
-    col_dir   = g("H_SW_COL_DIR")
-    rev1      = g("SERVO1_REVERSED")
-    rev2      = g("SERVO2_REVERSED")
-    rev3      = g("SERVO3_REVERSED")
-    col_min   = g("H_COL_MIN")
-    col_max   = g("H_COL_MAX")
-    col_zero  = g("H_COL_ZERO_THRST")
+    sw_type = g("H_SW_TYPE")
+    sv1_pos = g("H_SW_H3_SV1_POS")
+    sv2_pos = g("H_SW_H3_SV2_POS")
+    sv3_pos = g("H_SW_H3_SV3_POS")
+    phang = g("H_SW_H3_PHANG")
+    ahrs_orn = g("AHRS_ORIENTATION")
+    col_dir = g("H_SW_COL_DIR")
+    rev1 = g("SERVO1_REVERSED")
+    rev2 = g("SERVO2_REVERSED")
+    rev3 = g("SERVO3_REVERSED")
+    col_min = g("H_COL_MIN")
+    col_max = g("H_COL_MAX")
+    col_zero = g("H_COL_ZERO_THRST")
     col_hover = g("H_COL_HOVER")
-    cyc_max   = g("H_CYC_MAX")
-    flybar    = g("H_FLYBAR_MODE")
-    sv_man    = g("H_SV_MAN")
+    cyc_max = g("H_CYC_MAX")
+    flybar = g("H_FLYBAR_MODE")
+    sv_man = g("H_SV_MAN")
 
     cursor = session.current_cursor()
     session.request_data_stream(MavDataStream.RC_CHANNELS, 10)
@@ -373,21 +398,29 @@ def _print_swash_layout(session: LinkHubClient) -> None:
         value = pwm[channel]
         return f"{value} us" if value else "no data"
 
-    def _quad(az):
+    def _quad(az: float | None):
         """Rough physical quadrant label from azimuth (deg, CCW from front)."""
-        if az is None: return "?"
-        az = ((az + 180.0) % 360.0) - 180.0   # -180..+180
-        if   -30 <= az <=  30:  return "front"
-        elif  30 <  az <  90:   return "front-left"
-        elif  az >= 90 and az <= 150:  return "left-back"
-        elif az > 150 or az < -150:    return "back"
-        elif -90 <= az < -30:   return "front-right"
-        else:                    return "right-back"
+        if az is None:
+            return "?"
+        az = ((az + 180.0) % 360.0) - 180.0  # -180..+180
+        if -30 <= az <= 30:
+            return "front"
+        elif 30 < az < 90:
+            return "front-left"
+        elif az >= 90 and az <= 150:
+            return "left-back"
+        elif az > 150 or az < -150:
+            return "back"
+        elif -90 <= az < -30:
+            return "front-right"
+        else:
+            return "right-back"
 
-    def _factors(az):
-        if az is None: return (None, None)
+    def _factors(az: float | None):
+        if az is None:
+            return (None, None)
         a = math.radians(az)
-        return (-math.sin(a), math.cos(a))   # (roll_factor, pitch_factor)
+        return (-math.sin(a), math.cos(a))  # (roll_factor, pitch_factor)
 
     print()
     physical_positions = (
@@ -400,7 +433,9 @@ def _print_swash_layout(session: LinkHubClient) -> None:
     print("===============================")
     print()
     print("ArduPilot params:")
-    print(f"  H_SW_TYPE         = {sw_type!s:<8}  (3 = H3-120; reversals implement HR3)")
+    print(
+        f"  H_SW_TYPE         = {sw_type!s:<8}  (3 = H3-120; reversals implement HR3)"
+    )
     print(f"  H_SW_COL_DIR      = {col_dir!s:<8}  (1 required for RAWES HR3)")
     print(f"  SERVO1/2/3_REV    = {rev1!s}/{rev2!s}/{rev3!s}  (1/1/1 required)")
     print(f"  H_SW_H3_SV1_POS   = {sv1_pos!s:<8}  (unused when H_SW_TYPE=3)")
@@ -413,14 +448,18 @@ def _print_swash_layout(session: LinkHubClient) -> None:
     print(f"  H_COL_ZERO_THRST  = {col_zero!s:<8}  deg")
     print(f"  H_COL_HOVER       = {col_hover!s:<8}  normalized collective")
     if cyc_max is not None:
-        print(f"  H_CYC_MAX = {cyc_max:.0f}  cd  ({cyc_max/100:.1f} deg of swash tilt at full stick)")
+        print(
+            f"  H_CYC_MAX = {cyc_max:.0f}  cd  ({cyc_max / 100:.1f} deg of swash tilt at full stick)"
+        )
     else:
-        print(f"  H_CYC_MAX = ?")
+        print("  H_CYC_MAX = ?")
     print(f"  H_FLYBAR_MODE = {flybar!s:<4}  (1 = ACRO passthrough, 0 = rate PID)")
     print(f"  H_SV_MAN      = {sv_man!s:<4}  (0 = AUTOMATED, !=0 = manual setup mode)")
     print()
     print("Servo factors  (AP mixer: roll = -sin(az), pitch = cos(az)):")
-    print(f"  {'Servo':<6} {'Azimuth':>8}  {'Position':<14}  {'roll_f':>8}  {'pitch_f':>8}")
+    print(
+        f"  {'Servo':<6} {'Azimuth':>8}  {'Position':<14}  {'roll_f':>8}  {'pitch_f':>8}"
+    )
     for label, az in physical_positions:
         rf, pf = _factors(az)
         rf_s = f"{rf:+.3f}" if rf is not None else "  n/a"
@@ -453,7 +492,9 @@ def _print_swash_layout(session: LinkHubClient) -> None:
     print("                            REAR / -X")
     print()
     print("Sign convention (design/ardupilot_swashplate.md):")
-    print("  tlat > 0 = roll right;  tlon > 0 = nose-DOWN disk;  col > 0 = positive thrust")
+    print(
+        "  tlat > 0 = roll right;  tlon > 0 = nose-DOWN disk;  col > 0 = positive thrust"
+    )
     print()
     if srv:
         print("Current outputs:")
@@ -466,7 +507,7 @@ def _print_swash_layout(session: LinkHubClient) -> None:
     print()
 
 
-def _fmt_az(az):
+def _fmt_az(az: float | None):
     if az is None:
         return "  ?  "
     return f"{az:+.0f} deg"
@@ -482,25 +523,31 @@ def _cmd_swash_test(session: LinkHubClient, args: list[str]) -> None:
     """
     if args and args[0].lower() == "off":
         ok = _set_heli_servo_mode(session, 0.0)
-        print(f"  {'[OK]  ' if ok else '[FAIL]'} H_SV_MAN=0 (native swash test stopped)")
+        print(
+            f"  {'[OK]  ' if ok else '[FAIL]'} H_SV_MAN=0 (native swash test stopped)"
+        )
         return
     _cmd_servo(session, ["mode", "oscillate", *args])
 
 
 def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
     """swash <coll%> [lon%] [lat%]
-       swash range <min> <max>
-       swash neutral [n]
-       swash fit-range <min> <max> --cyclic N --allow-full-range
-       swash info
-       swash test [--duration N] --allow-full-range | swash test off"""
+    swash range <min> <max>
+    swash neutral [n]
+    swash fit-range <min> <max> --cyclic N --allow-full-range
+    swash info
+    swash test [--duration N] --allow-full-range | swash test off"""
     if not args:
         print("  Usage: swash <coll%> [lon%] [lat%]")
         print("         swash range <min_us> <max_us>")
         print("         swash neutral [n]")
-        print("         swash fit-range <min_us> <max_us> --cyclic N --allow-full-range")
+        print(
+            "         swash fit-range <min_us> <max_us> --cyclic N --allow-full-range"
+        )
         print("         swash info")
-        print("         swash test [--duration N] --allow-full-range  |  swash test off")
+        print(
+            "         swash test [--duration N] --allow-full-range  |  swash test off"
+        )
         return
     sub = args[0].lower()
     if sub == "info":
@@ -511,17 +558,23 @@ def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
         return
     if sub == "range":
         if len(args) != 3:
-            print("  Usage: swash range <min_us> <max_us>"); return
+            print("  Usage: swash range <min_us> <max_us>")
+            return
         try:
-            lo = int(args[1]); hi = int(args[2])
+            lo = int(args[1])
+            hi = int(args[2])
         except ValueError:
-            print("  Error: min and max must be integers"); return
+            print("  Error: min and max must be integers")
+            return
         if not (800 <= lo < hi <= 2200):
-            print(f"  Error: need 800 <= min < max <= 2200 (got {lo}..{hi})"); return
+            print(f"  Error: need 800 <= min < max <= 2200 (got {lo}..{hi})")
+            return
         for nm, val in (("H_COL_MIN", lo), ("H_COL_MAX", hi)):
             session.set_param(nm, float(val))
             actual = session.get_param(nm)
-            tag = "[OK]  " if actual is not None and abs(actual - val) < 1.0 else "[FAIL]"
+            tag = (
+                "[OK]  " if actual is not None and abs(actual - val) < 1.0 else "[FAIL]"
+            )
             print(f"  {tag} {nm} = {actual}")
         return
     if sub == "fit-range":
@@ -536,10 +589,13 @@ def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
                 },
             )
         except ValueError as e:
-            print(f"  Error: {e}"); return
+            print(f"  Error: {e}")
+            return
         if len(pos) != 2 or "--cyclic" not in flags:
-            print("  Usage: swash fit-range <min_us> <max_us> --cyclic N "
-                  "--allow-full-range")
+            print(
+                "  Usage: swash fit-range <min_us> <max_us> --cyclic N "
+                "--allow-full-range"
+            )
             return
         if not flags.get("--allow-full-range", False):
             print("  [REFUSED] fit-range runs native full-envelope oscillation.")
@@ -548,7 +604,8 @@ def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
         try:
             lo, hi = (int(value) for value in pos)
         except ValueError:
-            print("  Error: min and max must be integers"); return
+            print("  Error: min and max must be integers")
+            return
         cyclic = flags["--cyclic"]
         iterations = flags.get("--iterations", 3)
         margin = flags.get("--margin", 3)
@@ -560,7 +617,8 @@ def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
             try:
                 targets = [int(args[1])]
             except ValueError:
-                print("  Usage: swash neutral [n]"); return
+                print("  Usage: swash neutral [n]")
+                return
         for n in targets:
             _send_set_servo(session, n, PWM_NEUTRAL)
         print(f"  Output(s) {targets} -> {PWM_NEUTRAL} us")
@@ -568,16 +626,17 @@ def _cmd_swash(session: LinkHubClient, args: list[str]) -> None:
     # Positional: swash <coll%> [lon%] [lat%]
     try:
         coll = float(args[0]) / 100.0
-        lon  = float(args[1]) / 100.0 if len(args) > 1 else 0.0
-        lat  = float(args[2]) / 100.0 if len(args) > 2 else 0.0
+        lon = float(args[1]) / 100.0 if len(args) > 1 else 0.0
+        lat = float(args[2]) / 100.0 if len(args) > 2 else 0.0
     except ValueError:
-        print("  Error: values must be numbers"); return
+        print("  Error: values must be numbers")
+        return
     s1n, s2n, s3n = _h3_forward_mix(coll, lon, lat)
     pwm1, pwm2, pwm3 = _norm_to_pwm(s1n), _norm_to_pwm(s2n), _norm_to_pwm(s3n)
     _send_set_servo(session, SERVO_S1, pwm1)
     _send_set_servo(session, SERVO_S2, pwm2)
     _send_set_servo(session, SERVO_S3, pwm3)
-    print(f"  swash coll={coll*100:.0f}% lon={lon*100:.0f}% lat={lat*100:.0f}%")
+    print(f"  swash coll={coll * 100:.0f}% lon={lon * 100:.0f}% lat={lat * 100:.0f}%")
     print(f"    S1={pwm1} us  S2={pwm2} us  S3={pwm3} us")
 
 
@@ -598,9 +657,12 @@ def _run_servo_mode(
 ) -> tuple[int, int] | None:
     cursor = session.current_cursor()
     heartbeat, cursor = read_one(
-        session, cursor, "HEARTBEAT", wait=2.0,
+        session,
+        cursor,
+        "HEARTBEAT",
+        wait=2.0,
     )
-    if heartbeat is None:
+    if not isinstance(heartbeat, Heartbeat):
         print("  [FAIL] no heartbeat; servo mode aborted")
         return None
     if MavModeFlag.SAFETY_ARMED in heartbeat.base_mode:
@@ -614,7 +676,9 @@ def _run_servo_mode(
         print(f"  [FAIL] could not set H_SV_MAN={mode}")
         return None
     mode_name = next(name for name, value in _SV_MAN_MODES.items() if value == mode)
-    print(f"  H_SV_MAN={mode} ({mode_name}) running for {duration:.1f}s (ESC or Ctrl-C to stop)")
+    print(
+        f"  H_SV_MAN={mode} ({mode_name}) running for {duration:.1f}s (ESC or Ctrl-C to stop)"
+    )
     session.request_data_stream(MavDataStream.RC_CHANNELS, 10)
     print("  t(s)    S1(us)  S2(us)  S3(us)")
     started = time.monotonic()
@@ -625,7 +689,10 @@ def _run_servo_mode(
     try:
         while time.monotonic() < deadline:
             msg, cursor = read_one(
-                session, cursor, "SERVO_OUTPUT_RAW", wait=0.2,
+                session,
+                cursor,
+                "SERVO_OUTPUT_RAW",
+                wait=0.2,
             )
             now = time.monotonic()
             if msg is not None:
@@ -636,8 +703,10 @@ def _run_servo_mode(
                 ]
                 observed.extend(value for value in values if value > 0)
                 if now >= next_print:
-                    print(f"  {now - started:5.1f}  "
-                          f"{values[0]:6d}  {values[1]:6d}  {values[2]:6d}")
+                    print(
+                        f"  {now - started:5.1f}  "
+                        f"{values[0]:6d}  {values[1]:6d}  {values[2]:6d}"
+                    )
                     next_print = now + 0.2
             if _esc_check():
                 print("\n  [ESC] stopping servo mode")
@@ -696,13 +765,14 @@ def _fit_swash_range(
         "SERVO3_TRIM": trim,
         "H_CYC_MAX": cyclic,
     }
-    if not all(_set_param_verified(session, name, value) for name, value in initial.items()):
+    if not all(
+        _set_param_verified(session, name, value) for name, value in initial.items()
+    ):
         print("  [FAIL] setup write failed; fit aborted")
         return
 
     target_lo, target_hi = lo + margin, hi - margin
-    print(f"  Target final envelope: {target_lo}..{target_hi} us "
-          f"({margin} us margin)")
+    print(f"  Target final envelope: {target_lo}..{target_hi} us ({margin} us margin)")
     for attempt in range(1, iterations + 1):
         print(f"\n  Fit iteration {attempt}/{iterations}")
         extrema = _run_servo_mode(session, _SV_MAN_MODES["oscillate"], 12.0)
@@ -727,8 +797,10 @@ def _fit_swash_range(
         if next_min >= next_max:
             print("  [FAIL] requested cyclic leaves no usable collective range")
             return
-        print(f"  Adjusting collective limits: {round(col_min)}..{round(col_max)} "
-              f"-> {next_min}..{next_max}")
+        print(
+            f"  Adjusting collective limits: {round(col_min)}..{round(col_max)} "
+            f"-> {next_min}..{next_max}"
+        )
         if not (
             _set_param_verified(session, "H_COL_MIN", next_min)
             and _set_param_verified(session, "H_COL_MAX", next_max)
@@ -739,7 +811,9 @@ def _fit_swash_range(
     print("  [FAIL] fit did not converge within the requested iterations")
 
 
-def _bounded_swash_waypoints(lo: int, neutral: int, hi: int) -> tuple[tuple[int, int, int], ...]:
+def _bounded_swash_waypoints(
+    lo: int, neutral: int, hi: int
+) -> tuple[tuple[int, int, int], ...]:
     """Safe HR3 setup positions, all bounded by the measured servo envelope."""
     return (
         (neutral, neutral, neutral),
@@ -759,9 +833,12 @@ def _bounded_swash_waypoints(lo: int, neutral: int, hi: int) -> tuple[tuple[int,
 def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
     cursor = session.current_cursor()
     heartbeat, cursor = read_one(
-        session, cursor, "HEARTBEAT", wait=2.0,
+        session,
+        cursor,
+        "HEARTBEAT",
+        wait=2.0,
     )
-    if heartbeat is None:
+    if not isinstance(heartbeat, Heartbeat):
         print("  [FAIL] no heartbeat; swash sweep aborted")
         return
     if MavModeFlag.SAFETY_ARMED in heartbeat.base_mode:
@@ -786,7 +863,9 @@ def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
     segment_s = duration / (len(waypoints) - 1)
     started = time.monotonic()
     deadline = started + duration
-    print(f"  Safe HR3 sweep: {lo}..{hi} us for {duration:.1f}s (ESC or Ctrl-C to stop)")
+    print(
+        f"  Safe HR3 sweep: {lo}..{hi} us for {duration:.1f}s (ESC or Ctrl-C to stop)"
+    )
     print("  t(s)    S1(us)  S2(us)  S3(us)")
     session.request_data_stream(MavDataStream.RC_CHANNELS, 10)
     next_print = started
@@ -803,12 +882,23 @@ def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
                 _send_set_servo(session, output, pwm)
 
             msg, cursor = read_one(
-                session, cursor, "SERVO_OUTPUT_RAW", wait=0.08,
+                session,
+                cursor,
+                "SERVO_OUTPUT_RAW",
+                wait=0.08,
             )
             if msg is not None and now >= next_print:
-                values = tuple(getattr(msg, f"servo{output}_raw", 0) for output in SWASH_SERVOS)
-                status = "OK" if all(lo <= value <= hi for value in values) else "OUT OF RANGE"
-                print(f"  {now - started:5.1f}  {values[0]:6d}  {values[1]:6d}  {values[2]:6d}  {status}")
+                values = tuple(
+                    getattr(msg, f"servo{output}_raw", 0) for output in SWASH_SERVOS
+                )
+                status = (
+                    "OK"
+                    if all(lo <= value <= hi for value in values)
+                    else "OUT OF RANGE"
+                )
+                print(
+                    f"  {now - started:5.1f}  {values[0]:6d}  {values[1]:6d}  {values[2]:6d}  {status}"
+                )
                 next_print = now + 0.2
             if _esc_check():
                 print("\n  [ESC] stopping swash sweep")
@@ -825,12 +915,14 @@ def _run_bounded_swash_sweep(session: LinkHubClient, duration: float) -> None:
 
 def _cmd_servo(session: LinkHubClient, args: list[str]) -> None:
     """servo <ch> <pwm>
-       servo mode <name|0..5> [--duration N]
-       servo sweep [--duration N]
-       servo hold <ch> <pwm> [--duration N]"""
+    servo mode <name|0..5> [--duration N]
+    servo sweep [--duration N]
+    servo hold <ch> <pwm> [--duration N]"""
     if not args:
         print("  Usage: servo <ch> <pwm>")
-        print("         servo mode <automated|passthrough|max|zero|min|oscillate> [--duration N]")
+        print(
+            "         servo mode <automated|passthrough|max|zero|min|oscillate> [--duration N]"
+        )
         print("         servo sweep [--duration N]")
         print("         servo hold <ch> <pwm> [--duration N]")
         return
@@ -843,18 +935,23 @@ def _cmd_servo(session: LinkHubClient, args: list[str]) -> None:
                 {"--duration": "float", "--allow-full-range": "bool"},
             )
         except ValueError as e:
-            print(f"  Error: {e}"); return
+            print(f"  Error: {e}")
+            return
         if sub == "sweep":
             if pos:
-                print("  Usage: servo sweep [--duration N]"); return
+                print("  Usage: servo sweep [--duration N]")
+                return
             duration = flags.get("--duration", 12.0)
             if duration <= 0:
-                print("  Error: duration must be greater than zero"); return
+                print("  Error: duration must be greater than zero")
+                return
             _run_bounded_swash_sweep(session, duration)
             return
         else:
             if len(pos) != 1:
-                print("  Usage: servo mode <automated|passthrough|max|zero|min|oscillate> [--duration N]")
+                print(
+                    "  Usage: servo mode <automated|passthrough|max|zero|min|oscillate> [--duration N]"
+                )
                 return
             mode_arg = pos[0].lower()
             if mode_arg in _SV_MAN_MODES:
@@ -865,32 +962,41 @@ def _cmd_servo(session: LinkHubClient, args: list[str]) -> None:
                 except ValueError:
                     mode = -1
                 if mode not in _SV_MAN_MODES.values():
-                    print(f"  Error: unknown servo mode {pos[0]!r}; expected a name or 0..5")
+                    print(
+                        f"  Error: unknown servo mode {pos[0]!r}; expected a name or 0..5"
+                    )
                     return
-            if mode == _SV_MAN_MODES["oscillate"]:
-                if not flags.get("--allow-full-range", False):
-                    print("  [REFUSED] native oscillate exercises the full configured")
-                    print("  swash envelope. Disconnect the servos, then explicitly use")
-                    print("  'servo mode oscillate --allow-full-range'.")
-                    return
+            if mode == _SV_MAN_MODES["oscillate"] and not flags.get("--allow-full-range", False):
+                print("  [REFUSED] native oscillate exercises the full configured")
+                print(
+                    "  swash envelope. Disconnect the servos, then explicitly use"
+                )
+                print("  'servo mode oscillate --allow-full-range'.")
+                return
         duration = flags.get("--duration", 12.0 if mode == 5 else 10.0)
         if duration <= 0:
-            print("  Error: duration must be greater than zero"); return
+            print("  Error: duration must be greater than zero")
+            return
         _run_servo_mode(session, mode, duration)
         return
     if sub == "hold":
         try:
             pos, flags = _parse_flags(args[1:], {"--duration": "float"})
         except ValueError as e:
-            print(f"  Error: {e}"); return
+            print(f"  Error: {e}")
+            return
         if len(pos) != 2:
-            print("  Usage: servo hold <ch> <pwm> [--duration N]"); return
+            print("  Usage: servo hold <ch> <pwm> [--duration N]")
+            return
         try:
-            ch = int(pos[0]); pwm = int(pos[1])
+            ch = int(pos[0])
+            pwm = int(pos[1])
         except ValueError:
-            print("  Error: ch and pwm must be integers"); return
+            print("  Error: ch and pwm must be integers")
+            return
         if not (800 <= pwm <= PWM_MAX):
-            print(f"  Error: pwm must be 800-{PWM_MAX}"); return
+            print(f"  Error: pwm must be 800-{PWM_MAX}")
+            return
         duration = flags.get("--duration", 60.0)
         outputs_to_release = tuple(dict.fromkeys((*SWASH_SERVOS, ch)))
         saved_functions = _release_servo_functions(session, outputs_to_release)
@@ -908,7 +1014,8 @@ def _cmd_servo(session: LinkHubClient, args: list[str]) -> None:
                 _send_set_servo(session, ch, pwm)
                 time.sleep(0.1)
                 if _esc_check():
-                    print("\n  [ESC] abort"); break
+                    print("\n  [ESC] abort")
+                    break
         except KeyboardInterrupt:
             print()
         finally:
@@ -929,15 +1036,20 @@ def _cmd_servo(session: LinkHubClient, args: list[str]) -> None:
         return
     # Positional: servo <ch> <pwm>
     if len(args) < 2:
-        print("  Usage: servo <ch> <pwm>"); return
+        print("  Usage: servo <ch> <pwm>")
+        return
     try:
-        ch  = int(args[0]); pwm = int(args[1])
+        ch = int(args[0])
+        pwm = int(args[1])
     except ValueError:
-        print("  Error: ch and pwm must be integers"); return
+        print("  Error: ch and pwm must be integers")
+        return
     if not (1 <= ch <= 16):
-        print("  Error: ch must be 1-16"); return
+        print("  Error: ch must be 1-16")
+        return
     if not (PWM_MIN <= pwm <= PWM_MAX):
-        print(f"  Error: pwm must be {PWM_MIN}-{PWM_MAX}"); return
+        print(f"  Error: pwm must be {PWM_MIN}-{PWM_MAX}")
+        return
     outputs_to_release = tuple(dict.fromkeys((*SWASH_SERVOS, ch)))
     saved_functions = _release_servo_functions(session, outputs_to_release)
     if saved_functions is None:
@@ -959,7 +1071,8 @@ def _cmd_motor(session: LinkHubClient, args: list[str], *, force: bool) -> None:
     simulation/logs/calibrate/motor_<pwm>_<ts>.csv.  On exit (timer / ESC /
     Ctrl-C / exception): motor -> idle, disarm, and leave the motor disconnected."""
     if not args:
-        print("  Usage: motor <pwm_us> [--duration N]  OR  motor off"); return
+        print("  Usage: motor <pwm_us> [--duration N]  OR  motor off")
+        return
     if args[0].lower() in ("off", "stop"):
         # Immediate stop: force the motor to idle (off) and disarm.
         try:
@@ -975,13 +1088,16 @@ def _cmd_motor(session: LinkHubClient, args: list[str], *, force: bool) -> None:
     try:
         pos, flags = _parse_flags(args, {"--duration": "float"})
     except ValueError as e:
-        print(f"  Error: {e}"); return
+        print(f"  Error: {e}")
+        return
     if not pos:
-        print("  Usage: motor <pwm_us> [--duration N]"); return
+        print("  Usage: motor <pwm_us> [--duration N]")
+        return
     try:
         pwm = int(pos[0])
     except ValueError:
-        print("  Error: pwm must be an integer (microseconds)"); return
+        print("  Error: pwm must be an integer (microseconds)")
+        return
     secs = flags.get("--duration", 5.0)
 
     # Read the live SERVO<motor>_MIN / SERVO<motor>_MAX caps so the prompt + clamp
@@ -991,7 +1107,9 @@ def _cmd_motor(session: LinkHubClient, args: list[str], *, force: bool) -> None:
     s4_min = int(session.get_param(mot_min_key) or MOTOR_OFF_US)
     s4_max = int(session.get_param(mot_max_key) or MOTOR_FULL_US)
     if not (s4_min <= pwm <= s4_max):
-        print(f"  Error: pwm must be in [{s4_min}, {s4_max}]  ({mot_min_key}/{mot_max_key}); got {pwm}")
+        print(
+            f"  Error: pwm must be in [{s4_min}, {s4_max}]  ({mot_min_key}/{mot_max_key}); got {pwm}"
+        )
         return
     if s4_max > s4_min:
         pct_for_prompt = (pwm - s4_min) / (s4_max - s4_min) * 100.0
@@ -1001,9 +1119,11 @@ def _cmd_motor(session: LinkHubClient, args: list[str], *, force: bool) -> None:
         confirm = input(
             f"  WARNING: SERVO{SERVO_MOTOR} = {pwm} us "
             f"({pct_for_prompt:.0f}% of [{s4_min},{s4_max}]) for {secs:.0f}s. "
-            f"Confirm (y/N): ")
+            f"Confirm (y/N): "
+        )
         if confirm.strip().lower() != "y":
-            print("  Cancelled."); return
+            print("  Cancelled.")
+            return
 
     # Same shuffle as `run`: release the motor output from any AP mixer so our
     # DO_SET_SERVO commands win.
@@ -1013,7 +1133,9 @@ def _cmd_motor(session: LinkHubClient, args: list[str], *, force: bool) -> None:
     saved_scr = session.get_param("RAWES_MODE")
     if saved_scr is not None and int(saved_scr) != 0:
         session.set_param("RAWES_MODE", 0)
-        print(f"  RAWES_MODE {int(saved_scr)} -> 0 (motor needs direct SERVO{SERVO_MOTOR} control)")
+        print(
+            f"  RAWES_MODE {int(saved_scr)} -> 0 (motor needs direct SERVO{SERVO_MOTOR} control)"
+        )
 
     if not _arm(session, force=True):
         _safety_shutdown(session)
@@ -1021,25 +1143,28 @@ def _cmd_motor(session: LinkHubClient, args: list[str], *, force: bool) -> None:
     print("  [OK] Armed.")
 
     # DShot self-arms from idle -- no ESC pre-arm hold needed.
-    print(f"  Motor: SERVO{SERVO_MOTOR} = {pwm} us for {secs:.1f}s "
-          f"(SERVO{SERVO_MOTOR} range [{s4_min}, {s4_max}]).")
+    print(
+        f"  Motor: SERVO{SERVO_MOTOR} = {pwm} us for {secs:.1f}s "
+        f"(SERVO{SERVO_MOTOR} range [{s4_min}, {s4_max}])."
+    )
 
     # Snapshot params for the log header
     meta = {
-        "verb":             "motor",
-        "pwm_us":           pwm,
-        "duration_s":       secs,
-        mot_min_key:        s4_min,
-        mot_max_key:        s4_max,
-        "run_start_local":  datetime.now().isoformat(timespec="seconds"),
-        "run_start_utc":    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "verb": "motor",
+        "pwm_us": pwm,
+        "duration_s": secs,
+        mot_min_key: s4_min,
+        mot_max_key: s4_max,
+        "run_start_local": datetime.now().isoformat(timespec="seconds"),
+        "run_start_utc": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     log = _RunLog.open("motor", f"{pwm}us", meta)
     print(f"  Logging to {log.path}")
 
     # On_tick refreshes the motor PWM ~twice per second while t_rel < secs.
     last_send = [-10.0]
-    stopped   = [False]
+    stopped = [False]
+
     def on_tick(t_rel: float) -> None:
         target = pwm if t_rel < secs else MOTOR_OFF_US
         if t_rel >= secs and not stopped[0]:
@@ -1068,12 +1193,10 @@ def _cmd_arm(session: LinkHubClient, args: list[str]) -> None:
             {"--duration": "float", "--force": "bool"},
         )
     except ValueError as e:
-        print(f"  Error: {e}"); return
+        print(f"  Error: {e}")
+        return
     if pos:
-        print(
-            "  Usage: arm [--duration N] [--force]"
-            "  (use --duration, not positional)"
-        )
+        print("  Usage: arm [--duration N] [--force]  (use --duration, not positional)")
         return
     duration = float(flags.get("--duration", 5.0))
     force = bool(flags.get("--force", False))
@@ -1099,10 +1222,12 @@ def _cmd_arm(session: LinkHubClient, args: list[str]) -> None:
 
 def _cmd_script(session: LinkHubClient, args: list[str]) -> None:
     """script upload <file>
-       script list
-       script remove <name>"""
+    script list
+    script remove <name>"""
     if not args:
-        raise ValueError("Usage: script upload <file> | script list | script remove <name>")
+        raise ValueError(
+            "Usage: script upload <file> | script list | script remove <name>"
+        )
     sub = args[0].lower()
     if sub == "upload":
         if len(args) != 2:
@@ -1112,11 +1237,13 @@ def _cmd_script(session: LinkHubClient, args: list[str]) -> None:
     if sub == "list":
         if len(args) != 1:
             raise ValueError("Usage: script list")
-        _list_scripts(session); return
+        _list_scripts(session)
+        return
     if sub == "remove":
         if len(args) != 2:
             raise ValueError("Usage: script remove <name>")
-        _remove_script(session, args[1]); return
+        _remove_script(session, args[1])
+        return
     raise ValueError(f"Unknown script subcommand {sub!r} (valid: upload, list, remove)")
 
 
@@ -1156,10 +1283,12 @@ def _cmd_logs(session: LinkHubClient, args: list[str]) -> None:
 def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
     """config check|fix"""
     if not args:
-        print("  Usage: config check [--all]  OR  config fix [--all]"); return
+        print("  Usage: config check [--all]  OR  config fix [--all]")
+        return
     sub = args[0].lower()
     if sub not in ("check", "fix"):
-        print(f"  Unknown config subcommand {sub!r}  (valid: check, fix)"); return
+        print(f"  Unknown config subcommand {sub!r}  (valid: check, fix)")
+        return
     opt_tokens = args[1:]
     use_all = False
     for tok in opt_tokens:
@@ -1168,7 +1297,7 @@ def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
         else:
             print(f"  Unknown option {tok!r} (valid: --all)")
             return
-    apply = (sub == "fix")
+    apply = sub == "fix"
     target = _config_target_params(use_all=use_all)
     scope = (
         "all shared and hardware defaults"
@@ -1184,7 +1313,7 @@ def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
     print("          (SITL-only rawes_sitl_defaults.parm excluded)")
     print()
     print(f"  {'Parameter':<25} {'Expected':>8}  {'Actual':>10}  Status")
-    print(f"  {'-'*25}  {'-'*8}  {'-'*10}  ------")
+    print(f"  {'-' * 25}  {'-' * 8}  {'-' * 10}  ------")
     any_diff = False
     any_fail = False
     try:
@@ -1203,7 +1332,7 @@ def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
         if name in current
         and abs(float(current[name]["value"]) - float(target[name])) >= 1e-4
     ]
-    updated: dict[str, dict[str, object]] = {}
+    updated = {}
     if apply and differences:
         try:
             session.set_params(differences, timeout=15.0)
@@ -1255,18 +1384,19 @@ def _cmd_config(session: LinkHubClient, args: list[str]) -> None:
 # REPL
 # ---------------------------------------------------------------------------
 
+
 def _repl(session: LinkHubClient) -> None:
     print("\nConnected. Type 'help' for commands, 'quit' to exit.\n")
     while True:
         try:
             raw = input("calibrate> ").strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             print()
             break
         if not raw:
             continue
         tokens = raw.split()
-        cmd    = tokens[0].lower()
+        cmd = tokens[0].lower()
         if cmd in ("quit", "exit", "q"):
             break
         if cmd == "help":
@@ -1282,6 +1412,7 @@ def _repl(session: LinkHubClient) -> None:
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -1307,12 +1438,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="restrict LinkHub discovery to one baud rate; omit to try standard rates",
     )
     p.add_argument("--motor-name-prefix", help="optional Bluetooth motor name prefix")
-    p.add_argument("--force", "-f", action="store_true",
-                   help="Skip confirmation prompts (for scripted/CI use)")
-    p.add_argument("command", nargs="?", default=None,
-                   help="Command to run non-interactively; omit for interactive REPL")
-    p.add_argument("args", nargs=argparse.REMAINDER,
-                   help="Arguments for the command")
+    p.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Skip confirmation prompts (for scripted/CI use)",
+    )
+    p.add_argument(
+        "command",
+        nargs="?",
+        default=None,
+        help="Command to run non-interactively; omit for interactive REPL",
+    )
+    p.add_argument("args", nargs=argparse.REMAINDER, help="Arguments for the command")
     return p
 
 
@@ -1320,11 +1458,14 @@ def _build_parser() -> argparse.ArgumentParser:
 # Connection helper
 # ---------------------------------------------------------------------------
 
+
 def _connect(server: str) -> LinkHubClient:
     print(f"Connecting to LinkHub at {server} ...")
     session = LinkHubClient(address=server)
     session.connect(timeout=15.0)
-    print(f"Connected: sysid={session._target_system} compid={session._target_component}")
+    print(
+        f"Connected: sysid={session._target_system} compid={session._target_component}"
+    )
     session.request_data_stream(MavDataStream.RAW_CONTROLLER, 10)
     _refresh_pole_pairs(session)
     return session
@@ -1333,6 +1474,7 @@ def _connect(server: str) -> LinkHubClient:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     args = _build_parser().parse_args()

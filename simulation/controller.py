@@ -8,9 +8,11 @@ flight stack control is GUIDED-only.
 import math
 
 import numpy as np
+from numpy.typing import ArrayLike
 from simulation.frames import build_orb_frame, cross3  # noqa: F401 — build_orb_frame re-exported for callers
 from simulation.swashplate import SwashplateServoModel
-from dynbem     import RotorInputs
+from dynbem     import RotorDefinition, RotorInputs
+from simulation.physics_core import AeroModel
 from simulation.param_defaults import load_ap_params as _load_ap_params
 from simulation.param_defaults import load_collective_phys_range as _load_col_range
 from arduloop import HeliRateController, HeliParams, RateAxisParams
@@ -31,7 +33,7 @@ class TensionPI:
 
     def __init__(self, setpoint_n: float, kp: float, ki: float,
                  coll_min: float, coll_max: float,
-                 warm_coll_rad: "float | None",
+                 warm_coll_rad: float | None,
                  kd: float = 0.0):
         self.setpoint  = float(setpoint_n)
         self.kp        = float(kp)
@@ -54,9 +56,10 @@ class TensionPI:
         # saturated in the same direction as the error.  This prevents the
         # integrator from winding deep into the clamp, which would cause the
         # output to stay at the clamp limit even after the error reverses.
-        if not (raw_before <= self.coll_min and error < 0):
-            if not (raw_before >= self.coll_max and error > 0):
-                self._integral += error * dt
+        if not (raw_before <= self.coll_min and error < 0) and not (
+            raw_before >= self.coll_max and error > 0
+        ):
+            self._integral += error * dt
 
         self._prev_error = error
         raw = self.kp * error + self.ki * self._integral + d_term
@@ -422,7 +425,7 @@ class AltitudeHoldController:
 
     @classmethod
     def from_pos(cls, pos: np.ndarray,
-                 slew_rate_rad_s: float) -> "AltitudeHoldController":
+                 slew_rate_rad_s: float) -> AltitudeHoldController:
         """Initialise elevation from the hub's starting NED position."""
         tlen = float(np.linalg.norm(pos))
         el   = float(np.arcsin(max(-1.0, min(1.0, float(-pos[2]) / max(tlen, 0.1)))))
@@ -505,7 +508,7 @@ class ElevationHoldController:
         slew_rate_rad_s: float,
         mass_kg        : float,
         kp_outer       : float,
-    ) -> "ElevationHoldController":
+    ) -> ElevationHoldController:
         tlen = float(np.linalg.norm(pos))
         el   = float(np.arcsin(max(-1.0, min(1.0, float(-pos[2]) / max(tlen, 0.1)))))
         return cls(el, slew_rate_rad_s, mass_kg, kp_outer)
@@ -522,7 +525,7 @@ class ElevationHoldController:
         tension_n   : float,
         dt          : float,
         G           : float = 9.81,
-    ) -> "tuple[float, float]":
+    ) -> tuple[float, float]:
         """
         Step the controller.  Returns (rate_roll_sp, rate_pitch_sp) in [rad/s].
 
@@ -594,9 +597,9 @@ class HeliCyclicController:
 
     def __init__(
         self,
-        rotor,
+        rotor: RotorDefinition,
         P:              float = 0.67,
-        I:              float = 0.15,
+        I:              float = 0.15,  # noqa: E741 - matches the ArduPilot rate-gain parameter suffix
         D:              float = 0.02,
         FF:             float = 0.00,
         IMAX:           float = 0.30,
@@ -672,7 +675,7 @@ class HeliCyclicController:
         omega_body    : np.ndarray,
         dt            : float,
         collective_norm: float = 0.0,
-    ) -> "tuple[float, float, float]":
+    ) -> tuple[float, float, float]:
         """Advance one timestep from physical collective [rad].
 
         Returns ``(tilt_lon, tilt_lat, col_actual)``.  All three channels
@@ -710,7 +713,7 @@ class HeliCyclicController:
         omega_body    : np.ndarray,
         dt            : float,
         collective_norm: float | None = None,
-    ) -> "tuple[float, float, float]":
+    ) -> tuple[float, float, float]:
         """Advance one timestep using thrust [0..1] as input.
 
         This is the preferred API for guided-stack integration because it matches
@@ -735,7 +738,7 @@ class HeliCyclicController:
 # ---------------------------------------------------------------------------
 
 def col_min_for_altitude_rad(
-    aero,
+    aero: AeroModel[object],
     xi_deg:        float,
     mass_kg:       float,
     omega:         float,
@@ -803,9 +806,9 @@ def col_min_for_altitude_rad(
 # ---------------------------------------------------------------------------
 
 def compute_bz_tether(
-    pos:    np.ndarray,
-    anchor: np.ndarray,
-) -> "np.ndarray | None":
+    pos:    ArrayLike,
+    anchor: ArrayLike,
+) -> np.ndarray | None:
     """
     Equilibrium body_z (FRD: hub axis pointing DOWN through the disk).
 
@@ -856,7 +859,7 @@ def compute_rate_cmd(
     R_body_to_world: np.ndarray,
     kp:              float,
     kd:              float = 0.0,
-    omega_world:     "np.ndarray | None" = None,
+    omega_world:     np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Body_z alignment error → body-frame angular rate command.
@@ -931,7 +934,7 @@ def compute_rate_cmd_sqrt(
     accel_max:       float,
     dt:              float,
     kd:              float = 0.0,
-    omega_world:     "np.ndarray | None" = None,
+    omega_world:     np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Body_z alignment error -> sqrt-shaped body-frame angular rate command.

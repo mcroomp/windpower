@@ -111,7 +111,7 @@ def _add_cylinder(plotter: pv.Plotter, *, center: tuple[float, float, float],
 
 def build_scene(plotter: pv.Plotter, rotor_path: Path) -> None:
     rotor = rotor_definition.load(str(rotor_path))
-    blade = getattr(rotor, "blade", rotor)
+    blade = rotor.blade
     assumptions = VisualAssumptions()
 
     rotor_hub_z = 0.0
@@ -299,7 +299,7 @@ def build_scene(plotter: pv.Plotter, rotor_path: Path) -> None:
         font_size=10,
         color="#263238",
     )
-    plotter.add_axes(line_width=2, color="#4b555b")
+    pv.Plotter.add_axes(plotter, line_width=2, color="#4b555b")
 
 
 def main() -> None:
@@ -312,8 +312,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    plotter = pv.Plotter(title="RAWES rotor-kite model", window_size=(1200, 850))
-    plotter.set_background(BACKGROUND)
+    plotter = pv.Plotter(title="RAWES rotor-kite model", window_size=[1200, 850])
+    pv.Plotter.set_background(plotter, BACKGROUND)
     build_scene(plotter, args.rotor)
     plotter.enable_anti_aliasing("ssaa")
     plotter.camera_position = [

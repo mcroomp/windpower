@@ -11,24 +11,30 @@ All IC-start fixtures share the _ic_trapezoid_stack initialization helper.
 """
 import contextlib
 import math
+import logging
+from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from tests.sitl.stack_infra import *  # noqa: F401,F403  — re-export everything for test imports
-from tests.sitl.stack_infra import (
-    _acro_stack,
-    _RAWES_DEFAULTS_PARM,
-    _install_lua_scripts,
-    _STARTING_STATE,
-    _STARTUP_DAMP_S,
+from tests.sitl.stack_infra import StackContext, _acro_stack
+from tests.sitl.stack_utils import (
     HOME_LAT_DEG,
     HOME_LON_DEG,
     HOME_ALT_M,
 )
-from linkhub_client.messages import NamedValueFloat, NamedValueInt
+from linkhub_client.messages import (
+    LocalPositionNed,
+    NamedValueFloat,
+    NamedValueInt,
+    Statustext,
+    decode_message,
+)
 from groundstation.rawes_modes import (
     CMD_ENTER_PASSIVE,
+    MessageSender,
     enter_passive_params,
     send_rawes_command,
 )
@@ -37,7 +43,9 @@ from simulation.sensor import _rotation_matrix_to_euler_zyx
 from simulation.torque_model import HubParams, equilibrium_throttle
 
 
-def _send_anchor_location(ctx) -> None:
+def _send_anchor_location(
+    gcs: MessageSender, home_alt_m: float, log: logging.Logger,
+) -> None:
     """Send the tether anchor's absolute GPS location to rawes.lua via NAMED_VALUE_INT.
 
     The anchor is fixed at the mediator's world-frame origin (config.py
@@ -52,10 +60,10 @@ def _send_anchor_location(ctx) -> None:
     so whatever altitude the vehicle physically occupies when the EKF's
     local origin is established becomes its "zero" -- a real sensor
     behavior (baro is zeroed at boot), not a simulation artifact.  This
-    stack test boots the vehicle already kinematically locked ctx.home_alt_m
+    stack test boots the vehicle already kinematically locked home_alt_m
     metres above the anchor, so the EKF's local origin altitude ends up that
     far above the anchor's true altitude.  The anchor's sent altitude must
-    therefore be offset by -ctx.home_alt_m so it resolves to the correct
+    therefore be offset by -home_alt_m so it resolves to the correct
     (positive-down) D offset once EKF-local.
 
     Sent as NAMED_VALUE_INT (not NAMED_VALUE_FLOAT): lat/lon in degrees lose
@@ -63,28 +71,28 @@ def _send_anchor_location(ctx) -> None:
     field, whereas NAMED_VALUE_INT carries the same int32 degrees*1e7 / cm
     representation ArduPilot's own Location object uses natively.
     """
-    anchor_alt_m = HOME_ALT_M - ctx.home_alt_m
+    anchor_alt_m = HOME_ALT_M - home_alt_m
     lat_e7 = round(HOME_LAT_DEG * 1e7)
     lon_e7 = round(HOME_LON_DEG * 1e7)
     alt_cm = round(anchor_alt_m * 100)
-    ctx.gcs.send_message(NamedValueInt(name="RAWES_LAT", value=lat_e7))
-    ctx.gcs.send_message(NamedValueInt(name="RAWES_LON", value=lon_e7))
-    ctx.gcs.send_message(NamedValueInt(name="RAWES_AAL", value=alt_cm))
-    ctx.log.info(
+    gcs.send_message(NamedValueInt(name="RAWES_LAT", value=lat_e7))
+    gcs.send_message(NamedValueInt(name="RAWES_LON", value=lon_e7))
+    gcs.send_message(NamedValueInt(name="RAWES_AAL", value=alt_cm))
+    log.info(
         "  anchor location sent via NVI (lat=%.7f lon=%.7f alt=%.1fm, "
         "home_alt_m=%.2f)",
-        HOME_LAT_DEG, HOME_LON_DEG, anchor_alt_m, ctx.home_alt_m,
+        HOME_LAT_DEG, HOME_LON_DEG, anchor_alt_m, home_alt_m,
     )
 
 
 def _wait_and_configure_mode_anchor(
-    ctx,
+    ctx: StackContext,
     *,
     mode: int,
     mode_label: str,
 ) -> None:
     """Send the anchor location once, then set RAWES_MODE."""
-    _send_anchor_location(ctx)
+    _send_anchor_location(ctx.gcs, ctx.home_alt_m, ctx.log)
     ctx.gcs.set_param("RAWES_MODE", int(mode), timeout=5.0)
     ctx.log.info("  mode=%s set", mode_label)
 
@@ -94,14 +102,16 @@ def _wait_and_configure_mode_anchor(
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def guided_nogps_armed(tmp_path, request):
+def guided_nogps_armed(tmp_path: Path, request: pytest.FixtureRequest):
     """Full GUIDED_NOGPS stack fixture. Yields StackContext armed in GUIDED_NOGPS mode."""
     with _acro_stack(tmp_path, test_name=request.node.name) as ctx:
         yield ctx
 
 
 @pytest.fixture
-def guided_nogps_armed_pumping_lua(tmp_path, request):
+def guided_nogps_armed_pumping_lua(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     Pumping-cycle stack fixture — starts at the IC via the shared trapezoid init.
 
@@ -145,7 +155,9 @@ def guided_nogps_armed_pumping_lua(tmp_path, request):
 
 
 @pytest.fixture
-def guided_nogps_armed_landing_lua(tmp_path, request):
+def guided_nogps_armed_landing_lua(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     Landing stack fixture with rawes.lua active in landing mode (RAWES_MODE=4).
 
@@ -236,12 +248,12 @@ def guided_nogps_armed_landing_lua(tmp_path, request):
 
 @contextlib.contextmanager
 def _ic_trapezoid_stack(
-    tmp_path,
+    tmp_path: Path,
     *,
-    test_name,
-    winch_cmd_port,
-    run_ground_winch,
-    message_rates=None,
+    test_name: str,
+    winch_cmd_port: int,
+    run_ground_winch: bool,
+    message_rates: Mapping[str, float | None] | None = None,
 ):
     """
     Shared SITL initialization for fixtures that must START AT THE IC.
@@ -407,7 +419,7 @@ def _ic_trapezoid_stack(
             # (after the IC seed values are queued) -- it does not depend on
             # telemetry/EKF availability, so it can be sent right away without
             # gating the MODE_PASSIVE assignment above.
-            _send_anchor_location(ctx)
+            _send_anchor_location(ctx.gcs, ctx.home_alt_m, ctx.log)
 
             # Altitude above anchor at IC = ctx.home_alt_m (precomputed in
             # stack_infra._acro_stack as -initial_state["pos"][2]; the anchor
@@ -499,18 +511,16 @@ def _ic_trapezoid_stack(
                 try:
                     while True:
                         _winch_sock.recvfrom(256)
-                except (TimeoutError, _sock.timeout, BlockingIOError):
+                except (TimeoutError, BlockingIOError):
                     pass
 
                 # Re-issue the hold command at 10 Hz.  The GovernedWinch holds
                 # tension natively via cruise_v=0 + tension_target.
-                try:
+                with contextlib.suppress(OSError):
                     _winch_sock.sendto(_json_w.dumps({
                         "cruise_v":       0.0,
                         "tension_target": _tension_target_n,
                     }).encode(), _winch_addr)
-                except OSError:
-                    pass
                 _time_w.sleep(0.1)   # 10 Hz
 
         _winch_thread = _thr.Thread(target=_winch_regulator, daemon=True,
@@ -524,14 +534,14 @@ def _ic_trapezoid_stack(
         finally:
             _winch_stop.set()
             _winch_thread.join(timeout=2.0)
-            try:
+            with contextlib.suppress(OSError):
                 _winch_sock.close()
-            except OSError:
-                pass
 
 
 @pytest.fixture
-def guided_nogps_armed_lua_full(tmp_path, request):
+def guided_nogps_armed_lua_full(
+    tmp_path: Path, request: pytest.FixtureRequest
+):
     """
     Full-stack GUIDED_NOGPS fixture with rawes.lua, internal_controller=False.
 

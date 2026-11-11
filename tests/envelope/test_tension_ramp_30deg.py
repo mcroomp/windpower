@@ -9,10 +9,10 @@ Step 3: verify each IC is reproducible — restart simulate_point from that IC a
         check it immediately stays within tolerance.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
+import pytest
+from simulation.rotor_physics import require_mass_kg
 
 
 from dynbem import create_aero, RotorInputs, step_omega
@@ -39,7 +39,7 @@ def _run_standalone_ramp():
     rotor     = load_default_rotor()
     aero      = create_aero(rotor, model="quasi_static")
     rotor_state = aero.initial_rotor_state()
-    mass      = float(rotor.inertia.mass_kg)
+    mass      = require_mass_kg(rotor)
     I_ode     = float(rotor.autorotation.I_ode_kgm2 or 10.0)
     omega_min = float(rotor.autorotation.omega_min_rad_s or 0.5)
     weight  = mass * 9.81
@@ -156,7 +156,7 @@ def _get_ramp():
 
 # ── tests ──────────────────────────────────────────────────────────────────────
 
-def test_ramp_tracks_to_1000n(capsys):
+def test_ramp_tracks_to_1000n(capsys: pytest.CaptureFixture[str]):
     """Standalone ramp must not diverge and must track v_target throughout."""
     samples, diverged_at = _get_ramp()
 
@@ -180,7 +180,7 @@ def test_ramp_tracks_to_1000n(capsys):
     assert not bad, f"lost tracking at {bad}"
 
 
-def test_ics_are_reproducible(capsys):
+def test_ics_are_reproducible(capsys: pytest.CaptureFixture[str]):
     """Each captured IC must restart cleanly: 5 s sim stays within tolerance."""
     samples, _ = _get_ramp()
     failures = []

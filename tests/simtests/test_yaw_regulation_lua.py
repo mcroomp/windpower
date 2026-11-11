@@ -24,8 +24,6 @@ bench measurement of the motor, the observer will work the same way.
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 
@@ -33,12 +31,13 @@ from simulation.param_defaults import load_collective_phys_range
 import pytest
 
 
-pytestmark = [pytest.mark.simtest, pytest.mark.timeout(30)]
-
 import simulation.torque_model as _m
 from simulation.rawes_lua_harness import RawesLua
 from linkhub_client.messages import NamedValueFloat
 from groundstation.rawes_modes import CMD_ENTER_PASSIVE, MODE_PASSIVE, enter_passive_params
+
+pytestmark = [pytest.mark.simtest, pytest.mark.timeout(30)]
+
 
 # ---------------------------------------------------------------------------
 # Plant constants (torque_model defaults — GB4008 66KV, 10:1 gear, 4S LiPo)

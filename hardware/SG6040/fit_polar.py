@@ -8,9 +8,7 @@ Usage:
     python hardware/SG6040/fit_polar.py
 """
 
-import sys
 import math
-import csv
 import numpy as np
 from pathlib import Path
 
@@ -81,10 +79,7 @@ CL_linear_extrap = CL0_fit + CL_alpha_fit * np.radians(alpha)
 deviation        = np.abs(CL - CL_linear_extrap)
 # Find first alpha > 0 where deviation > 0.05
 onset_mask = (alpha > 0) & (deviation > 0.05)
-if onset_mask.any():
-    alpha_stall_onset = float(alpha[onset_mask][0])
-else:
-    alpha_stall_onset = alpha_stall
+alpha_stall_onset = float(alpha[onset_mask][0]) if onset_mask.any() else alpha_stall
 
 # ---------------------------------------------------------------------------
 # 3. CD0: drag at zero lift (interpolate)
@@ -144,7 +139,7 @@ print(f"  CD0              = {CD0_fit:.5f}   (drag at zero lift, alpha~{alpha_ze
 print(f"  oswald_eff       = {e_fit:.3f}    (fit over CL {CL_OP_LO}-{CL_OP_HI}, CD RMSE={cd_rmse:.5f})")
 print(f"  alpha_stall_deg  = {alpha_stall:.1f}    (CL peak)")
 print(f"  alpha_stall_onset= {alpha_stall_onset:.1f}    (first >0.05 dev from linear — use this)")
-print(f"  NOTE: SG6040 stalls gradually; CL still rises past onset. Model clips here.")
+print("  NOTE: SG6040 stalls gradually; CL still rises past onset. Model clips here.")
 print(f"  CL_max           = {CL_max:.4f}")
 print()
 print(f"Best L/D: {CL_best/CD_best:.1f} at alpha={a_best:.2f} deg  (CL={CL_best:.4f}, CD={CD_best:.5f})")

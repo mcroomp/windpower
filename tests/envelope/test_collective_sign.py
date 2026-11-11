@@ -18,7 +18,7 @@ Sign chain (from test_hover_sign.py / design/aero_conventions.md):
 import numpy as np
 
 from simulation.frames import build_orb_frame
-from tests.unit._aero_probe import load_rotor, make_probe, probe_steady
+from tests.common.aero_probe import load_rotor, make_probe, probe_steady
 
 R_HORIZONTAL = build_orb_frame(np.array([0., 0., 1.]))   # FRD: body_z DOWN through disk
 
@@ -30,7 +30,7 @@ T_STEADY = 20.0
 _AERO = make_probe(load_rotor("beaupoil_2026"))
 
 
-def _thrust(col):
+def _thrust(col: float):
     r = probe_steady(
         _AERO,
         collective_rad = col,

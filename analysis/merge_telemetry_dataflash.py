@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -497,7 +496,6 @@ def main() -> int:
     }
 
     # Build output rows on telemetry time base.
-    out_fields = list(COLUMNS)
     df_out_fields: list[str] = []
     for group in selected_groups:
         for field in CHANNEL_GROUPS[group]:
@@ -526,7 +524,6 @@ def main() -> int:
                 continue
             if group == "mavlink":
                 continue
-            source_field = field.replace("df_", "")
             if field.startswith("df_att_") and "att" in families:
                 if field == "df_att_roll_deg":
                     df_interp_cache[field] = _df_interp("att", "att_roll_deg")

@@ -14,7 +14,6 @@ No SITL, no Docker.  Runs with the existing unit-test venv.
 
 import math
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -39,18 +38,18 @@ def sim():
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _unit(v):
+def _unit(v: np.ndarray | list[float]):
     v = np.asarray(v, dtype=float)
     return v / np.linalg.norm(v)
 
 
-def _rot_z(angle):
+def _rot_z(angle: float):
     """3x3 rotation matrix around NED Z (yaw)."""
     c, s = math.cos(angle), math.sin(angle)
     return np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
 
 
-def _bz_ned_to_roll_pitch(bz_ned, yaw_rad):
+def _bz_ned_to_roll_pitch(bz_ned: np.ndarray, yaw_rad: float):
     """Python reference for bz_ned_to_roll_pitch (mirrors the Lua implementation)."""
     cy, sy = math.cos(yaw_rad), math.sin(yaw_rad)
     bz_fwd   =  cy * bz_ned[0] + sy * bz_ned[1]
@@ -61,7 +60,9 @@ def _bz_ned_to_roll_pitch(bz_ned, yaw_rad):
     return roll_deg, pitch_deg
 
 
-def _body_z_from_attitude_target(roll_deg, pitch_deg, yaw_deg):
+def _body_z_from_attitude_target(
+    roll_deg: float, pitch_deg: float, yaw_deg: float,
+):
     """Reconstruct body_z (NED) from ZYX roll/pitch/yaw attitude target."""
     r = math.radians(roll_deg)
     p = math.radians(pitch_deg)
@@ -82,7 +83,7 @@ def _body_z_from_attitude_target(roll_deg, pitch_deg, yaw_deg):
 
 # ── Constants sanity ─────────────────────────────────────────────────────────
 
-def test_constants_have_expected_values(sim):
+def test_constants_have_expected_values(sim: RawesLua):
     f = sim.fns
     assert float(f.THRUST_SLEW_MAX)      == pytest.approx(0.058, abs=1e-3)
     assert float(f.MASS_KG)              == pytest.approx(5.0)
@@ -104,7 +105,7 @@ class TestBzAltitudeHold:
       - normalises to a unit vector
     """
 
-    def test_output_is_unit_vector(self, sim):
+    def test_output_is_unit_vector(self, sim: RawesLua):
         """Result is always a unit vector."""
         pos = sim.lua_vec(10.0, 5.0, -8.0)
         r   = sim.fns.bz_altitude_hold(pos, 0.3, 200.0)
@@ -112,7 +113,7 @@ class TestBzAltitudeHold:
         assert math.sqrt(sum(x**2 for x in rv)) == pytest.approx(1.0, abs=1e-12)
 
 
-    def test_vertical_tether_points_down(self, sim):
+    def test_vertical_tether_points_down(self, sim: RawesLua):
         """FRD: at el=pi/2 (vertical) the hub is straight up, so body_z (= hub→
         anchor = down through disk) points straight down: NED z = +1."""
         pos = sim.lua_vec(0.0, 0.0, -50.0)   # directly above anchor
@@ -122,7 +123,7 @@ class TestBzAltitudeHold:
         assert rv[1] == pytest.approx(0.0, abs=1e-6)
         assert rv[2] == pytest.approx(1.0, abs=1e-6)
 
-    def test_azimuth_from_position(self, sim):
+    def test_azimuth_from_position(self, sim: RawesLua):
         """Changing azimuth of pos rotates the output body_z horizontally."""
         el = 0.3
         r  = 30.0
@@ -138,7 +139,7 @@ class TestBzAltitudeHold:
         # East case: Y component dominant, X small
         assert abs(rv_e[1]) > abs(rv_e[0])
 
-    def test_gravity_comp_increases_with_lower_elevation(self, sim):
+    def test_gravity_comp_increases_with_lower_elevation(self, sim: RawesLua):
         """
         The angular deviation of body_z from the tether direction is larger
         at low elevation: k = mass*g*cos(el)/tension is larger when el is small.
@@ -146,7 +147,7 @@ class TestBzAltitudeHold:
         r = 30.0
         tension = 200.0
 
-        def deviation_angle(el_deg):
+        def deviation_angle(el_deg: float):
             el  = math.radians(el_deg)
             pos = sim.lua_vec(r * math.cos(el), 0.0, -r * math.sin(el))
             bz  = sim.vec_to_list(sim.fns.bz_altitude_hold(pos, el, tension))
@@ -165,7 +166,9 @@ class TestBzAltitudeHold:
         (80.0, 270.0, 400.0),
         (15.0, 30.0,  180.0),
     ])
-    def test_matches_python_compute_bz_altitude_hold(self, sim, el_deg, az_deg, tension):
+    def test_matches_python_compute_bz_altitude_hold(
+        self, sim: RawesLua, el_deg: float, az_deg: float, tension: float,
+    ):
         """
         Cross-check: Lua bz_altitude_hold matches controller.py
         compute_bz_altitude_hold across a sweep of elevations and azimuths.
@@ -200,20 +203,25 @@ class TestBzNedToRollPitch:
     pass to vehicle:set_target_angle_and_climbrate.
     """
 
-    def _call(self, sim, bz_ned, yaw_rad):
+    def _call(
+        self,
+        sim: RawesLua,
+        bz_ned: np.ndarray | list[float],
+        yaw_rad: float,
+    ):
         """Call Lua bz_ned_to_roll_pitch and return (roll_deg, pitch_deg)."""
         bz = sim.lua_vec(*bz_ned)
         r, p = sim.fns.bz_ned_to_roll_pitch(bz, yaw_rad)
         return float(r), float(p)
 
-    def test_straight_down_is_zero_angles(self, sim):
+    def test_straight_down_is_zero_angles(self, sim: RawesLua):
         """body_z straight down (level hover) -> roll=0, pitch=0 regardless of yaw."""
         for yaw in [0.0, 0.5, math.pi, -1.2]:
             roll, pitch = self._call(sim, [0.0, 0.0, 1.0], yaw)
             assert roll  == pytest.approx(0.0, abs=1e-10), f"roll nonzero at yaw={yaw}"
             assert pitch == pytest.approx(0.0, abs=1e-10), f"pitch nonzero at yaw={yaw}"
 
-    def test_north_tilt_at_zero_yaw_is_pure_pitch(self, sim):
+    def test_north_tilt_at_zero_yaw_is_pure_pitch(self, sim: RawesLua):
         """
         bz tilted North at yaw=0: should produce nonzero pitch and zero roll.
         (North tilt = nose-down = positive pitch in ZYX convention.)
@@ -223,14 +231,14 @@ class TestBzNedToRollPitch:
         assert abs(roll) < 1e-10
         assert pitch > 1e-6
 
-    def test_east_tilt_at_zero_yaw_is_pure_roll(self, sim):
+    def test_east_tilt_at_zero_yaw_is_pure_roll(self, sim: RawesLua):
         """bz tilted East at yaw=0: should produce nonzero roll and zero pitch."""
         bz = _unit([0.0, 0.2, 1.0])
         roll, pitch = self._call(sim, bz, 0.0)
         assert abs(pitch) < 1e-10
         assert roll < -1e-6
 
-    def test_tilt_angle_invariant_under_yaw(self, sim):
+    def test_tilt_angle_invariant_under_yaw(self, sim: RawesLua):
         """
         The underlying tilt angle acos(cos(roll)*cos(pitch)) must not change as
         yaw rotates. This is the actual geometric invariant: the same body_z
@@ -245,7 +253,7 @@ class TestBzNedToRollPitch:
             assert actual_tilt == pytest.approx(expected_tilt, abs=1e-4), \
                 f"Tilt angle changed at yaw={math.degrees(yaw):.1f} deg"
 
-    def test_round_trip_via_rotation_matrix(self, sim):
+    def test_round_trip_via_rotation_matrix(self, sim: RawesLua):
         """
         R = Rz(yaw)*Ry(pitch)*Rx(roll) should reconstruct body_z = R[:,2]
         matching the original bz_ned (up to floating-point rounding).
@@ -278,7 +286,9 @@ class TestBzNedToRollPitch:
         ([0.3, -0.2, 0.9], math.pi / 4),
         ([0.0,  0.3, 0.7], math.pi),
     ])
-    def test_matches_python_reference(self, sim, bz_raw, yaw):
+    def test_matches_python_reference(
+        self, sim: RawesLua, bz_raw: list[float], yaw: float,
+    ):
         """Cross-check: Lua result matches the Python reference formula."""
         bz = _unit(bz_raw)
         lua_r, lua_p = self._call(sim, bz, yaw)
@@ -290,7 +300,7 @@ class TestBzNedToRollPitch:
 
 
 class TestLuaCaptureAgainstStartingIc:
-    def test_first_angle_command_is_close_to_ic_body_z(self, sim):
+    def test_first_angle_command_is_close_to_ic_body_z(self, sim: RawesLua):
         """
         Using steady_state_starting.json, once GPS capture occurs in Lua steady
         mode, the first angle target should be close to the IC body_z.

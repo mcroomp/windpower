@@ -11,8 +11,6 @@ Tests are in four groups:
 All tests are pure math -- no SITL, no physics, no network.
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,13 +20,32 @@ from scipy.spatial.transform import Rotation
 from arduloop.guided import (
     GuidedAttitudeController,
     GuidedAttitudeParams,
-    _THRUST_ERROR_ANGLE,
     _attitude_command_model,
     _sqrt_controller,
     _thrust_vector_rotation_angles,
 )
 from arduloop import HeliParams
 from arduloop.attitude_heli import HeliRateOutput
+from simulation.param_defaults import load_ap_params
+
+
+@pytest.mark.parametrize("loop_rate_hz,output_limit", [(400.0, 1.0), (200.0, 0.6)])
+def test_heli_parameter_loader_options(loop_rate_hz: float, output_limit: float) -> None:
+    params = load_ap_params()
+    hp = HeliParams.from_ap_dict(
+        params, loop_rate_hz=loop_rate_hz, output_limit=output_limit,
+    )
+    assert hp.loop_rate_hz == loop_rate_hz
+    assert hp.output_limit == output_limit
+    assert params["ATC_RAT_RLL_P"] == hp.roll.P
+    assert params["ATC_RAT_PIT_P"] == hp.pitch.P
+    assert params["ATC_RAT_YAW_P"] == hp.yaw.P
+
+
+def test_heli_parameter_loader_default_options() -> None:
+    hp = HeliParams.from_ap_dict(load_ap_params())
+    assert hp.loop_rate_hz == 400.0
+    assert hp.output_limit == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +156,6 @@ class TestAttitudeCommandModel:
         # With accel_max=0 the shaper falls back to linear P (no jerk limiting).
         # Result should match sqrt_controller(err, 1/tc, 0, dt) integrated.
         v, _ = _attitude_command_model(0.1, 0.0, 0.0, 0.0, 0.0, self._tc, self._dt)
-        expected = _sqrt_controller(0.1, 1.0 / self._tc, 0.0, self._dt) * self._dt
         # With accel_max=0, AP substitutes 1800 deg/s^2, so this is NOT pure linear P.
         # Just verify the result is finite and in the right direction.
         assert math.isfinite(v)
@@ -453,7 +469,6 @@ class TestGuidedAttitudeController:
         dt = 0.0025
         prev_err = None
         for step in range(300):
-            t = step * dt
             err, _, _ = _thrust_vector_rotation_angles(ctrl._q_commanded, rot.as_quat())
             err_mag = float(np.linalg.norm(err))
             if prev_err is not None:

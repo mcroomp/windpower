@@ -8,7 +8,7 @@ import pytest
 from groundstation.parameter_files import load_parameter_files
 
 
-def test_parameter_files_merge_in_order(tmp_path):
+def test_parameter_files_merge_in_order(tmp_path: Path):
     base = tmp_path / "base.parm"
     override = tmp_path / "override.parm"
     base.write_text(

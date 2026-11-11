@@ -30,10 +30,9 @@ from __future__ import annotations
 
 import argparse
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
+from simulation.rotor_physics import require_mass_kg
 
 
 from envelope.point_mass import simulate_point, balance_bz, tether_hat
@@ -56,7 +55,7 @@ PHASES: dict[str, dict] = {
 
 def _print_geometry(elevation_deg: float, tension_n: float, wind_speed: float) -> None:
     from envelope.rotor_helpers import load_default_rotor
-    mass   = float(load_default_rotor().inertia.mass_kg)
+    mass   = require_mass_kg(load_default_rotor())
     weight = mass * _G
     t_hat  = tether_hat(elevation_deg)
     F_teth = tension_n * t_hat
@@ -152,7 +151,7 @@ def sweep_collective(
               f"v_along={results[[r['col_rad'] for r in results].index(best_col)]['v_along']:+.3f} m/s")
     else:
         print()
-        print(f"  No converged solution found.")
+        print("  No converged solution found.")
 
     return results
 
@@ -182,7 +181,7 @@ def flight_envelope(
 
     print()
     print(f"Flight envelope  wind={wind_speed:.1f} m/s  v_target={v_target:+.2f} m/s")
-    print(f"  (showing best v_along [m/s]; * = converged within 0.2 m/s of target)")
+    print("  (showing best v_along [m/s]; * = converged within 0.2 m/s of target)")
     print()
 
     t_header = "".join(f"  {f'T={int(t)}':>8}" for t in tension_list)
@@ -216,7 +215,7 @@ def flight_envelope(
 
     print()
     print(f"  * = best collective achieves v_along within 0.2 m/s of target ({v_target:+.2f} m/s)")
-    print(f"  --- = no converged solution found.")
+    print("  --- = no converged solution found.")
 
 
 # ── Verbose single run ─────────────────────────────────────────────────────────

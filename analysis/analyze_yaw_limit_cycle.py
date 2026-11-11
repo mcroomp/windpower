@@ -35,6 +35,7 @@ Usage:
 
 All output is 7-bit ASCII (Windows cp1252 safe).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,7 +48,7 @@ import numpy as np
 # SERVO4 (GB4008) PWM mapping and Lua trim clamp -- mirror rawes.lua / the parm chain.
 SERVO4_MIN_US = 800.0
 SERVO4_MAX_US = 2000.0
-YFF_MAX = 0.7            # Lua H_YAW_TRIM clamp ceiling (rawes.lua YFF_MAX)
+YFF_MAX = 0.7  # Lua H_YAW_TRIM clamp ceiling (rawes.lua YFF_MAX)
 
 _DEFAULT_CSV = "simulation/logs/test_yaw_regulation_sitl/telemetry.csv"
 
@@ -55,7 +56,7 @@ _DEFAULT_CSV = "simulation/logs/test_yaw_regulation_sitl/telemetry.csv"
 def _f(row: dict, key: str) -> float:
     try:
         return float(row.get(key, ""))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return float("nan")
 
 
@@ -78,9 +79,15 @@ def load(path: str, start_s: float) -> dict:
             ki.append(_f(row, "mav_nvf_yff_ki"))
             kd.append(_f(row, "mav_nvf_yff_kd"))
     return {
-        "t": np.asarray(t), "omz": np.asarray(omz), "s4": np.asarray(s4),
-        "trim": np.asarray(trim), "yi": np.asarray(yi), "gz": np.asarray(gz),
-        "kp": np.asarray(kp), "ki": np.asarray(ki), "kd": np.asarray(kd),
+        "t": np.asarray(t),
+        "omz": np.asarray(omz),
+        "s4": np.asarray(s4),
+        "trim": np.asarray(trim),
+        "yi": np.asarray(yi),
+        "gz": np.asarray(gz),
+        "kp": np.asarray(kp),
+        "ki": np.asarray(ki),
+        "kd": np.asarray(kd),
     }
 
 
@@ -124,16 +131,15 @@ def _fft_period(t: np.ndarray, x: np.ndarray) -> float:
 def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
     t, omz, s4 = d["t"], d["omz"], d["s4"]
     if len(t) < 10:
-        print("[FAIL] not enough samples in window (need >= 10, got %d)" % len(t))
+        print(f"[FAIL] not enough samples in window (need >= 10, got {len(t)})")
         return
 
     omz_deg = np.degrees(omz)
-    dur = t[-1] - t[0]
     n = len(t)
 
     # --- Limit-cycle characterisation ------------------------------------
     amp_pk = float(np.nanmax(np.abs(omz_deg)))
-    rms = float(np.sqrt(np.nanmean(omz_deg ** 2)))
+    rms = float(np.sqrt(np.nanmean(omz_deg**2)))
     p_zc = _zero_cross_period(t, omz_deg)
     p_fft = _fft_period(t, omz_deg)
     # Sustained vs decaying: RMS in first vs last third.
@@ -143,16 +149,21 @@ def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
     trend = "SUSTAINED" if rms_last > 0.6 * rms_first else "DECAYING"
 
     print("=" * 72)
-    print("YAW LIMIT-CYCLE DIAGNOSIS   (window t=%.1f..%.1f s, %d samples)" % (t[0], t[-1], n))
+    print(
+        f"YAW LIMIT-CYCLE DIAGNOSIS   (window t={t[0]:.1f}..{t[-1]:.1f} s, {n} samples)"
+    )
     print("=" * 72)
-    kp = float(np.nanmedian(d["kp"])); ki = float(np.nanmedian(d["ki"])); kd = float(np.nanmedian(d["kd"]))
-    print("Gains (from telemetry): KP=%.4g  KI=%.4g  KD=%.4g" % (kp, ki, kd))
+    kp = float(np.nanmedian(d["kp"]))
+    ki = float(np.nanmedian(d["ki"]))
+    kd = float(np.nanmedian(d["kd"]))
+    print(f"Gains (from telemetry): KP={kp:.4g}  KI={ki:.4g}  KD={kd:.4g}")
     print("")
     print("[1] Limit cycle")
-    print("    peak |psi_dot|   = %7.1f deg/s   RMS = %6.1f deg/s" % (amp_pk, rms))
-    print("    period (zero-x)  = %7.2f s        (FFT) = %6.2f s" % (p_zc, p_fft))
-    print("    amplitude trend  = %s (RMS first third=%.1f, last third=%.1f)"
-          % (trend, rms_first, rms_last))
+    print(f"    peak |psi_dot|   = {amp_pk:7.1f} deg/s   RMS = {rms:6.1f} deg/s")
+    print(f"    period (zero-x)  = {p_zc:7.2f} s        (FFT) = {p_fft:6.2f} s")
+    print(
+        f"    amplitude trend  = {trend} (RMS first third={rms_first:.1f}, last third={rms_last:.1f})"
+    )
 
     # --- Actuator saturation ---------------------------------------------
     have_s4 = np.isfinite(s4).any()
@@ -168,10 +179,15 @@ def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
     print("")
     print("[2] Actuator (SERVO4) saturation")
     if have_s4:
-        print("    throttle mean=%.3f  min=%.3f  max=%.3f" %
-              (np.nanmean(thr), np.nanmin(thr), np.nanmax(thr)))
-        print("    idle-floor duty  (<= %.0f us) = %5.1f %%" % (SERVO4_MIN_US + idle_tol_us, 100 * idle_duty))
-        print("    high-rail duty   (>= %.0f%% ) = %5.1f %%" % (100 * ceil_frac, 100 * ceil_duty))
+        print(
+            f"    throttle mean={np.nanmean(thr):.3f}  min={np.nanmin(thr):.3f}  max={np.nanmax(thr):.3f}"
+        )
+        print(
+            f"    idle-floor duty  (<= {SERVO4_MIN_US + idle_tol_us:.0f} us) = {100 * idle_duty:5.1f} %"
+        )
+        print(
+            f"    high-rail duty   (>= {100 * ceil_frac:.0f}% ) = {100 * ceil_duty:5.1f} %"
+        )
     else:
         print("    SERVO4 telemetry absent -- cannot assess actuator saturation")
 
@@ -180,12 +196,13 @@ def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
     #   err = -gz ; out_preclamp = yaw_i + kp*err (+ kd*d_lp; kd=0 here).
     # yff_i and gz are captured; when out_preclamp < 0 the motor cannot comply
     # (one-directional) and the command clamps at idle.
-    gz = d["gz"]; yi = d["yi"]
+    gz = d["gz"]
+    yi = d["yi"]
     have_demand = np.isfinite(gz).any() and np.isfinite(yi).any()
     want_rev_duty = float("nan")
     pinned_when_want_rev = float("nan")
     if have_demand:
-        pre = yi + d["kp"] * (-gz)          # kd term omitted (kd=0 in this regime)
+        pre = yi + d["kp"] * (-gz)  # kd term omitted (kd=0 in this regime)
         want_rev = pre < 0.0
         want_rev_duty = float(np.nanmean(want_rev))
         if have_s4 and np.any(want_rev):
@@ -194,9 +211,15 @@ def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
     print("")
     print("[3] Controller demand vs authority")
     if have_demand:
-        print("    'wants negative throttle' duty (pre-clamp < 0) = %5.1f %%" % (100 * want_rev_duty))
+        print(
+            "    'wants negative throttle' duty (pre-clamp < 0) = %5.1f %%"
+            % (100 * want_rev_duty)
+        )
         if math.isfinite(pinned_when_want_rev):
-            print("    of that time, SERVO4 pinned at idle           = %5.1f %%" % (100 * pinned_when_want_rev))
+            print(
+                "    of that time, SERVO4 pinned at idle           = %5.1f %%"
+                % (100 * pinned_when_want_rev)
+            )
     else:
         print("    YFF_I / YFF_GZ telemetry absent -- cannot reconstruct demand")
 
@@ -204,7 +227,7 @@ def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
     # domega/dt in motor-ON (driving) vs motor-OFF (coasting on drag) samples.
     drive_slope = coast_slope = float("nan")
     if have_s4 and n > 5:
-        dodt = np.gradient(omz_deg, t)                 # deg/s^2
+        dodt = np.gradient(omz_deg, t)  # deg/s^2
         idle_mask = s4 <= (SERVO4_MIN_US + idle_tol_us)
         on_mask = ~idle_mask
         if np.any(on_mask):
@@ -215,8 +238,10 @@ def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
     print("[4] Coast/drive asymmetry (|d psi_dot/dt|)")
     if math.isfinite(drive_slope) and math.isfinite(coast_slope):
         ratio = drive_slope / coast_slope if coast_slope > 1e-9 else float("inf")
-        print("    motor-ON  (drive) = %8.1f deg/s^2" % drive_slope)
-        print("    motor-OFF (coast) = %8.1f deg/s^2   drive/coast = %.2f" % (coast_slope, ratio))
+        print(f"    motor-ON  (drive) = {drive_slope:8.1f} deg/s^2")
+        print(
+            f"    motor-OFF (coast) = {coast_slope:8.1f} deg/s^2   drive/coast = {ratio:.2f}"
+        )
     else:
         print("    insufficient data to split drive vs coast")
 
@@ -226,25 +251,28 @@ def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
     verdict = []
     # (A) unidirectional saturation
     a_hit = (
-        math.isfinite(idle_duty) and idle_duty > 0.15
-        and math.isfinite(want_rev_duty) and want_rev_duty > 0.15
-        and math.isfinite(pinned_when_want_rev) and pinned_when_want_rev > 0.6
+        math.isfinite(idle_duty)
+        and idle_duty > 0.15
+        and math.isfinite(want_rev_duty)
+        and want_rev_duty > 0.15
+        and math.isfinite(pinned_when_want_rev)
+        and pinned_when_want_rev > 0.6
     )
     # (C) integral windup / over-authority
     c_hit = math.isfinite(ceil_duty) and ceil_duty > 0.15
     # (B) linear underdamping (no rail pinning to speak of)
     b_hit = (
-        math.isfinite(idle_duty) and idle_duty < 0.10
+        math.isfinite(idle_duty)
+        and idle_duty < 0.10
         and (not math.isfinite(ceil_duty) or ceil_duty < 0.10)
     )
     if a_hit:
         verdict.append(
             "(A) UNIDIRECTIONAL-MOTOR SATURATION CONFIRMED: the motor is pinned at\n"
-            "    idle %.0f%% of the run, and %.0f%% of the time the PID demands negative\n"
+            f"    idle {100 * idle_duty:.0f}% of the run, and {100 * pinned_when_want_rev:.0f}% of the time the PID demands negative\n"
             "    throttle it is stuck at idle -- the rate then coasts (drive/coast slope\n"
             "    ratio above).  P/I tuning alone cannot fix this; needs an equilibrium\n"
             "    feed-forward or an idle bias that keeps the motor in its linear band."
-            % (100 * idle_duty, 100 * pinned_when_want_rev)
         )
     if c_hit:
         verdict.append(
@@ -267,21 +295,38 @@ def analyze(d: dict, idle_tol_us: float, ceil_frac: float) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("csv", nargs="?", default=_DEFAULT_CSV,
-                    help="telemetry CSV (default: %(default)s)")
-    ap.add_argument("--start", type=float, default=25.0,
-                    help="analysis window start [sim s] (default: %(default)s)")
-    ap.add_argument("--idle-tol-us", type=float, default=20.0,
-                    help="SERVO4 us above SERVO4_MIN still counted as 'idle' (default: %(default)s)")
-    ap.add_argument("--ceil-frac", type=float, default=0.60,
-                    help="throttle fraction counted as 'high rail' (default: %(default)s)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "csv",
+        nargs="?",
+        default=_DEFAULT_CSV,
+        help="telemetry CSV (default: %(default)s)",
+    )
+    ap.add_argument(
+        "--start",
+        type=float,
+        default=25.0,
+        help="analysis window start [sim s] (default: %(default)s)",
+    )
+    ap.add_argument(
+        "--idle-tol-us",
+        type=float,
+        default=20.0,
+        help="SERVO4 us above SERVO4_MIN still counted as 'idle' (default: %(default)s)",
+    )
+    ap.add_argument(
+        "--ceil-frac",
+        type=float,
+        default=0.60,
+        help="throttle fraction counted as 'high rail' (default: %(default)s)",
+    )
     args = ap.parse_args()
 
     path = Path(args.csv)
     if not path.exists():
-        print("[FAIL] CSV not found: %s" % path)
+        print(f"[FAIL] CSV not found: {path}")
         raise SystemExit(2)
 
     d = load(str(path), args.start)

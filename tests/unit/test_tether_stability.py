@@ -17,19 +17,17 @@ Coordinate frame: NED — X=North, Y=East, Z=Down.  Tether anchor at origin.
 """
 import pytest
 
+import math
+import numpy as np
+from tests.common.aero_probe import make_probe, probe_steady
+from simulation.tether import SpringDamperTether, TetherInputs
+
 pytestmark = pytest.mark.expensive
 
-import math
-import sys
-from pathlib import Path
-
-import numpy as np
 
 
-import simulation.mediator as _mediator_module
-from tests.unit._aero_probe import make_probe, probe_steady
 
-from simulation.tether import SpringDamperTether, TetherInputs
+
 
 # ── Physical constants ────────────────────────────────────────────────────────
 MASS   = 5.0                        # kg  (matches test_force_balance.py)
@@ -108,7 +106,7 @@ def _compute_equilibrium_collective(
 
     _MAX_TETHER_TENSION_N = 496.0
 
-    def _probe(coll_rad):
+    def _probe(coll_rad: float):
         r = probe_steady(aero, collective_rad=coll_rad,
                          R_hub=R_hub, v_hub_world=np.zeros(3),
                          omega_rotor=omega, wind_world=wind)

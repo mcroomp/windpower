@@ -1,9 +1,6 @@
 """
 test_pid_collective.py -- Verify the collective PI converges to v_target.
 """
-import math
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -11,7 +8,12 @@ import pytest
 from envelope.point_mass import simulate_point
 
 
-def _converged(history, key="v_along", window=10.0, tol=0.05):
+def _converged(
+    history: list[dict],
+    key: str = "v_along",
+    window: float = 10.0,
+    tol: float = 0.05,
+):
     final = [h[key] for h in history if h["t"] >= history[-1]["t"] - window]
     return len(final) >= 3 and (max(final) - min(final)) < tol
 
@@ -21,7 +23,7 @@ def _converged(history, key="v_along", window=10.0, tol=0.05):
     (30.0, 400.0, -0.8),   # reel-out at low elevation
     (80.0, 200.0,  0.8),   # reel-in at high elevation
 ])
-def test_pid_hits_target(elevation, tension, v_target):
+def test_pid_hits_target(elevation: float, tension: float, v_target: float):
     r = simulate_point(
         col=0.0,
         elevation_deg=elevation,

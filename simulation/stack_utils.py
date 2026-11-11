@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import contextlib
 
 # ---------------------------------------------------------------------------
 # Environment variable names  (shared by all stack tests)
@@ -90,7 +91,7 @@ def _resolve_sim_vehicle() -> Path | None:
 def _launch_sitl(
     sim_vehicle: Path,
     log_path: Path,
-    add_param_file: "Path | None" = None,
+    add_param_file: Path | None = None,
     wipe_eeprom: bool = True,
 ) -> subprocess.Popen:
     """
@@ -143,7 +144,7 @@ def _launch_sitl(
 
 def _prime_sitl_eeprom(
     sim_vehicle: Path,
-    add_param_file: "Path | None" = None,
+    add_param_file: Path | None = None,
     wait_s: float = 4.0,
 ) -> None:
     """
@@ -182,7 +183,10 @@ def _terminate_process(proc: subprocess.Popen) -> None:
         return
     import signal
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        if sys.platform == "win32":
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
     except (ProcessLookupError, AttributeError):
         proc.terminate()
     try:
@@ -191,7 +195,10 @@ def _terminate_process(proc: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         pass
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        if sys.platform == "win32":
+            proc.kill()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, AttributeError):
         proc.kill()
     proc.wait(timeout=5.0)
@@ -206,6 +213,8 @@ def _kill_by_port(port: int) -> None:
     remaining process via fuser (preferred) or /proc/net/tcp fallback and
     sends SIGKILL.
     """
+    if sys.platform == "win32":
+        raise RuntimeError("Port-based process cleanup requires Linux/Docker")
     import signal as _signal
 
     # Try fuser first (fast, available when psmisc is installed in Docker image)
@@ -244,10 +253,8 @@ def _kill_by_port(port: int) -> None:
             try:
                 if os.readlink(fd_path) == target:
                     pid = int(fd_path.split("/")[2])
-                    try:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.kill(pid, _signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        pass
             except OSError:
                 pass
     except Exception:

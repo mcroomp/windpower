@@ -29,16 +29,17 @@ import argparse
 import math
 import json
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 
 import simulation as _simulation_pkg
+
+import contextlib
+
 _SIM_DIR = Path(_simulation_pkg.__file__).resolve().parent  # simulation/
 
 _LOG_DIR = _SIM_DIR / "logs"
@@ -62,6 +63,7 @@ def _is_kinematic_row(row: TelRow) -> bool:
 # Public API — importable from tests
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SteadyMetrics:
     """Physics-based stability metrics for steady-orbit assessment.
@@ -69,12 +71,13 @@ class SteadyMetrics:
     All values are derived from the telemetry CSV (physics ground truth), not
     from EKF estimates.  Computed by compute_steady_metrics().
     """
-    min_phys_alt:     float   # m   minimum altitude in free-flight
-    max_stable_s:     float   # s   longest continuous window >= stable_alt_m (sim time)
-    floor_hits:       int     # #   frames at altitude <= 1.05 m
-    mean_alt:         float   # m   mean free-flight altitude
-    max_tension:      float   # N   peak tether tension in free-flight
-    free_flight_rows: int     # #   telemetry rows in free-flight phase
+
+    min_phys_alt: float  # m   minimum altitude in free-flight
+    max_stable_s: float  # s   longest continuous window >= stable_alt_m (sim time)
+    floor_hits: int  # #   frames at altitude <= 1.05 m
+    mean_alt: float  # m   mean free-flight altitude
+    max_tension: float  # N   peak tether tension in free-flight
+    free_flight_rows: int  # #   telemetry rows in free-flight phase
 
 
 def compute_steady_metrics(
@@ -96,21 +99,25 @@ def compute_steady_metrics(
     free_rows = [r for r in tel_rows if not _is_kinematic_row(r)]
     if not free_rows:
         return SteadyMetrics(
-            min_phys_alt=0.0, max_stable_s=0.0, floor_hits=0,
-            mean_alt=0.0, max_tension=0.0, free_flight_rows=0,
+            min_phys_alt=0.0,
+            max_stable_s=0.0,
+            floor_hits=0,
+            mean_alt=0.0,
+            max_tension=0.0,
+            free_flight_rows=0,
         )
 
-    alts     = [-r.pos_z           for r in free_rows]
-    tensions = [r.tether_tension   for r in free_rows]
+    alts = [-r.pos_z for r in free_rows]
+    tensions = [r.tether_tension for r in free_rows]
 
     min_phys_alt = min(alts)
-    floor_hits   = sum(1 for a in alts if a <= 1.05)
-    mean_alt     = sum(alts) / len(alts)
-    max_tension  = max(tensions)
+    floor_hits = sum(1 for a in alts if a <= 1.05)
+    mean_alt = sum(alts) / len(alts)
+    max_tension = max(tensions)
 
     # Longest continuous window above stable_alt_m (sim seconds).
     max_stable_s = 0.0
-    win_start_t: Optional[float] = None
+    win_start_t: float | None = None
     for r, alt in zip(free_rows, alts):
         if alt >= stable_alt_m:
             if win_start_t is None:
@@ -142,7 +149,7 @@ def print_flight_report(log_dir: Path, bucket_s: float = 5.0) -> None:
 
     Called from stack tests after the observation window.
     """
-    log_dir  = Path(log_dir)
+    log_dir = Path(log_dir)
     ekf_path = log_dir / "mavlink.jsonl"
 
     # Load FlightLog (all sources)
@@ -179,76 +186,84 @@ print_steady_report = print_flight_report
 # Data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class EkfEvent:
     timestamp: str
-    t_wall:    float   # seconds-of-day from log timestamp
-    text:      str
+    t_wall: float  # seconds-of-day from log timestamp
+    text: str
 
 
 @dataclass
 class SitlCrash:
     """ArduPilot crash detected in arducopter.log."""
-    error_line: str          # the "ERROR: ..." line
-    stack:      list         # list of '#N  <frame>' strings from dumpstack output
+
+    error_line: str  # the "ERROR: ..." line
+    stack: list  # list of '#N  <frame>' strings from dumpstack output
 
 
 @dataclass
 class RunReport:
-    tel_rows:         list          = field(default_factory=list)    # list[TelRow]
-    statustext:       list          = field(default_factory=list)    # (ts, text)
-    ekf_flags:        list          = field(default_factory=list)    # (ts, flags)
-    setup_steps:      list          = field(default_factory=list)    # (ts, msg)
-    test_results:     list          = field(default_factory=list)    # (name, PASSED/FAILED)
-    hold_stats:       dict          = field(default_factory=dict)
-    sensor_mode:      Optional[str] = None
-    damp_T:           Optional[float] = None
-    k_ang:            Optional[float] = None
-    mediator_run_id:  Optional[int]   = None
-    pytest_run_id:    Optional[int]   = None
-    kin_launch_pos:   Optional[tuple] = None   # (x, y, z) NED [m]
-    kin_vel:          Optional[tuple] = None   # (vx, vy, vz) [m/s]
-    sitl_crash:       Optional[SitlCrash] = None
+    tel_rows: list = field(default_factory=list)  # list[TelRow]
+    statustext: list = field(default_factory=list)  # (ts, text)
+    ekf_flags: list = field(default_factory=list)  # (ts, flags)
+    setup_steps: list = field(default_factory=list)  # (ts, msg)
+    test_results: list = field(default_factory=list)  # (name, PASSED/FAILED)
+    hold_stats: dict = field(default_factory=dict)
+    sensor_mode: str | None = None
+    damp_T: float | None = None
+    k_ang: float | None = None
+    mediator_run_id: int | None = None
+    pytest_run_id: int | None = None
+    kin_launch_pos: tuple | None = None  # (x, y, z) NED [m]
+    kin_vel: tuple | None = None  # (vx, vy, vz) [m/s]
+    sitl_crash: SitlCrash | None = None
     # Timing anchors for crash localisation
-    mediator_t0_wall_s:    Optional[float] = None  # wall-sec of mediator t=0 (first log line)
-    gcs_last_ap_wall_s:    Optional[float] = None  # wall-sec of last AP-originated GCS message
-    gcs_obs_start_wall_s:  Optional[float] = None  # wall-sec of "observing X s of free flight"
-    gcs_last_obs_t_s:      Optional[float] = None  # last obs-loop heartbeat sim-offset (e.g. 20s)
+    mediator_t0_wall_s: float | None = None  # wall-sec of mediator t=0 (first log line)
+    gcs_last_ap_wall_s: float | None = (
+        None  # wall-sec of last AP-originated GCS message
+    )
+    gcs_obs_start_wall_s: float | None = (
+        None  # wall-sec of "observing X s of free flight"
+    )
+    gcs_last_obs_t_s: float | None = (
+        None  # last obs-loop heartbeat sim-offset (e.g. 20s)
+    )
 
 
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
 
-_RE_RUN_ID      = re.compile(r"RUN_ID=(\d+)")
+_RE_RUN_ID = re.compile(r"RUN_ID=(\d+)")
 # Two STATUSTEXT formats in gcs.log:
 #   fixture logger:  STATUSTEXT [sev=MAV_SEVERITY_INFO]: <text>
 #   test logger:     STATUSTEXT [t=1.7s]: <text>
-_RE_STATUSTEXT  = re.compile(r"STATUSTEXT \[(?:sev=\w+|t=[\d.]+s)\]:\s*(.+)$")
+_RE_STATUSTEXT = re.compile(r"STATUSTEXT \[(?:sev=\w+|t=[\d.]+s)\]:\s*(.+)$")
 _RE_STATUSTEXT_T = re.compile(r"STATUSTEXT \[t=([\d.]+)s\]:\s*(.+)$")
-_RE_EKF_FLAGS   = re.compile(r"EKF_STATUS\s+flags=(0x[0-9a-fA-F]+)")
-_RE_SETUP_STEP  = re.compile(r"\[setup\s+\d+/\d+\]\s+(.+)$")
-_RE_HOLD_STAT   = re.compile(r"Hold complete\.\s+pos=(\d+)\s+att=(\d+)\s+servo=(\d+)")
-_RE_PASS        = re.compile(r"(PASSED|FAILED)\s+(tests/\S+)")
+_RE_EKF_FLAGS = re.compile(r"EKF_STATUS\s+flags=(0x[0-9a-fA-F]+)")
+_RE_SETUP_STEP = re.compile(r"\[setup\s+\d+/\d+\]\s+(.+)$")
+_RE_HOLD_STAT = re.compile(r"Hold complete\.\s+pos=(\d+)\s+att=(\d+)\s+servo=(\d+)")
+_RE_PASS = re.compile(r"(PASSED|FAILED)\s+(tests/\S+)")
 _RE_SENSOR_MODE = re.compile(r"Sensor mode:\s+(\S+)")
-_RE_DAMP_CFG    = re.compile(r"Startup damping:.*?T=([\d.]+)s.*?k_ang=([\d.]+)")
-_RE_KIN_START   = re.compile(
+_RE_DAMP_CFG = re.compile(r"Startup damping:.*?T=([\d.]+)s.*?k_ang=([\d.]+)")
+_RE_KIN_START = re.compile(
     r"Kinematic startup:.*?T=([\d.]+)s\s+"
     r"launch_pos=\[([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]\s+"
     r"vel=\[([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]"
 )
-_RE_TIMESTAMP   = re.compile(r"^(\d+:\d+:\d+)")
+_RE_TIMESTAMP = re.compile(r"^(\d+:\d+:\d+)")
 # Lines in gcs.log that prove ArduPilot was alive (heartbeat or STATUSTEXT received).
 # Covers all logger formats: [sev=MAV_SEVERITY_INFO], [t=Xs], [post-kin drain], [drain], etc.
-_RE_AP_ALIVE    = re.compile(
+_RE_AP_ALIVE = re.compile(
     r"HEARTBEAT: sysid=1|"
     r"STATUSTEXT[^:]*:|"
     r"EKF_STATUS flags="
 )
 # Observation-loop heartbeat line: "t=20s  max_activity=667 PWM ..."
-_RE_OBS_TICK    = re.compile(r"\bt=(\d+)s\s+max_activity=\d+\s+PWM")
+_RE_OBS_TICK = re.compile(r"\bt=(\d+)s\s+max_activity=\d+\s+PWM")
 # Start of free-flight observation
-_RE_OBS_START   = re.compile(r"observing [\d.]+ s of free flight")
+_RE_OBS_START = re.compile(r"observing [\d.]+ s of free flight")
 
 
 def _wall_seconds(ts: str) -> float:
@@ -287,10 +302,18 @@ def parse_mediator(path: Path, report: RunReport) -> None:
                 report.sensor_mode = m.group(1)
             if m := _RE_DAMP_CFG.search(line):
                 report.damp_T = float(m.group(1))
-                report.k_ang  = float(m.group(2))
+                report.k_ang = float(m.group(2))
             if m := _RE_KIN_START.search(line):
-                report.kin_launch_pos = (float(m.group(2)), float(m.group(3)), float(m.group(4)))
-                report.kin_vel        = (float(m.group(5)), float(m.group(6)), float(m.group(7)))
+                report.kin_launch_pos = (
+                    float(m.group(2)),
+                    float(m.group(3)),
+                    float(m.group(4)),
+                )
+                report.kin_vel = (
+                    float(m.group(5)),
+                    float(m.group(6)),
+                    float(m.group(7)),
+                )
 
     # Fall back to events.jsonl for RUN_ID (structured log, replaces prose log.info for metadata)
     if report.mediator_run_id is None:
@@ -315,8 +338,9 @@ def parse_arducopter(path: Path, report: RunReport) -> None:
 
     error_line = None
     for ln in lines:
-        if "ERROR:" in ln and ("exception" in ln.lower() or "abort" in ln.lower()
-                               or "signal" in ln.lower()):
+        if "ERROR:" in ln and (
+            "exception" in ln.lower() or "abort" in ln.lower() or "signal" in ln.lower()
+        ):
             error_line = ln.strip()
             break
     if error_line is None:
@@ -347,7 +371,7 @@ def parse_pytest(path: Path, report: RunReport) -> None:
     t0 = None
     for line in path.read_text(errors="replace").splitlines():
         ts_m = _RE_TIMESTAMP.match(line)
-        ts   = ts_m.group(1) if ts_m else ""
+        ts = ts_m.group(1) if ts_m else ""
         ts_s = _wall_seconds(ts) if ts else None
         if ts and t0 is None:
             t0 = _wall_seconds(ts)
@@ -372,8 +396,8 @@ def parse_pytest(path: Path, report: RunReport) -> None:
 
         if m := _RE_HOLD_STAT.search(line):
             report.hold_stats = {
-                "pos":   int(m.group(1)),
-                "att":   int(m.group(2)),
+                "pos": int(m.group(1)),
+                "att": int(m.group(2)),
                 "servo": int(m.group(3)),
             }
 
@@ -402,11 +426,12 @@ _EKF_FLAG_NAMES = {
     0x0010: "horiz pos (abs)",
     0x0020: "vert pos (abs)",
     0x0040: "terrain alt",
-    0x0080: "const pos mode",   # EKF in constant-position fallback (no GPS pos fix)
+    0x0080: "const pos mode",  # EKF in constant-position fallback (no GPS pos fix)
     0x0100: "pred horiz pos rel",
     0x0200: "pred horiz pos abs",
-    0x0400: "GPS glitch",       # GPS position innovation rejected
+    0x0400: "GPS glitch",  # GPS position innovation rejected
 }
+
 
 def _decode_flags(flags: int) -> str:
     bits = [name for mask, name in _EKF_FLAG_NAMES.items() if flags & mask]
@@ -430,8 +455,10 @@ def _flag_transitions(ekf_flags: list) -> list:
 
 _W = 72
 
-def _rule(char="-"):
+
+def _rule(char: str="-"):
     print(char * _W)
+
 
 def _header(title: str):
     print()
@@ -440,7 +467,7 @@ def _header(title: str):
     _rule("=")
 
 
-def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
+def _print_mediator(r: RunReport, fl: FlightLog | None = None) -> None:
     rows = r.tel_rows
     if not rows:
         print("  (no telemetry rows loaded)")
@@ -455,14 +482,14 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         print(f"  damping     : T={r.damp_T:.0f}s{k_ang_str}")
 
     damp_rows = [row for row in rows if _is_kinematic_row(row)]
-    free_rows  = [row for row in rows if not _is_kinematic_row(row)]
+    free_rows = [row for row in rows if not _is_kinematic_row(row)]
 
     # Damping phase
     if damp_rows:
         print()
         damp_end_t = damp_rows[-1].t_sim
         print(f"  -- Damping phase  (t=0 - {damp_end_t:.0f}s) --")
-        min_alt   = min(-row.pos_z for row in damp_rows)
+        min_alt = min(-row.pos_z for row in damp_rows)
         last_damp = damp_rows[-1]
 
         if r.kin_launch_pos and r.kin_vel:
@@ -474,32 +501,49 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
                 ey = lp[1] + kv[1] * row.t_sim
                 ez = lp[2] + kv[2] * row.t_sim
                 deviations.append(
-                    ((row.pos_x - ex)**2 + (row.pos_y - ey)**2 + (row.pos_z - ez)**2)**0.5
+                    (
+                        (row.pos_x - ex) ** 2
+                        + (row.pos_y - ey) ** 2
+                        + (row.pos_z - ez) ** 2
+                    )
+                    ** 0.5
                 )
             max_dev = max(deviations)
             dT = damp_end_t
             arr_err = (
-                (last_damp.pos_x - (lp[0] + kv[0]*dT))**2 +
-                (last_damp.pos_y - (lp[1] + kv[1]*dT))**2 +
-                (last_damp.pos_z - (lp[2] + kv[2]*dT))**2
-            )**0.5
-            print(f"    trajectory type                : constant-velocity kinematic")
-            print(f"    max deviation from linear traj : {max_dev:.3f} m  "
-                  + ("[OK]" if max_dev < 0.5 else "[!!]"))
-            print(f"    arrival error at t=T           : {arr_err:.3f} m  "
-                  + ("[OK]" if arr_err < 0.5 else "[!!]"))
+                (last_damp.pos_x - (lp[0] + kv[0] * dT)) ** 2
+                + (last_damp.pos_y - (lp[1] + kv[1] * dT)) ** 2
+                + (last_damp.pos_z - (lp[2] + kv[2] * dT)) ** 2
+            ) ** 0.5
+            print("    trajectory type                : constant-velocity kinematic")
+            print(
+                f"    max deviation from linear traj : {max_dev:.3f} m  "
+                + ("[OK]" if max_dev < 0.5 else "[!!]")
+            )
+            print(
+                f"    arrival error at t=T           : {arr_err:.3f} m  "
+                + ("[OK]" if arr_err < 0.5 else "[!!]")
+            )
         else:
             first = damp_rows[0]
             max_drift = max(
-                ((row.pos_x - first.pos_x)**2 + (row.pos_y - first.pos_y)**2 +
-                 (row.pos_z - first.pos_z)**2)**0.5
+                (
+                    (row.pos_x - first.pos_x) ** 2
+                    + (row.pos_y - first.pos_y) ** 2
+                    + (row.pos_z - first.pos_z) ** 2
+                )
+                ** 0.5
                 for row in damp_rows
             )
-            print(f"    max pos drift from equilibrium : {max_drift:.3f} m  "
-                  + ("[OK]" if max_drift < 0.1 else "[!!] spring may not be active"))
+            print(
+                f"    max pos drift from equilibrium : {max_drift:.3f} m  "
+                + ("[OK]" if max_drift < 0.1 else "[!!] spring may not be active")
+            )
 
-        print(f"    min altitude                   : {min_alt:.2f} m  "
-              + ("[OK]" if min_alt > 5.0 else "[!!] hub hit ground"))
+        print(
+            f"    min altitude                   : {min_alt:.2f} m  "
+            + ("[OK]" if min_alt > 5.0 else "[!!] hub hit ground")
+        )
         print(f"    final thrust at damp end       : {last_damp.aero_T:.1f} N")
         print(f"    final tether tension           : {last_damp.tether_tension:.0f} N")
 
@@ -507,15 +551,15 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         # kinematic hold regardless of selected attitude-control mode.
         # Use the arm timestamp from MAVLink events (most precise); fall back to
         # a 30 s fixed offset if no arm event is recorded (e.g. static mediator tests).
-        _TILT_WARN = 0.10   # normalised [-1,1]; same threshold as test_tail_tilt
-        arm_t: "float | None" = None
+        _TILT_WARN = 0.10  # normalised [-1,1]; same threshold as test_tail_tilt
+        arm_t: float | None = None
         if fl is not None:
             for ev in fl.events:
                 if ev.category == "ARM" and ev.text.strip() == "ARMED":
                     arm_t = ev.t_sim
                     break
-        _SETTLE_S   = 30.0
-        t0_damp     = damp_rows[0].t_sim
+        _SETTLE_S = 30.0
+        t0_damp = damp_rows[0].t_sim
         window_start = arm_t if arm_t is not None else t0_damp + _SETTLE_S
         post_arm_rows = [row for row in damp_rows if row.t_sim >= window_start]
         if post_arm_rows:
@@ -523,8 +567,14 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
             max_tilt_lat = max(abs(row.tilt_lat) for row in post_arm_rows)
             _tilt_ok = max_tilt_lon < _TILT_WARN and max_tilt_lat < _TILT_WARN
             label = f"post-arm (t>={window_start:.0f}s)"
-            print(f"    max swashplate tilt ({label}): lon={max_tilt_lon:.3f}  lat={max_tilt_lat:.3f}  "
-                  + ("[OK]" if _tilt_ok else f"[!!] exceeds {_TILT_WARN} -- mode/controller contamination?"))
+            print(
+                f"    max swashplate tilt ({label}): lon={max_tilt_lon:.3f}  lat={max_tilt_lat:.3f}  "
+                + (
+                    "[OK]"
+                    if _tilt_ok
+                    else f"[!!] exceeds {_TILT_WARN} -- mode/controller contamination?"
+                )
+            )
 
     # ── Kinematic-phase timeseries: omega_spin, collective, servo_s3 ──────────
     # Diagnoses two failure modes:
@@ -532,12 +582,13 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
     #   (b) RAWES_THR NVF not received — Lua using wrong _ic_thrust
     if damp_rows:
         _ic_om = None
+        _ic_thr: float | None = None
         _ic_col = None
         _ic_tlon = None
         _ic_tlat = None
         try:
             _d = load_ic_dict()
-            _ic_om  = float(_d.get("omega_spin", 0))
+            _ic_om = float(_d.get("omega_spin", 0))
             _ic_thr = float(_d.get("eq_thrust", 0))
             _ic_tlon = float(_d.get("trim_tilt_lon", 0.0))
             _ic_tlat = float(_d.get("trim_tilt_lat", 0.0))
@@ -545,9 +596,11 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
             pass
 
         print()
-        print(f"  -- Kinematic phase timeseries (omega / collective / servo_s3) --")
-        if _ic_om is not None:
-            print(f"    IC file: omega_spin={_ic_om:.2f} rad/s  eq_thrust={_ic_thr:.4f}")
+        print("  -- Kinematic phase timeseries (omega / collective / servo_s3) --")
+        if _ic_om is not None and _ic_thr is not None:
+            print(
+                f"    IC file: omega_spin={_ic_om:.2f} rad/s  eq_thrust={_ic_thr:.4f}"
+            )
 
         # Sample every ~10 s of sim time
         t0_d = damp_rows[0].t_sim
@@ -568,9 +621,11 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
             _HDR += f"  {'d_omega':>8}"
         print(_HDR)
         for s in _samples:
-            line = (f"    {s.t_sim:6.1f}  {s.omega_rotor:12.3f}  "
-                    f"{s.collective_rad:10.4f}  {s.servo_s3_us:7.0f}  "
-                    f"{s.tilt_lon:8.4f}  {s.tilt_lat:8.4f}")
+            line = (
+                f"    {s.t_sim:6.1f}  {s.omega_rotor:12.3f}  "
+                f"{s.collective_rad:10.4f}  {s.servo_s3_us:7.0f}  "
+                f"{s.tilt_lon:8.4f}  {s.tilt_lat:8.4f}"
+            )
             if _ic_om is not None:
                 d_om = s.omega_rotor - _ic_om
                 flag = "  [!!] decay" if d_om < -2.0 else ""
@@ -580,11 +635,17 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         # Omega decay rate estimate (rad/s per second)
         if len(_samples) >= 2:
             dt_span = _samples[-1].t_sim - _samples[0].t_sim
-            d_omega  = _samples[-1].omega_rotor - _samples[0].omega_rotor
+            d_omega = _samples[-1].omega_rotor - _samples[0].omega_rotor
             if dt_span > 0:
                 decay_rate = d_omega / dt_span
-                tag = "" if abs(decay_rate) < 0.1 else "  [!!] check collective sign/magnitude"
-                print(f"    omega decay rate : {decay_rate:+.3f} rad/s per sim-second{tag}")
+                tag = (
+                    ""
+                    if abs(decay_rate) < 0.1
+                    else "  [!!] check collective sign/magnitude"
+                )
+                print(
+                    f"    omega decay rate : {decay_rate:+.3f} rad/s per sim-second{tag}"
+                )
 
         # Check if IC seed was acknowledged in the GCS log
         _ic_seed_ack = None
@@ -594,9 +655,13 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
                     _ic_seed_ack = ev
                     break
         if _ic_seed_ack is not None:
-            print(f"    IC seed ack      : t={_ic_seed_ack.t_sim:.1f}s  '{_ic_seed_ack.text.strip()}'  [OK]")
+            print(
+                f"    IC seed ack      : t={_ic_seed_ack.t_sim:.1f}s  '{_ic_seed_ack.text.strip()}'  [OK]"
+            )
         else:
-            print(f"    IC seed ack      : not found in GCS log  [!!] Lua may not have received RAWES_THR/RIC/PIC")
+            print(
+                "    IC seed ack      : not found in GCS log  [!!] Lua may not have received RAWES_THR/RIC/PIC"
+            )
 
         # Rotor-equilibrium diagnostic during kinematic hold (post-arm).
         # Goal: explain spin decay with measurable deviations from the IC point.
@@ -624,37 +689,63 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
 
             print()
             print("  -- Rotor equilibrium check (post-arm kinematic hold) --")
-            print(f"    window                 : t={_post[0].t_sim:.1f}s .. {_post[-1].t_sim:.1f}s  ({len(_post)} rows)")
-            print(f"    omega change           : {om0:.2f} -> {om1:.2f} rad/s  (domega/dt={dom_dt:+.3f} rad/s^2)")
-            print(f"    aero_Q_spin            : mean={q_mean:+.3f} N*m  range=[{q_min:+.3f}, {q_max:+.3f}] N*m")
+            print(
+                f"    window                 : t={_post[0].t_sim:.1f}s .. {_post[-1].t_sim:.1f}s  ({len(_post)} rows)"
+            )
+            print(
+                f"    omega change           : {om0:.2f} -> {om1:.2f} rad/s  (domega/dt={dom_dt:+.3f} rad/s^2)"
+            )
+            print(
+                f"    aero_Q_spin            : mean={q_mean:+.3f} N*m  range=[{q_min:+.3f}, {q_max:+.3f}] N*m"
+            )
             print(f"    hold collective mean   : {col_mean:+.4f} rad")
-            print(f"    hold tilt mean         : lon={tln_mean:+.4f}  lat={tlt_mean:+.4f}  |tilt|={tmag_mean:.4f}")
+            print(
+                f"    hold tilt mean         : lon={tln_mean:+.4f}  lat={tlt_mean:+.4f}  |tilt|={tmag_mean:.4f}"
+            )
 
             if _ic_col is not None:
                 dcol = col_mean - _ic_col
-                print(f"    vs IC collective       : dcol={dcol:+.4f} rad  (IC={_ic_col:+.4f})"
-                      + ("  [!!]" if abs(dcol) > 0.02 else "  [OK]"))
+                print(
+                    f"    vs IC collective       : dcol={dcol:+.4f} rad  (IC={_ic_col:+.4f})"
+                    + ("  [!!]" if abs(dcol) > 0.02 else "  [OK]")
+                )
             if _ic_tlon is not None and _ic_tlat is not None:
                 dtlon = tln_mean - _ic_tlon
                 dtlat = tlt_mean - _ic_tlat
                 dtilt = (dtlon * dtlon + dtlat * dtlat) ** 0.5
-                print(f"    vs IC trim tilt        : dlon={dtlon:+.4f}  dlat={dtlat:+.4f}  |dtilt|={dtilt:.4f}"
-                      + ("  [!!]" if dtilt > 0.05 else "  [OK]"))
+                print(
+                    f"    vs IC trim tilt        : dlon={dtlon:+.4f}  dlat={dtlat:+.4f}  |dtilt|={dtilt:.4f}"
+                    + ("  [!!]" if dtilt > 0.05 else "  [OK]")
+                )
 
             # Heuristic root-cause hints.
             if dom_dt < -0.02:
                 if q_mean < -0.05:
-                    print("    diagnosis              : aerodynamic spin torque is braking the rotor (Q_spin < 0),")
-                    print("                               so this hold point is not an autorotation equilibrium.")
+                    print(
+                        "    diagnosis              : aerodynamic spin torque is braking the rotor (Q_spin < 0),"
+                    )
+                    print(
+                        "                               so this hold point is not an autorotation equilibrium."
+                    )
                 else:
-                    print("    diagnosis              : rotor is decelerating despite weak/positive Q_spin;")
-                    print("                               check external drag/torque terms and spin ODE parameters.")
+                    print(
+                        "    diagnosis              : rotor is decelerating despite weak/positive Q_spin;"
+                    )
+                    print(
+                        "                               check external drag/torque terms and spin ODE parameters."
+                    )
                 if _ic_col is not None and col_mean < (_ic_col - 0.02):
-                    print("    likely contributor     : collective is more negative than IC during hold, increasing drag.")
+                    print(
+                        "    likely contributor     : collective is more negative than IC during hold, increasing drag."
+                    )
                 if tmag_mean > 0.10:
-                    print("    likely contributor     : sustained cyclic tilt during hold shifts aero away from IC point.")
+                    print(
+                        "    likely contributor     : sustained cyclic tilt during hold shifts aero away from IC point."
+                    )
             else:
-                print("    diagnosis              : no significant rotor decay in post-arm hold window.")
+                print(
+                    "    diagnosis              : no significant rotor decay in post-arm hold window."
+                )
 
             if _pre:
                 pre0 = _pre[0].omega_rotor
@@ -664,81 +755,155 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
                 pre_col_mean = sum(r.collective_rad for r in _pre) / len(_pre)
                 pre_q_mean = sum(r.aero_Q_spin for r in _pre) / len(_pre)
                 print("\n  -- Rotor equilibrium check (pre-arm kinematic window) --")
-                print(f"    window                 : t={_pre[0].t_sim:.1f}s .. {_pre[-1].t_sim:.1f}s  ({len(_pre)} rows)")
-                print(f"    omega change           : {pre0:.2f} -> {pre1:.2f} rad/s  (domega/dt={dpre_dt:+.3f} rad/s^2)")
+                print(
+                    f"    window                 : t={_pre[0].t_sim:.1f}s .. {_pre[-1].t_sim:.1f}s  ({len(_pre)} rows)"
+                )
+                print(
+                    f"    omega change           : {pre0:.2f} -> {pre1:.2f} rad/s  (domega/dt={dpre_dt:+.3f} rad/s^2)"
+                )
                 print(f"    aero_Q_spin mean       : {pre_q_mean:+.3f} N*m")
                 print(f"    collective mean        : {pre_col_mean:+.4f} rad")
                 if abs(dpre_dt) > 0.05 and abs(dom_dt) <= 0.02:
-                    print("    diagnosis              : spin decay occurs primarily BEFORE arm/NVF hold capture,")
-                    print("                               then stabilizes post-arm. Investigate pre-arm collective/throttle state.")
+                    print(
+                        "    diagnosis              : spin decay occurs primarily BEFORE arm/NVF hold capture,"
+                    )
+                    print(
+                        "                               then stabilizes post-arm. Investigate pre-arm collective/throttle state."
+                    )
 
     # Kinematic exit (transition) — row stamped note="kinematic_exit" in CSV.
     _tr_rows = [r for r in rows if r.note == "kinematic_exit"]
     tr = _tr_rows[0] if _tr_rows else (free_rows[0] if free_rows else None)
     if tr is not None:
         bz_elev_deg = math.degrees(math.asin(max(-1.0, min(1.0, -tr.r22))))
-        upward_frac = -tr.r22   # fraction of thrust pointing up (NED Z is down)
+        upward_frac = -tr.r22  # fraction of thrust pointing up (NED Z is down)
         print()
         print(f"  -- Kinematic exit (t={tr.t_sim:.1f}s) --")
-        print(f"    body_z elevation : {bz_elev_deg:.1f} deg  "
-              + ("[OK]" if bz_elev_deg >= 15.0 else "[!!] too horizontal, insufficient lift"))
-        print(f"    upward fraction  : {upward_frac:.3f}  "
-              + ("[OK]" if upward_frac >= 0.25 else "[!!] < 0.25 -- hub will fall"))
+        print(
+            f"    body_z elevation : {bz_elev_deg:.1f} deg  "
+            + (
+                "[OK]"
+                if bz_elev_deg >= 15.0
+                else "[!!] too horizontal, insufficient lift"
+            )
+        )
+        print(
+            f"    upward fraction  : {upward_frac:.3f}  "
+            + ("[OK]" if upward_frac >= 0.25 else "[!!] < 0.25 -- hub will fall")
+        )
         print(f"    collective_rad   : {tr.collective_rad:.4f} rad")
-        print(f"    tether tension   : {tr.tether_tension:.1f} N  "
-              + ("[OK]" if tr.tether_tension > 50 else "[!!] slack or very low"))
+        print(
+            f"    tether tension   : {tr.tether_tension:.1f} N  "
+            + ("[OK]" if tr.tether_tension > 50 else "[!!] slack or very low")
+        )
         print(f"    altitude         : {-tr.pos_z:.2f} m")
-        print(f"    vel_z (down+)    : {tr.vel_z:.3f} m/s  "
-              + ("[OK]" if tr.vel_z < 1.0 else "[!!] falling fast at exit"))
+        print(
+            f"    vel_z (down+)    : {tr.vel_z:.3f} m/s  "
+            + ("[OK]" if tr.vel_z < 1.0 else "[!!] falling fast at exit")
+        )
 
     # Sensor discontinuity at kinematic exit
     # Compare last kinematic row vs first free-flight row.
     # EKF uses sens_accel/gyro for IMU integration and rpy/vel/pos for GPS.
     # Any discontinuity in these values at the boundary is a physics bug.
     if damp_rows and free_rows:
-        last_kin  = damp_rows[-1]
+        last_kin = damp_rows[-1]
         first_flt = free_rows[0]
         print()
-        print(f"  -- Sensor continuity at kinematic exit --")
+        print("  -- Sensor continuity at kinematic exit --")
+
         def _ang_deg(a: float, b: float) -> float:
             import math as _m
+
             d = _m.degrees(b - a)
             # wrap to (-180, 180]
-            while d >  180.0: d -= 360.0
-            while d <= -180.0: d += 360.0
+            while d > 180.0:
+                d -= 360.0
+            while d <= -180.0:
+                d += 360.0
             return d
+
         def _ck(label: str, delta: float, warn: float, unit: str = "") -> None:
             tag = "[OK]" if abs(delta) <= warn else "[!!]"
             print(f"    d({label:<18}) = {delta:+8.4f}{unit:5}  {tag}")
 
         # Position: should be continuous (stationary hold → pos unchanged)
-        dp = ((first_flt.pos_x - last_kin.pos_x)**2 +
-              (first_flt.pos_y - last_kin.pos_y)**2 +
-              (first_flt.pos_z - last_kin.pos_z)**2) ** 0.5
+        dp = (
+            (first_flt.pos_x - last_kin.pos_x) ** 2
+            + (first_flt.pos_y - last_kin.pos_y) ** 2
+            + (first_flt.pos_z - last_kin.pos_z) ** 2
+        ) ** 0.5
         tag = "[OK]" if dp <= 0.01 else "[!!]"
         print(f"    d(pos_ned)           = {dp:+8.4f} m       {tag}")
 
         # Velocity: should be continuous (stationary hold → vel=0 initially)
-        dv = ((first_flt.vel_x - last_kin.vel_x)**2 +
-              (first_flt.vel_y - last_kin.vel_y)**2 +
-              (first_flt.vel_z - last_kin.vel_z)**2) ** 0.5
+        dv = (
+            (first_flt.vel_x - last_kin.vel_x) ** 2
+            + (first_flt.vel_y - last_kin.vel_y) ** 2
+            + (first_flt.vel_z - last_kin.vel_z) ** 2
+        ) ** 0.5
         tag = "[OK]" if dv <= 0.05 else "[!!]"
         print(f"    d(vel_ned)           = {dv:+8.4f} m/s     {tag}")
 
         # Attitude (rpy): equilibrium hold should have zero change
-        _ck("rpy_roll  (deg)",  _ang_deg(last_kin.rpy_roll,  first_flt.rpy_roll),  2.0, " deg")
-        _ck("rpy_pitch (deg)",  _ang_deg(last_kin.rpy_pitch, first_flt.rpy_pitch), 2.0, " deg")
-        _ck("rpy_yaw   (deg)",  _ang_deg(last_kin.rpy_yaw,   first_flt.rpy_yaw),   2.0, " deg")
+        _ck(
+            "rpy_roll  (deg)",
+            _ang_deg(last_kin.rpy_roll, first_flt.rpy_roll),
+            2.0,
+            " deg",
+        )
+        _ck(
+            "rpy_pitch (deg)",
+            _ang_deg(last_kin.rpy_pitch, first_flt.rpy_pitch),
+            2.0,
+            " deg",
+        )
+        _ck(
+            "rpy_yaw   (deg)",
+            _ang_deg(last_kin.rpy_yaw, first_flt.rpy_yaw),
+            2.0,
+            " deg",
+        )
 
         # Body-frame accelerometer (what EKF integrates for attitude/velocity)
-        _ck("sens_accel_x(m/s2)", first_flt.sens_accel_x - last_kin.sens_accel_x, 1.0, " m/s2")
-        _ck("sens_accel_y(m/s2)", first_flt.sens_accel_y - last_kin.sens_accel_y, 1.0, " m/s2")
-        _ck("sens_accel_z(m/s2)", first_flt.sens_accel_z - last_kin.sens_accel_z, 1.0, " m/s2")
+        _ck(
+            "sens_accel_x(m/s2)",
+            first_flt.sens_accel_x - last_kin.sens_accel_x,
+            1.0,
+            " m/s2",
+        )
+        _ck(
+            "sens_accel_y(m/s2)",
+            first_flt.sens_accel_y - last_kin.sens_accel_y,
+            1.0,
+            " m/s2",
+        )
+        _ck(
+            "sens_accel_z(m/s2)",
+            first_flt.sens_accel_z - last_kin.sens_accel_z,
+            1.0,
+            " m/s2",
+        )
 
         # Body-frame gyroscope (what EKF integrates for attitude)
-        _ck("sens_gyro_x(rad/s)", first_flt.sens_gyro_x - last_kin.sens_gyro_x, 0.05, " rad/s")
-        _ck("sens_gyro_y(rad/s)", first_flt.sens_gyro_y - last_kin.sens_gyro_y, 0.05, " rad/s")
-        _ck("sens_gyro_z(rad/s)", first_flt.sens_gyro_z - last_kin.sens_gyro_z, 0.05, " rad/s")
+        _ck(
+            "sens_gyro_x(rad/s)",
+            first_flt.sens_gyro_x - last_kin.sens_gyro_x,
+            0.05,
+            " rad/s",
+        )
+        _ck(
+            "sens_gyro_y(rad/s)",
+            first_flt.sens_gyro_y - last_kin.sens_gyro_y,
+            0.05,
+            " rad/s",
+        )
+        _ck(
+            "sens_gyro_z(rad/s)",
+            first_flt.sens_gyro_z - last_kin.sens_gyro_z,
+            0.05,
+            " rad/s",
+        )
 
         # Heading gap (should not spike at transition)
         dhdg = abs(first_flt.heading_gap_deg) - abs(last_kin.heading_gap_deg)
@@ -749,31 +914,39 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         # Load expected values from the shared IC (generated by
         # test_generate_ic.py — same rotor/wind/collective as the stack test).
         _eq = {}
-        try:
+        with contextlib.suppress(Exception):
             _eq = load_ic_dict().get("eq_physics", {})
-        except Exception:
-            pass
 
         print()
         if _eq:
-            print(f"    eq_physics: collective={_eq.get('collective_rad',0):.4f} rad  "
-                  f"tilt_lon={_eq.get('tilt_lon',0):.3f}  tilt_lat={_eq.get('tilt_lat',0):.3f}  "
-                  f"omega_spin={_eq.get('omega_spin',0):.2f} rad/s")
-            print(f"    stack exit: collective={first_flt.collective_rad:.4f} rad  "
-                  f"tilt_lon={first_flt.tilt_lon:.3f}  tilt_lat={first_flt.tilt_lat:.3f}  "
-                  f"omega_spin={first_flt.omega_rotor:.2f} rad/s")
+            print(
+                f"    eq_physics: collective={_eq.get('collective_rad', 0):.4f} rad  "
+                f"tilt_lon={_eq.get('tilt_lon', 0):.3f}  tilt_lat={_eq.get('tilt_lat', 0):.3f}  "
+                f"omega_spin={_eq.get('omega_spin', 0):.2f} rad/s"
+            )
+            print(
+                f"    stack exit: collective={first_flt.collective_rad:.4f} rad  "
+                f"tilt_lon={first_flt.tilt_lon:.3f}  tilt_lat={first_flt.tilt_lat:.3f}  "
+                f"omega_spin={first_flt.omega_rotor:.2f} rad/s"
+            )
             d_col = first_flt.collective_rad - _eq.get("collective_rad", 0)
-            d_om  = first_flt.omega_rotor    - _eq.get("omega_spin", 0)
-            print(f"    delta:      collective={d_col:+.4f} rad  "
-                  f"omega_spin={d_om:+.2f} rad/s"
-                  + ("  [!!] spin mismatch — forces will differ" if abs(d_om) > 2.0 else ""))
+            d_om = first_flt.omega_rotor - _eq.get("omega_spin", 0)
+            print(
+                f"    delta:      collective={d_col:+.4f} rad  "
+                f"omega_spin={d_om:+.2f} rad/s"
+                + (
+                    "  [!!] spin mismatch — forces will differ"
+                    if abs(d_om) > 2.0
+                    else ""
+                )
+            )
 
         hdr = f"    {'':20}  {'last_kin':>10}  {'first_flt':>10}  {'delta':>10}"
         if _eq:
             hdr += f"  {'eq_expect':>10}  {'err_flt':>10}"
         print(hdr)
 
-        def _frow(label, a, b, eq_val=None, warn=5.0):
+        def _frow(label: str, a: float, b: float, eq_val: float | None=None, warn: float=5.0):
             delta = b - a
             tag = "[!!]" if abs(delta) > warn else ""
             row = f"    {label:<20}  {a:>10.1f}  {b:>10.1f}  {delta:>+10.1f}  {tag}"
@@ -783,28 +956,58 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
                 row += f"  {eq_val:>10.1f}  {err:>+10.1f}  {etag}"
             print(row)
 
-        print(f"    -- translational (N) --")
+        print("    -- translational (N) --")
         for label, a, b, ek in [
-            ("aero_fx",   last_kin.aero_fx,   first_flt.aero_fx,   _eq.get("aero_fx")),
-            ("aero_fy",   last_kin.aero_fy,   first_flt.aero_fy,   _eq.get("aero_fy")),
-            ("aero_fz",   last_kin.aero_fz,   first_flt.aero_fz,   _eq.get("aero_fz")),
-            ("tether_fx", last_kin.tether_fx, first_flt.tether_fx, _eq.get("tether_fx")),
-            ("tether_fy", last_kin.tether_fy, first_flt.tether_fy, _eq.get("tether_fy")),
-            ("tether_fz", last_kin.tether_fz, first_flt.tether_fz, _eq.get("tether_fz")),
-            ("F_net_x",   last_kin.F_x,       first_flt.F_x,       _eq.get("F_net_x")),
-            ("F_net_y",   last_kin.F_y,       first_flt.F_y,       _eq.get("F_net_y")),
-            ("F_net_z",   last_kin.F_z,       first_flt.F_z,       _eq.get("F_net_z")),
+            ("aero_fx", last_kin.aero_fx, first_flt.aero_fx, _eq.get("aero_fx")),
+            ("aero_fy", last_kin.aero_fy, first_flt.aero_fy, _eq.get("aero_fy")),
+            ("aero_fz", last_kin.aero_fz, first_flt.aero_fz, _eq.get("aero_fz")),
+            (
+                "tether_fx",
+                last_kin.tether_fx,
+                first_flt.tether_fx,
+                _eq.get("tether_fx"),
+            ),
+            (
+                "tether_fy",
+                last_kin.tether_fy,
+                first_flt.tether_fy,
+                _eq.get("tether_fy"),
+            ),
+            (
+                "tether_fz",
+                last_kin.tether_fz,
+                first_flt.tether_fz,
+                _eq.get("tether_fz"),
+            ),
+            ("F_net_x", last_kin.F_x, first_flt.F_x, _eq.get("F_net_x")),
+            ("F_net_y", last_kin.F_y, first_flt.F_y, _eq.get("F_net_y")),
+            ("F_net_z", last_kin.F_z, first_flt.F_z, _eq.get("F_net_z")),
         ]:
             _frow(label, a, b, ek)
 
-        print(f"    -- rotational (N*m) --")
+        print("    -- rotational (N*m) --")
         for label, a, b, ek in [
-            ("aero_mx",   last_kin.aero_mx,   first_flt.aero_mx,   _eq.get("aero_mx")),
-            ("aero_my",   last_kin.aero_my,   first_flt.aero_my,   _eq.get("aero_my")),
-            ("aero_mz",   last_kin.aero_mz,   first_flt.aero_mz,   _eq.get("aero_mz")),
-            ("tether_mx", last_kin.tether_mx, first_flt.tether_mx, _eq.get("tether_mx")),
-            ("tether_my", last_kin.tether_my, first_flt.tether_my, _eq.get("tether_my")),
-            ("tether_mz", last_kin.tether_mz, first_flt.tether_mz, _eq.get("tether_mz")),
+            ("aero_mx", last_kin.aero_mx, first_flt.aero_mx, _eq.get("aero_mx")),
+            ("aero_my", last_kin.aero_my, first_flt.aero_my, _eq.get("aero_my")),
+            ("aero_mz", last_kin.aero_mz, first_flt.aero_mz, _eq.get("aero_mz")),
+            (
+                "tether_mx",
+                last_kin.tether_mx,
+                first_flt.tether_mx,
+                _eq.get("tether_mx"),
+            ),
+            (
+                "tether_my",
+                last_kin.tether_my,
+                first_flt.tether_my,
+                _eq.get("tether_my"),
+            ),
+            (
+                "tether_mz",
+                last_kin.tether_mz,
+                first_flt.tether_mz,
+                _eq.get("tether_mz"),
+            ),
         ]:
             _frow(label, a, b, ek, warn=2.0)
 
@@ -815,28 +1018,38 @@ def _print_mediator(r: RunReport, fl: "FlightLog | None" = None) -> None:
         print(f"  -- Free-flight phase  (t={t_start:.0f}s onward) --")
         min_alt_free = min(-row.pos_z for row in free_rows)
         max_alt_free = max(-row.pos_z for row in free_rows)
-        min_r = min((row.pos_x**2 + row.pos_y**2 + row.pos_z**2)**0.5 for row in free_rows)
-        max_r = max((row.pos_x**2 + row.pos_y**2 + row.pos_z**2)**0.5 for row in free_rows)
+        min_r = min(
+            (row.pos_x**2 + row.pos_y**2 + row.pos_z**2) ** 0.5 for row in free_rows
+        )
+        max_r = max(
+            (row.pos_x**2 + row.pos_y**2 + row.pos_z**2) ** 0.5 for row in free_rows
+        )
         omega_mean = sum(row.omega_rotor for row in free_rows) / len(free_rows)
-        print(f"    altitude range   : {min_alt_free:.1f} - {max_alt_free:.1f} m  "
-              + ("[OK]" if min_alt_free > 3.0 else "[!!] hub too low"))
+        print(
+            f"    altitude range   : {min_alt_free:.1f} - {max_alt_free:.1f} m  "
+            + ("[OK]" if min_alt_free > 3.0 else "[!!] hub too low")
+        )
         print(f"    tether length    : {min_r:.1f} - {max_r:.1f} m")
         print(f"    mean rotor spin  : {omega_mean:.1f} rad/s")
 
         # First 10s of free flight — crash rate check
         dt_tel = 1.0 / 400.0  # default 400 Hz
         if len(free_rows) > 1:
-            dt_tel = (free_rows[-1].t_sim - free_rows[0].t_sim) / max(len(free_rows) - 1, 1)
+            dt_tel = (free_rows[-1].t_sim - free_rows[0].t_sim) / max(
+                len(free_rows) - 1, 1
+            )
         n_early = min(len(free_rows), max(1, int(10.0 / dt_tel)))
         early = free_rows[:n_early]
         if early:
             min_alt_early = min(-r.pos_z for r in early)
-            max_vz_early  = max(r.vel_z for r in early)
-            t_early_end   = early[-1].t_sim
+            max_vz_early = max(r.vel_z for r in early)
+            t_early_end = early[-1].t_sim
             if min_alt_early < 3.0 or max_vz_early > 3.0:
-                print(f"    [!!] first {t_early_end - t_start:.0f}s: "
-                      f"min_alt={min_alt_early:.1f}m  "
-                      f"max_vel_down={max_vz_early:.1f} m/s  (crash indicator)")
+                print(
+                    f"    [!!] first {t_early_end - t_start:.0f}s: "
+                    f"min_alt={min_alt_early:.1f}m  "
+                    f"max_vel_down={max_vz_early:.1f} m/s  (crash indicator)"
+                )
 
         floor_hits = sum(1 for row in free_rows if -row.pos_z <= 1.05)
         if floor_hits:
@@ -858,14 +1071,33 @@ def _print_ekf(r: RunReport) -> None:
 
     # GPS fusion keywords — shown with [OK]/[!!] flags for quick triage
     GPS_GOOD = {"origin set", "is using gps", "yaw aligned", "tilt alignment"}
-    GPS_BAD  = {"gps glitch", "ekf failsafe", "compass error", "yaw reset", "emergency yaw"}
+    GPS_BAD = {
+        "gps glitch",
+        "ekf failsafe",
+        "compass error",
+        "yaw reset",
+        "emergency yaw",
+    }
     keywords = [
-        "initialised", "tilt alignment", "origin set", "GPS Glitch",
-        "EKF Failsafe", "yaw aligned", "GPS 1:", "AHRS:", "is using GPS",
-        "Compass error", "emergency yaw", "yaw reset", "RAWES flight: GPS",
+        "initialised",
+        "tilt alignment",
+        "origin set",
+        "GPS Glitch",
+        "EKF Failsafe",
+        "yaw aligned",
+        "GPS 1:",
+        "AHRS:",
+        "is using GPS",
+        "Compass error",
+        "emergency yaw",
+        "yaw reset",
+        "RAWES flight: GPS",
     ]
-    relevant = [(ts, txt) for ts, txt in r.statustext
-                if any(k.lower() in txt.lower() for k in keywords)]
+    relevant = [
+        (ts, txt)
+        for ts, txt in r.statustext
+        if any(k.lower() in txt.lower() for k in keywords)
+    ]
     if relevant:
         for ts, txt in relevant:
             tl = txt.lower()
@@ -883,8 +1115,8 @@ def _print_ekf(r: RunReport) -> None:
         print()
         print("  EKF_STATUS flag transitions:")
         for ts, old_f, new_f in transitions:
-            gained  = new_f & ~old_f
-            lost    = old_f & ~new_f
+            gained = new_f & ~old_f
+            lost = old_f & ~new_f
             changes = []
             if gained:
                 changes.append(f"+[{_decode_flags(gained)}]")
@@ -904,7 +1136,9 @@ def _print_ekf(r: RunReport) -> None:
         print(f"    GPS yaw valid        : {'[OK]' if final_f & 0x0080 else '[!!]'}")
 
 
-def _print_mode_check(fl: FlightLog, expected_mode: int = 20, expected_name: str = "GUIDED_NOGPS") -> None:
+def _print_mode_check(
+    fl: FlightLog, expected_mode: int = 20, expected_name: str = "GUIDED_NOGPS"
+) -> None:
     """
     Verify that ArduPilot was in the expected mode at arm and stayed there.
 
@@ -934,7 +1168,9 @@ def _print_mode_check(fl: FlightLog, expected_mode: int = 20, expected_name: str
         if arm_t is not None and abs(r["t_s"] - arm_t) < 0.5:
             marker = "  <-- arm"
         tag = "" if r["mode"] == expected_mode else f"  [!!] NOT {expected_name}"
-        print(f"    t={r['t_s']:7.2f}s  {r['mode_name']:12s} (mode={r['mode']:2d}){marker}{tag}")
+        print(
+            f"    t={r['t_s']:7.2f}s  {r['mode_name']:12s} (mode={r['mode']:2d}){marker}{tag}"
+        )
 
     # Check: after arm, was mode always expected_mode?
     if arm_t is not None:
@@ -947,9 +1183,13 @@ def _print_mode_check(fl: FlightLog, expected_mode: int = 20, expected_name: str
     print()
     if not non_expected:
         if arm_t is not None:
-            print(f"  [OK] {expected_name} active at arm (t={arm_t:.1f}s) and maintained throughout.")
+            print(
+                f"  [OK] {expected_name} active at arm (t={arm_t:.1f}s) and maintained throughout."
+            )
         else:
-            print(f"  [OK] {expected_name} throughout (no arm event found to anchor check).")
+            print(
+                f"  [OK] {expected_name} throughout (no arm event found to anchor check)."
+            )
     else:
         print(f"  [!!] NON-{expected_name} mode detected after arm:")
         for r in non_expected:
@@ -964,12 +1204,24 @@ def _print_mode_check(fl: FlightLog, expected_mode: int = 20, expected_name: str
     # A large gap means the SYSTEM_TIME anchor conversion is off.
     _needle = expected_name.replace("_", " ")
     mav_acro = next(
-        (ev.t_sim for ev in fl.events
-         if ev.category == "MODE" and _needle in ev.text.upper() and arm_t is not None and ev.t_sim >= arm_t - 1.0),
+        (
+            ev.t_sim
+            for ev in fl.events
+            if ev.category == "MODE"
+            and _needle in ev.text.upper()
+            and arm_t is not None
+            and ev.t_sim >= arm_t - 1.0
+        ),
         None,
     )
     df_acro = next(
-        (r["t_s"] for r in rows if r["mode"] == expected_mode and arm_t is not None and r["t_s"] >= arm_t - 1.0),
+        (
+            r["t_s"]
+            for r in rows
+            if r["mode"] == expected_mode
+            and arm_t is not None
+            and r["t_s"] >= arm_t - 1.0
+        ),
         None,
     )
     if mav_acro is not None and df_acro is not None:
@@ -978,67 +1230,84 @@ def _print_mode_check(fl: FlightLog, expected_mode: int = 20, expected_name: str
         print(f"\n  Time alignment (MAVLink vs dataflash, post-arm {expected_name}):")
         print(f"    MAVLink {expected_name}: t={mav_acro:.2f}s")
         print(f"    Dataflash {expected_name}: t={df_acro:.2f}s")
-        print(f"    delta        : {delta:.2f}s  " + ("[OK]" if ok else "[!!] >2 s -- SYSTEM_TIME anchor may be off"))
+        print(
+            f"    delta        : {delta:.2f}s  "
+            + ("[OK]" if ok else "[!!] >2 s -- SYSTEM_TIME anchor may be off")
+        )
 
 
 def _print_landing(r: RunReport) -> None:
     """Print landing-specific diagnostics (descent, tension, yaw tracking)."""
     rows = r.tel_rows
     descent_rows = [row for row in rows if row.phase == "descent"]
-    final_rows   = [row for row in rows if row.phase == "final_drop"]
+    final_rows = [row for row in rows if row.phase == "final_drop"]
     if not descent_rows and not final_rows:
         return
 
     _header("LANDING DIAGNOSTICS")
 
     if descent_rows:
-        t0   = descent_rows[0].t_sim
-        t1   = descent_rows[-1].t_sim
+        t0 = descent_rows[0].t_sim
+        t1 = descent_rows[-1].t_sim
         alts = [-row.pos_z for row in descent_rows]
         tens = [row.tether_tension for row in descent_rows]
-        vhs  = [row.v_horiz_ms     for row in descent_rows]
+        vhs = [row.v_horiz_ms for row in descent_rows]
         orbs = [math.degrees(row.orb_yaw_rad) for row in descent_rows]
         # velocity-derived yaw (what EKF got, approximated from rpy)
         rpys = [math.degrees(row.rpy_yaw) for row in descent_rows]
         # yaw gap: difference between orb yaw and sent rpy yaw
-        gaps = [abs(((o - s + 180) % 360) - 180)
-                for o, s in zip(orbs, rpys)]
-        horiz_dists = [(row.pos_x**2 + row.pos_y**2)**0.5 for row in descent_rows]
+        gaps = [abs(((o - s + 180) % 360) - 180) for o, s in zip(orbs, rpys)]
+        horiz_dists = [(row.pos_x**2 + row.pos_y**2) ** 0.5 for row in descent_rows]
 
-        print(f"  Descent phase: t={t0:.1f}s to t={t1:.1f}s  ({len(descent_rows)} rows)")
+        print(
+            f"  Descent phase: t={t0:.1f}s to t={t1:.1f}s  ({len(descent_rows)} rows)"
+        )
         print(f"    altitude      : {min(alts):.2f} m .. {max(alts):.2f} m")
-        print(f"    descent rate  : {(alts[0]-alts[-1])/(t1-t0):.3f} m/s avg  "
-              + "(positive = down)")
-        print(f"    tether tension: peak={max(tens):.0f} N  mean={sum(tens)/len(tens):.0f} N")
-        print(f"    v_horiz       : max={max(vhs):.2f} m/s  mean={sum(vhs)/len(vhs):.2f} m/s")
+        print(
+            f"    descent rate  : {(alts[0] - alts[-1]) / (t1 - t0):.3f} m/s avg  "
+            + "(positive = down)"
+        )
+        print(
+            f"    tether tension: peak={max(tens):.0f} N  mean={sum(tens) / len(tens):.0f} N"
+        )
+        print(
+            f"    v_horiz       : max={max(vhs):.2f} m/s  mean={sum(vhs) / len(vhs):.2f} m/s"
+        )
         print(f"    horiz dist    : max={max(horiz_dists):.2f} m from anchor")
         print(f"    orb_yaw       : {min(orbs):.0f} .. {max(orbs):.0f} deg")
         print(f"    rpy_yaw (sent): {min(rpys):.0f} .. {max(rpys):.0f} deg")
-        print(f"    yaw gap       : max={max(gaps):.1f} deg  mean={sum(gaps)/len(gaps):.1f} deg")
+        print(
+            f"    yaw gap       : max={max(gaps):.1f} deg  mean={sum(gaps) / len(gaps):.1f} deg"
+        )
 
         # Sample the first 60s of descent at ~1 Hz
         dt_tel = 1.0
         if len(descent_rows) > 1:
-            dt_tel = (descent_rows[-1].t_sim - descent_rows[0].t_sim) / max(len(descent_rows)-1, 1)
+            dt_tel = (descent_rows[-1].t_sim - descent_rows[0].t_sim) / max(
+                len(descent_rows) - 1, 1
+            )
         stride = max(1, int(1.0 / dt_tel))
         sampled = descent_rows[::stride][:60]
         if sampled:
             print()
             print("  Descent sample (1s stride, first 60s):")
-            print("  t_sim    alt     v_horiz  orb_yaw  rpy_yaw  yaw_gap  tension  pos_x  pos_y")
+            print(
+                "  t_sim    alt     v_horiz  orb_yaw  rpy_yaw  yaw_gap  tension  pos_x  pos_y"
+            )
             for row in sampled:
-                alt   = -row.pos_z
-                oy    = math.degrees(row.orb_yaw_rad)
-                ry    = math.degrees(row.rpy_yaw)
-                gap   = abs(((oy - ry + 180) % 360) - 180)
-                print(f"  {row.t_sim:6.1f}  {alt:5.1f}   {row.v_horiz_ms:6.2f}   "
-                      f"{oy:6.1f}   {ry:6.1f}   {gap:5.1f}   "
-                      f"{row.tether_tension:7.0f}  {row.pos_x:5.2f}  {row.pos_y:5.2f}")
+                alt = -row.pos_z
+                oy = math.degrees(row.orb_yaw_rad)
+                ry = math.degrees(row.rpy_yaw)
+                gap = abs(((oy - ry + 180) % 360) - 180)
+                print(
+                    f"  {row.t_sim:6.1f}  {alt:5.1f}   {row.v_horiz_ms:6.2f}   "
+                    f"{oy:6.1f}   {ry:6.1f}   {gap:5.1f}   "
+                    f"{row.tether_tension:7.0f}  {row.pos_x:5.2f}  {row.pos_y:5.2f}"
+                )
 
     if final_rows:
         alt_fd = min(-row.pos_z for row in final_rows)
-        print(f"\n  final_drop phase: {len(final_rows)} rows  "
-              f"min_alt={alt_fd:.2f} m")
+        print(f"\n  final_drop phase: {len(final_rows)} rows  min_alt={alt_fd:.2f} m")
 
 
 def _print_setup(r: RunReport) -> None:
@@ -1055,15 +1324,20 @@ def _print_hold(r: RunReport) -> None:
     if not r.hold_stats:
         print("  (no hold stats found -- test may not have reached hold phase)")
         return
-    pos   = r.hold_stats.get("pos",   0)
-    att   = r.hold_stats.get("att",   0)
+    pos = r.hold_stats.get("pos", 0)
+    att = r.hold_stats.get("att", 0)
     servo = r.hold_stats.get("servo", 0)
-    print(f"  LOCAL_POSITION_NED samples : {pos:5d}  "
-          + ("[OK]" if pos > 10 else "[!!] GPS position never fused"))
-    print(f"  ATTITUDE samples           : {att:5d}  "
-          + ("[OK]" if att > 10 else "[!!]"))
-    print(f"  SERVO_OUTPUT_RAW samples   : {servo:5d}  "
-          + ("[OK]" if servo > 10 else "[!!]"))
+    print(
+        f"  LOCAL_POSITION_NED samples : {pos:5d}  "
+        + ("[OK]" if pos > 10 else "[!!] GPS position never fused")
+    )
+    print(
+        f"  ATTITUDE samples           : {att:5d}  " + ("[OK]" if att > 10 else "[!!]")
+    )
+    print(
+        f"  SERVO_OUTPUT_RAW samples   : {servo:5d}  "
+        + ("[OK]" if servo > 10 else "[!!]")
+    )
 
 
 def _print_sitl_crash(r: RunReport) -> None:
@@ -1123,6 +1397,7 @@ def _print_all_statustext(r: RunReport) -> None:
 # Physics yaw divergence (from existing telemetry.csv)
 # ---------------------------------------------------------------------------
 
+
 def _print_yaw_divergence(r: RunReport) -> None:
     """
     Gap between orb_yaw_rad (actual R_orb orientation yaw) and rpy_yaw
@@ -1145,27 +1420,44 @@ def _print_yaw_divergence(r: RunReport) -> None:
         return abs(((o - s + 180) % 360) - 180)
 
     _header("YAW DIVERGENCE  (orb_yaw vs rpy_yaw -- should be ~0 with honest sensors)")
-    print("  With honest sensors rpy_yaw == orb_yaw; gap > 0 indicates a sensor regression.")
+    print(
+        "  With honest sensors rpy_yaw == orb_yaw; gap > 0 indicates a sensor regression."
+    )
     print("  For GPS fusion diagnostics see SENSOR CONSISTENCY above.")
 
     # Group into three logical segments: kinematic, free-flight, pumping phases
     segments = [
-        ("kinematic (phase is waiting_ekf/positioning)",  [r for r in rows if _is_kinematic_row(r)]),
-        ("free-flight (phase not startup, no pump phase)",
-         [r for r in rows if not _is_kinematic_row(r)
-                          and r.phase not in ("reel-out", "reel-in", "descent", "final_drop")]),
-        ("pumping (reel-out/reel-in)", [r for r in rows if r.phase in ("reel-out", "reel-in")]),
-        ("landing (descent/final_drop)", [r for r in rows if r.phase in ("descent", "final_drop")]),
+        (
+            "kinematic (phase is waiting_ekf/positioning)",
+            [r for r in rows if _is_kinematic_row(r)],
+        ),
+        (
+            "free-flight (phase not startup, no pump phase)",
+            [
+                r
+                for r in rows
+                if not _is_kinematic_row(r)
+                and r.phase not in ("reel-out", "reel-in", "descent", "final_drop")
+            ],
+        ),
+        (
+            "pumping (reel-out/reel-in)",
+            [r for r in rows if r.phase in ("reel-out", "reel-in")],
+        ),
+        (
+            "landing (descent/final_drop)",
+            [r for r in rows if r.phase in ("descent", "final_drop")],
+        ),
     ]
 
     for label, seg_rows in segments:
         if not seg_rows:
             continue
         gaps = [_yaw_gap_deg(row) for row in seg_rows]
-        mean_gap  = sum(gaps) / len(gaps)
-        max_gap   = max(gaps)
-        max_row   = seg_rows[gaps.index(max_gap)]
-        hi_frac   = sum(1 for g in gaps if g > 15.0) / len(gaps)
+        mean_gap = sum(gaps) / len(gaps)
+        max_gap = max(gaps)
+        max_row = seg_rows[gaps.index(max_gap)]
+        hi_frac = sum(1 for g in gaps if g > 15.0) / len(gaps)
 
         flag = "[OK]"
         if max_gap > 30.0:
@@ -1176,14 +1468,17 @@ def _print_yaw_divergence(r: RunReport) -> None:
         print()
         print(f"  {label}  ({len(seg_rows)} rows)")
         print(f"    mean gap : {mean_gap:.1f} deg")
-        print(f"    max gap  : {max_gap:.1f} deg  at t={max_row.t_sim:.1f}s  "
-              f"(v_horiz={max_row.v_horiz_ms:.2f} m/s)  {flag}")
-        print(f"    >15 deg  : {hi_frac*100:.0f}% of frames")
+        print(
+            f"    max gap  : {max_gap:.1f} deg  at t={max_row.t_sim:.1f}s  "
+            f"(v_horiz={max_row.v_horiz_ms:.2f} m/s)  {flag}"
+        )
+        print(f"    >15 deg  : {hi_frac * 100:.0f}% of frames")
 
 
 # ---------------------------------------------------------------------------
 # Sensor consistency (compass heading vs GPS velocity heading)
 # ---------------------------------------------------------------------------
+
 
 def _print_sensor_consistency(r: RunReport) -> None:
     """
@@ -1208,8 +1503,9 @@ def _print_sensor_consistency(r: RunReport) -> None:
         return
 
     # Check if new sensor columns are populated (all-zero means old telemetry)
-    has_cols = any(row.heading_gap_deg != 0.0 or row.vel_heading_deg != 0.0
-                   for row in rows)
+    has_cols = any(
+        row.heading_gap_deg != 0.0 or row.vel_heading_deg != 0.0 for row in rows
+    )
     if not has_cols:
         # Old telemetry: try to derive from rpy_yaw + physics vel directly.
         # orb_yaw = math.degrees(row.orb_yaw_rad)
@@ -1223,76 +1519,107 @@ def _print_sensor_consistency(r: RunReport) -> None:
                 derived.append(None)
                 continue
             comp = math.degrees(row.rpy_yaw)
-            vhd  = math.degrees(math.atan2(row.vel_y, row.vel_x))
-            gap  = ((comp - vhd + 180.0) % 360.0) - 180.0
+            vhd = math.degrees(math.atan2(row.vel_y, row.vel_x))
+            gap = ((comp - vhd + 180.0) % 360.0) - 180.0
             derived.append(gap)
         if not any(g is not None for g in derived):
             return
         # Fall through: build synthetic rows list with derived gap
-        _header("SENSOR CONSISTENCY  (derived from rpy_yaw vs physics vel -- old telemetry)")
-        print("  NOTE: 'heading_gap_deg' column absent; gap derived from rpy_yaw vs vel_x/vel_y.")
-        print("  For accurate sensor diagnostics, re-run the test (new telemetry schema).")
+        _header(
+            "SENSOR CONSISTENCY  (derived from rpy_yaw vs physics vel -- old telemetry)"
+        )
+        print(
+            "  NOTE: 'heading_gap_deg' column absent; gap derived from rpy_yaw vs vel_x/vel_y."
+        )
+        print(
+            "  For accurate sensor diagnostics, re-run the test (new telemetry schema)."
+        )
         good_gaps = [g for g in derived if g is not None]
         mean_gap = sum(abs(g) for g in good_gaps) / len(good_gaps)
-        max_gap  = max(abs(g) for g in good_gaps)
-        hi_frac  = sum(1 for g in good_gaps if abs(g) > 30.0) / len(good_gaps)
-        flag = ("[!!] GPS fusion likely blocked" if max_gap > 90.0
-                else ("[!]  check" if max_gap > 30.0 else "[OK]"))
+        max_gap = max(abs(g) for g in good_gaps)
+        hi_frac = sum(1 for g in good_gaps if abs(g) > 30.0) / len(good_gaps)
+        flag = (
+            "[!!] GPS fusion likely blocked"
+            if max_gap > 90.0
+            else ("[!]  check" if max_gap > 30.0 else "[OK]")
+        )
         print(f"  mean |gap| : {mean_gap:.1f} deg")
         print(f"  max  |gap| : {max_gap:.1f} deg  {flag}")
-        print(f"  >30 deg    : {hi_frac*100:.0f}%")
+        print(f"  >30 deg    : {hi_frac * 100:.0f}%")
         return
 
     _header("SENSOR CONSISTENCY  (compass vs GPS velocity heading)")
     print("  ArduPilot EKF blocks GPS fusion when |compass - vel_heading| is large.")
     print("  compass heading = rpy_yaw = R_orb yaw  (what SITL compass reads)")
-    print("  vel heading     = atan2(vel_ned_E, vel_ned_N)  (what GPS velocity implies)")
+    print(
+        "  vel heading     = atan2(vel_ned_E, vel_ned_N)  (what GPS velocity implies)"
+    )
     print("  heading_gap_deg = compass - vel_heading  wrapped to (-180, 180]")
 
     segments = [
-        ("kinematic",
-         [row for row in rows if _is_kinematic_row(row)]),
-        ("free-flight (no pump/landing)",
-         [row for row in rows if not _is_kinematic_row(row)
-          and row.phase not in ("reel-out", "reel-in", "descent", "final_drop")]),
-        ("pumping (reel-out/reel-in)",
-         [row for row in rows if row.phase in ("reel-out", "reel-in")]),
-        ("landing (descent/final_drop)",
-         [row for row in rows if row.phase in ("descent", "final_drop")]),
+        ("kinematic", [row for row in rows if _is_kinematic_row(row)]),
+        (
+            "free-flight (no pump/landing)",
+            [
+                row
+                for row in rows
+                if not _is_kinematic_row(row)
+                and row.phase not in ("reel-out", "reel-in", "descent", "final_drop")
+            ],
+        ),
+        (
+            "pumping (reel-out/reel-in)",
+            [row for row in rows if row.phase in ("reel-out", "reel-in")],
+        ),
+        (
+            "landing (descent/final_drop)",
+            [row for row in rows if row.phase in ("descent", "final_drop")],
+        ),
     ]
 
     for label, seg in segments:
         if not seg:
             continue
-        gaps     = [abs(row.heading_gap_deg) for row in seg]
+        gaps = [abs(row.heading_gap_deg) for row in seg]
         mean_gap = sum(gaps) / len(gaps)
-        max_gap  = max(gaps)
-        max_row  = seg[gaps.index(max_gap)]
-        hi_frac  = sum(1 for g in gaps if g > 30.0) / len(gaps)
+        max_gap = max(gaps)
+        max_row = seg[gaps.index(max_gap)]
+        hi_frac = sum(1 for g in gaps if g > 30.0) / len(gaps)
 
-        flag = ("[!!] GPS fusion likely blocked" if max_gap > 90.0
-                else ("[!]  check" if max_gap > 30.0 else "[OK]"))
+        flag = (
+            "[!!] GPS fusion likely blocked"
+            if max_gap > 90.0
+            else ("[!]  check" if max_gap > 30.0 else "[OK]")
+        )
 
         print()
         print(f"  {label}  ({len(seg)} rows)")
         print(f"    mean |gap|     : {mean_gap:.1f} deg")
-        print(f"    max  |gap|     : {max_gap:.1f} deg  at t={max_row.t_sim:.1f}s  {flag}")
-        frac_str = f"{hi_frac*100:.0f}%"
-        print(f"    >30 deg frames : {frac_str}  "
-              + ("[OK]" if hi_frac < 0.05 else "[!!] EKF unlikely to fuse GPS this phase"))
+        print(
+            f"    max  |gap|     : {max_gap:.1f} deg  at t={max_row.t_sim:.1f}s  {flag}"
+        )
+        frac_str = f"{hi_frac * 100:.0f}%"
+        print(
+            f"    >30 deg frames : {frac_str}  "
+            + ("[OK]" if hi_frac < 0.05 else "[!!] EKF unlikely to fuse GPS this phase")
+        )
 
         # 5-point sample across the segment
         stride = max(1, len(seg) // 5)
         sample = seg[::stride][:5]
-        print(f"    {'t_sim':>8}  {'compass':>8}  {'vel_head':>8}  "
-              f"{'gap':>7}  {'v_horiz':>7}  {'sens_vel_n':>10}  {'sens_vel_e':>10}")
+        print(
+            f"    {'t_sim':>8}  {'compass':>8}  {'vel_head':>8}  "
+            f"{'gap':>7}  {'v_horiz':>7}  {'sens_vel_n':>10}  {'sens_vel_e':>10}"
+        )
         for sr in sample:
-            comp  = math.degrees(sr.rpy_yaw)
-            vhd   = sr.vel_heading_deg
-            gap   = sr.heading_gap_deg
-            print(f"    {sr.t_sim:8.1f}  {comp:8.1f}  {vhd:8.1f}  "
-                  f"{gap:7.1f}  {sr.v_horiz_ms:7.2f}  "
-                  f"{sr.sens_vel_n:10.3f}  {sr.sens_vel_e:10.3f}")
+            comp = math.degrees(sr.rpy_yaw)
+            vhd = sr.vel_heading_deg
+            gap = sr.heading_gap_deg
+            print(
+                f"    {sr.t_sim:8.1f}  {comp:8.1f}  {vhd:8.1f}  "
+                f"{gap:7.1f}  {sr.v_horiz_ms:7.2f}  "
+                f"{sr.sens_vel_n:10.3f}  {sr.sens_vel_e:10.3f}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1301,7 +1628,7 @@ def _print_sensor_consistency(r: RunReport) -> None:
 # ---------------------------------------------------------------------------
 
 _POST_FUSION_SETTLE_S = 5.0
-_CONST_POS_SETTLE_S   = 2.0
+_CONST_POS_SETTLE_S = 2.0
 
 
 def _mavlink_load(path: Path) -> list[dict]:
@@ -1311,10 +1638,8 @@ def _mavlink_load(path: Path) -> list[dict]:
             line = line.strip()
             if not line:
                 continue
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 records.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
     return records
 
 
@@ -1329,13 +1654,13 @@ def _check_ekf_records(
     t_start_s are treated as a normal post-fusion transient.
     Returns a list of failure strings. Empty = clean.
     """
-    settle_end       = t_start_s + _POST_FUSION_SETTLE_S
+    settle_end = t_start_s + _POST_FUSION_SETTLE_S
     const_settle_end = t_start_s + _CONST_POS_SETTLE_S
 
-    failures:      list[str] = []
-    glitch_late:   list[float] = []
-    const_times:   list[float] = []
-    att_loss:      list[float] = []
+    failures: list[str] = []
+    glitch_late: list[float] = []
+    const_times: list[float] = []
+    att_loss: list[float] = []
 
     for d in records:
         st = d.get("time_boot_ms", 0) / 1000.0
@@ -1354,8 +1679,9 @@ def _check_ekf_records(
             txt = d.get("text", "").rstrip("\x00").strip()
             if "yaw reset" in txt.lower():
                 failures.append(f"t={st:.1f}s  EKF yaw reset: {txt!r}")
-            if st > settle_end and ("gps glitch" in txt.lower()
-                                    or "compass error" in txt.lower()):
+            if st > settle_end and (
+                "gps glitch" in txt.lower() or "compass error" in txt.lower()
+            ):
                 failures.append(f"t={st:.1f}s  GPS/compass problem: {txt!r}")
 
     if glitch_late:
@@ -1380,7 +1706,7 @@ def _check_ekf_records(
 
 
 def validate_ekf_window(
-    mavlink_path: "Path | str",
+    mavlink_path: Path | str,
     t_start_s: float,
     t_end_s: float,
 ) -> list[str]:
@@ -1423,6 +1749,7 @@ def validate_ekf_records(
 # Bucketed flight analysis report
 # ---------------------------------------------------------------------------
 
+
 def _print_bucketed_report(fl: FlightLog, bucket_s: float = 5.0) -> None:
     """Print a per-bucket flight analysis table with events interleaved.
 
@@ -1448,8 +1775,10 @@ def _print_bucketed_report(fl: FlightLog, bucket_s: float = 5.0) -> None:
     has_ekf = any(b.ekf_flags is not None for b in buckets)
 
     # Build header
-    hdr = (f"  {'t(s)':>8}  {'phase':<12}  {'alt':>5}  {'T_N':>5}  "
-           f"{'col_r':>6}  {'aeroN':>5}")
+    hdr = (
+        f"  {'t(s)':>8}  {'phase':<12}  {'alt':>5}  {'T_N':>5}  "
+        f"{'col_r':>6}  {'aeroN':>5}"
+    )
     if has_att:
         hdr += f"  {'roll':>5}  {'pit':>5}  {'yaw':>5}"
     if has_tgt:
@@ -1466,24 +1795,32 @@ def _print_bucketed_report(fl: FlightLog, bucket_s: float = 5.0) -> None:
         # Build data row
         if b.n_rows > 0:
             phase_str = f"[{b.phase}]" if b.is_kinematic else b.phase
-            row = (f"  {b.t_start:8.1f}  {phase_str:<12}  {b.alt_mean:5.1f}  "
-                   f"{b.tether_tension_mean:5.0f}  {b.collective_rad_mean:6.3f}  "
-                   f"{b.aero_T_mean:5.0f}")
+            row = (
+                f"  {b.t_start:8.1f}  {phase_str:<12}  {b.alt_mean:5.1f}  "
+                f"{b.tether_tension_mean:5.0f}  {b.collective_rad_mean:6.3f}  "
+                f"{b.aero_T_mean:5.0f}"
+            )
         else:
-            row = (f"  {b.t_start:8.1f}  {'--':<12}  {'--':>5}  {'--':>5}  "
-                   f"{'--':>6}  {'--':>5}")
+            row = (
+                f"  {b.t_start:8.1f}  {'--':<12}  {'--':>5}  {'--':>5}  "
+                f"{'--':>6}  {'--':>5}"
+            )
 
         if has_att:
             if b.att_roll_deg is not None:
-                row += (f"  {b.att_roll_deg:5.1f}  {b.att_pitch_deg:5.1f}  "
-                        f"{b.att_yaw_deg:5.1f}")
+                row += (
+                    f"  {b.att_roll_deg:5.1f}  {b.att_pitch_deg:5.1f}  "
+                    f"{b.att_yaw_deg:5.1f}"
+                )
             else:
                 row += f"  {'--':>5}  {'--':>5}  {'--':>5}"
         if has_tgt:
-            row += (f"  {b.att_err_deg:5.1f}" if b.att_err_deg is not None
-                    else f"  {'--':>5}")
-        row += (f"  {b.heading_gap_deg_mean:4.1f}" if b.n_rows > 0
-                else f"  {'--':>4}")
+            row += (
+                f"  {b.att_err_deg:5.1f}"
+                if b.att_err_deg is not None
+                else f"  {'--':>5}"
+            )
+        row += f"  {b.heading_gap_deg_mean:4.1f}" if b.n_rows > 0 else f"  {'--':>4}"
         if has_ekf:
             if b.ekf_flags is not None:
                 flag_s = f"0x{b.ekf_flags:04x}"
@@ -1497,7 +1834,7 @@ def _print_bucketed_report(fl: FlightLog, bucket_s: float = 5.0) -> None:
 
         # Events in this bucket
         for ev in b.events:
-            sc  = SEV_CHAR.get(ev.severity, " ")
+            sc = SEV_CHAR.get(ev.severity, " ")
             cat = f"[{ev.category}]"
             txt = ev.text[:64]
             print(f"    {cat:<8} t={ev.t_sim:7.1f}s  [{sc}] {txt}")
@@ -1520,15 +1857,15 @@ def _print_dataflash_target_attitude(fl: FlightLog, window_s: float = 12.0) -> N
 
     disarm_t = None
     disarm_candidates = [
-        ev.t_sim for ev in fl.events
+        ev.t_sim
+        for ev in fl.events
         if ev.category == "ARM" and "DISARMED" in ev.text.upper() and ev.t_sim > 1.0
     ]
     if disarm_candidates:
         disarm_t = max(disarm_candidates)
     else:
         crash_candidates = [
-            ev.t_sim for ev in fl.events
-            if ev.category == "CRASH" and ev.t_sim > 1.0
+            ev.t_sim for ev in fl.events if ev.category == "CRASH" and ev.t_sim > 1.0
         ]
         if crash_candidates:
             disarm_t = max(crash_candidates)
@@ -1540,9 +1877,15 @@ def _print_dataflash_target_attitude(fl: FlightLog, window_s: float = 12.0) -> N
             f"DATAFLASH TARGET ATTITUDE  (ATT, 1.0s buckets, "
             f"t in [{lo:.1f}, {hi:.1f}] around disarm {disarm_t:.1f}s)"
         )
-        focus = [b for b in buckets if lo <= b.t_start <= hi and b.df_des_roll_deg is not None]
+        focus = [
+            b
+            for b in buckets
+            if lo <= b.t_start <= hi and b.df_des_roll_deg is not None
+        ]
     else:
-        title = "DATAFLASH TARGET ATTITUDE  (ATT, 1.0s buckets, first 20s with ATT data)"
+        title = (
+            "DATAFLASH TARGET ATTITUDE  (ATT, 1.0s buckets, first 20s with ATT data)"
+        )
         focus = [b for b in buckets if b.df_des_roll_deg is not None][:20]
 
     _header(title)
@@ -1561,8 +1904,8 @@ def _print_dataflash_target_attitude(fl: FlightLog, window_s: float = 12.0) -> N
     print("  " + "-" * (len(hdr) - 2))
 
     for b in focus:
-        dr = (b.df_roll_err_deg if b.df_roll_err_deg is not None else 0.0)
-        dp = (b.df_pitch_err_deg if b.df_pitch_err_deg is not None else 0.0)
+        dr = b.df_roll_err_deg if b.df_roll_err_deg is not None else 0.0
+        dp = b.df_pitch_err_deg if b.df_pitch_err_deg is not None else 0.0
         warn = "  [!!]" if abs(dr) > 30.0 or abs(dp) > 30.0 else ""
         print(
             f"  {b.t_start:7.1f}  "
@@ -1619,11 +1962,15 @@ def _print_release_window(
     aero_t_vals = [row.aero_T for row in post]
 
     sat_rows = [
-        row for row in post
+        row
+        for row in post
         if (
-            row.servo_s1_us <= 1000.0 or row.servo_s1_us >= 2000.0
-            or row.servo_s2_us <= 1000.0 or row.servo_s2_us >= 2000.0
-            or row.servo_s3_us <= 1000.0 or row.servo_s3_us >= 2000.0
+            row.servo_s1_us <= 1000.0
+            or row.servo_s1_us >= 2000.0
+            or row.servo_s2_us <= 1000.0
+            or row.servo_s2_us >= 2000.0
+            or row.servo_s3_us <= 1000.0
+            or row.servo_s3_us >= 2000.0
         )
     ]
 
@@ -1641,7 +1988,9 @@ def _print_release_window(
         f"    max |body_z_err|      : {max_bz_err:.1f} deg"
         + ("  [!!]" if max_bz_err > 30.0 else "  [OK]")
     )
-    print(f"    aero_T range          : {min(aero_t_vals):.1f} .. {max(aero_t_vals):.1f} N")
+    print(
+        f"    aero_T range          : {min(aero_t_vals):.1f} .. {max(aero_t_vals):.1f} N"
+    )
     print(
         f"    swash saturation rows : {len(sat_rows)}/{len(post)}"
         + ("  [!!]" if sat_rows else "  [OK]")
@@ -1673,14 +2022,22 @@ def _print_release_window(
             print("  DataFlash ATT jump at release (first sample before/after t_exit):")
             print(
                 f"    desired jump (deg)    : dRoll={d_des_roll:+.1f}  dPitch={d_des_pitch:+.1f}  dYaw={d_des_yaw:+.1f}"
-                + ("  [!!]" if abs(d_des_roll) > 20.0 or abs(d_des_pitch) > 20.0 else "  [OK]")
+                + (
+                    "  [!!]"
+                    if abs(d_des_roll) > 20.0 or abs(d_des_pitch) > 20.0
+                    else "  [OK]"
+                )
             )
-            print(f"    actual jump  (deg)    : dRoll={d_roll:+.1f}  dPitch={d_pitch:+.1f}")
+            print(
+                f"    actual jump  (deg)    : dRoll={d_roll:+.1f}  dPitch={d_pitch:+.1f}"
+            )
 
     # Compact sampled timeline around release
     print()
     print("  Sampled timeline (relative to t_exit):")
-    print("      dt   phase      roll    pitch  yaw_rt  bz_err    s1    s2    s3   aeroT")
+    print(
+        "      dt   phase      roll    pitch  yaw_rt  bz_err    s1    s2    s3   aeroT"
+    )
     last_print_t = -1e9
     printed = 0
     max_rows = 28
@@ -1702,19 +2059,24 @@ def _print_release_window(
         print(f"    ... ({len(win) - printed} additional high-rate rows omitted)")
 
     rel_events = [
-        ev for ev in fl.events
-        if lo <= ev.t_sim <= hi and ev.category in ("RAWES", "MODE", "CRASH", "ARM", "PHASE", "INFO")
+        ev
+        for ev in fl.events
+        if lo <= ev.t_sim <= hi
+        and ev.category in ("RAWES", "MODE", "CRASH", "ARM", "PHASE", "INFO")
     ]
     if rel_events:
         print()
         print("  Events in release window:")
         for ev in rel_events[:12]:
-            print(f"    [{ev.category:<5}] dt={ev.t_sim - t_exit:+6.3f}s  {ev.text[:80]}")
+            print(
+                f"    [{ev.category:<5}] dt={ev.t_sim - t_exit:+6.3f}s  {ev.text[:80]}"
+            )
 
 
 # ---------------------------------------------------------------------------
 # EKF telemetry (from a legacy mavlink.jsonl log)
 # ---------------------------------------------------------------------------
+
 
 def _load_mavlink_ekf_rows(path: Path) -> list[dict]:
     """
@@ -1726,32 +2088,37 @@ def _load_mavlink_ekf_rows(path: Path) -> list[dict]:
     rows = []
     last_pos: dict = {}
     last_ekf: dict = {}
-    for msg in _iter_mavlink(path, types=["ATTITUDE", "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"]):
+    for msg in _iter_mavlink(
+        path, types=["ATTITUDE", "LOCAL_POSITION_NED", "EKF_STATUS_REPORT"]
+    ):
         mt = msg.get("mavpackettype", "")
         if mt == "LOCAL_POSITION_NED":
             last_pos = {
-                "pos_n": msg.get("x", 0.0), "pos_e": msg.get("y", 0.0),
-                "pos_d": msg.get("z", 0.0), "vel_n": msg.get("vx", 0.0),
-                "vel_e": msg.get("vy", 0.0), "vel_d": msg.get("vz", 0.0),
+                "pos_n": msg.get("x", 0.0),
+                "pos_e": msg.get("y", 0.0),
+                "pos_d": msg.get("z", 0.0),
+                "vel_n": msg.get("vx", 0.0),
+                "vel_e": msg.get("vy", 0.0),
+                "vel_d": msg.get("vz", 0.0),
             }
         elif mt == "EKF_STATUS_REPORT":
             last_ekf = {
-                "ekf_flags":                int(msg.get("flags", 0)),
-                "ekf_vel_variance":         msg.get("velocity_variance", 0.0),
-                "ekf_pos_horiz_variance":   msg.get("pos_horiz_variance", 0.0),
-                "ekf_pos_vert_variance":    msg.get("pos_vert_variance", 0.0),
-                "ekf_compass_variance":     msg.get("compass_variance", 0.0),
+                "ekf_flags": int(msg.get("flags", 0)),
+                "ekf_vel_variance": msg.get("velocity_variance", 0.0),
+                "ekf_pos_horiz_variance": msg.get("pos_horiz_variance", 0.0),
+                "ekf_pos_vert_variance": msg.get("pos_vert_variance", 0.0),
+                "ekf_compass_variance": msg.get("compass_variance", 0.0),
                 "ekf_terrain_alt_variance": msg.get("terrain_alt_variance", 0.0),
             }
         elif mt == "ATTITUDE":
             row: dict = {
-                "time_boot_ms":   int(msg.get("time_boot_ms", 0)),
-                "att_roll":       msg.get("roll", 0.0),
-                "att_pitch":      msg.get("pitch", 0.0),
-                "att_yaw":        msg.get("yaw", 0.0),
-                "att_rollspeed":  msg.get("rollspeed", 0.0),
+                "time_boot_ms": int(msg.get("time_boot_ms", 0)),
+                "att_roll": msg.get("roll", 0.0),
+                "att_pitch": msg.get("pitch", 0.0),
+                "att_yaw": msg.get("yaw", 0.0),
+                "att_rollspeed": msg.get("rollspeed", 0.0),
                 "att_pitchspeed": msg.get("pitchspeed", 0.0),
-                "att_yawspeed":   msg.get("yawspeed", 0.0),
+                "att_yawspeed": msg.get("yawspeed", 0.0),
             }
             row.update(last_pos)
             row.update(last_ekf)
@@ -1778,8 +2145,10 @@ def _print_ekf_state(mavlink_log_path: Path) -> None:
     t0_ms = rows[0].get("time_boot_ms", 0.0)
     t1_ms = rows[-1].get("time_boot_ms", 0.0)
     dur_s = (t1_ms - t0_ms) / 1000.0
-    print(f"  rows: {len(rows)}   span: {t0_ms/1000:.1f}s - {t1_ms/1000:.1f}s"
-          f"  ({dur_s:.0f}s)")
+    print(
+        f"  rows: {len(rows)}   span: {t0_ms / 1000:.1f}s - {t1_ms / 1000:.1f}s"
+        f"  ({dur_s:.0f}s)"
+    )
 
     # ── Flag transitions ──────────────────────────────────────────────────
     EKF_FLAG_NAMES = {
@@ -1808,7 +2177,7 @@ def _print_ekf_state(mavlink_log_path: Path) -> None:
         if flags != prev_flags:
             tbs = row.get("time_boot_ms", 0)
             gained = 0 if prev_flags is None else (flags & ~prev_flags)
-            lost   = 0 if prev_flags is None else (~flags & prev_flags)
+            lost = 0 if prev_flags is None else (~flags & prev_flags)
             changes = []
             if prev_flags is None:
                 changes.append(f"init [{_decode(flags)}]")
@@ -1818,16 +2187,16 @@ def _print_ekf_state(mavlink_log_path: Path) -> None:
                 if lost:
                     changes.append(f"-[{_decode(lost)}]")
             label = "  ".join(changes) if changes else "(no change)"
-            print(f"    t={tbs/1000:7.1f}s  0x{flags:04x}  {label}")
+            print(f"    t={tbs / 1000:7.1f}s  0x{flags:04x}  {label}")
             prev_flags = flags
 
     # ── Variance peaks ────────────────────────────────────────────────────
     # Thresholds tuned to ArduPilot EKF3 default innovation gate sizes.
     VAR_THRESHOLDS = {
-        "ekf_pos_horiz_variance":   (1.0, 5.0, "m^2  horiz pos"),
-        "ekf_pos_vert_variance":    (0.5, 2.0, "m^2  vert pos"),
-        "ekf_vel_variance":         (0.5, 2.0, "(m/s)^2  vel"),
-        "ekf_compass_variance":     (0.2, 0.5, "rad^2  compass"),
+        "ekf_pos_horiz_variance": (1.0, 5.0, "m^2  horiz pos"),
+        "ekf_pos_vert_variance": (0.5, 2.0, "m^2  vert pos"),
+        "ekf_vel_variance": (0.5, 2.0, "(m/s)^2  vel"),
+        "ekf_compass_variance": (0.2, 0.5, "rad^2  compass"),
         "ekf_terrain_alt_variance": (1.0, 5.0, "m^2  terrain alt"),
     }
 
@@ -1839,12 +2208,14 @@ def _print_ekf_state(mavlink_log_path: Path) -> None:
         if not eligible:
             continue
         peak_row = max(eligible, key=lambda r: r[col])
-        peak   = peak_row[col]
+        peak = peak_row[col]
         peak_t = peak_row.get("time_boot_ms", 0)
         flag = "[OK]" if peak < warn else ("[!!]" if peak >= crit else "[! ]")
         if peak >= warn:
             any_spike = True
-        print(f"    {col:<35} peak={peak:.3f} {unit}  at t={peak_t/1000:.1f}s  {flag}")
+        print(
+            f"    {col:<35} peak={peak:.3f} {unit}  at t={peak_t / 1000:.1f}s  {flag}"
+        )
     if not any_spike:
         print("    (all variances within normal range)")
 
@@ -1866,6 +2237,7 @@ def _print_ekf_state(mavlink_log_path: Path) -> None:
 # Optional plot
 # ---------------------------------------------------------------------------
 
+
 def _plot(r: RunReport) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -1878,13 +2250,13 @@ def _plot(r: RunReport) -> None:
     if not rows:
         return
 
-    ts     = np.array([row.t_sim       for row in rows])
-    alt    = np.array([-row.pos_z      for row in rows])   # altitude = -NED_Z
-    horiz  = np.array([(row.pos_x**2 + row.pos_y**2)**0.5 for row in rows])
-    omega  = np.array([row.omega_rotor for row in rows])
-    alphas = np.array([row.damp_alpha  for row in rows])
-    roll   = np.array([math.degrees(row.rpy_roll)  for row in rows])
-    pitch  = np.array([math.degrees(row.rpy_pitch) for row in rows])
+    ts = np.array([row.t_sim for row in rows])
+    alt = np.array([-row.pos_z for row in rows])  # altitude = -NED_Z
+    horiz = np.array([(row.pos_x**2 + row.pos_y**2) ** 0.5 for row in rows])
+    omega = np.array([row.omega_rotor for row in rows])
+    alphas = np.array([row.damp_alpha for row in rows])
+    roll = np.array([math.degrees(row.rpy_roll) for row in rows])
+    pitch = np.array([math.degrees(row.rpy_pitch) for row in rows])
 
     fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
     fig.suptitle(f"Run analysis -- sensor_mode={r.sensor_mode or '?'}", fontsize=12)
@@ -1903,7 +2275,7 @@ def _plot(r: RunReport) -> None:
     ax.grid(True, alpha=0.3)
 
     ax = axes[2]
-    ax.plot(ts, roll,  label="roll",  color="crimson")
+    ax.plot(ts, roll, label="roll", color="crimson")
     ax.plot(ts, pitch, label="pitch", color="seagreen")
     ax.set_ylabel("Attitude (deg)")
     ax.legend(fontsize=8)
@@ -1932,7 +2304,8 @@ def _plot(r: RunReport) -> None:
 # Attitude focus report (--focus attitude)
 # ---------------------------------------------------------------------------
 
-def _fmt(v: Optional[float], w: int = 7, d: int = 1, signed: bool = False) -> str:
+
+def _fmt(v: float | None, w: int = 7, d: int = 1, signed: bool = False) -> str:
     if v is None:
         return (" " * (w - 2) + "--").rjust(w)
     fmt = f"{'+' if signed else ''}{w}.{d}f"
@@ -1964,28 +2337,32 @@ def _print_attitude_focus(fl: FlightLog, bucket_s: float) -> None:
     print("  Table 1: Attitude error vs swashplate output")
     print("  Roll/Pitch in degrees.  dR/dP = actual - desired.  SWSH outputs in %.")
     print()
-    hdr = (f"  {'t_s':>6}  "
-           f"{'DesRoll':>7}  {'Roll':>7}  {'dR':>7}  "
-           f"{'DesPitch':>8}  {'Pitch':>7}  {'dP':>7}  "
-           f"{'DesYaw':>7}  {'Yaw':>7}  "
-           f"{'Col%':>6}  {'PCyc%':>6}  {'RCyc%':>6}")
+    hdr = (
+        f"  {'t_s':>6}  "
+        f"{'DesRoll':>7}  {'Roll':>7}  {'dR':>7}  "
+        f"{'DesPitch':>8}  {'Pitch':>7}  {'dP':>7}  "
+        f"{'DesYaw':>7}  {'Yaw':>7}  "
+        f"{'Col%':>6}  {'PCyc%':>6}  {'RCyc%':>6}"
+    )
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
 
     for b in buckets:
         if b.df_roll_deg is None:
             continue
-        col_s  = f"{b.df_swsh_col:6.1f}" if b.df_swsh_col is not None else "  --  "
+        col_s = f"{b.df_swsh_col:6.1f}" if b.df_swsh_col is not None else "  --  "
         pcyc_s = f"{b.df_swsh_pcyc:6.1f}" if b.df_swsh_pcyc is not None else "  --  "
         rcyc_s = f"{b.df_swsh_rcyc:6.1f}" if b.df_swsh_rcyc is not None else "  --  "
-        dr = b.df_roll_err_deg  or 0.0
+        dr = b.df_roll_err_deg or 0.0
         dp = b.df_pitch_err_deg or 0.0
         flag = "  [!!]" if abs(dr) > 30.0 or abs(dp) > 30.0 else ""
-        print(f"  {b.t_start:6.1f}  "
-              f"{b.df_des_roll_deg:7.1f}  {b.df_roll_deg:7.1f}  {dr:+7.1f}  "
-              f"{b.df_des_pitch_deg:8.1f}  {b.df_pitch_deg:7.1f}  {dp:+7.1f}  "
-              f"{b.df_des_yaw_deg:7.1f}  {b.df_yaw_deg:7.1f}  "
-              f"{col_s}  {pcyc_s}  {rcyc_s}{flag}")
+        print(
+            f"  {b.t_start:6.1f}  "
+            f"{b.df_des_roll_deg:7.1f}  {b.df_roll_deg:7.1f}  {dr:+7.1f}  "
+            f"{b.df_des_pitch_deg:8.1f}  {b.df_pitch_deg:7.1f}  {dp:+7.1f}  "
+            f"{b.df_des_yaw_deg:7.1f}  {b.df_yaw_deg:7.1f}  "
+            f"{col_s}  {pcyc_s}  {rcyc_s}{flag}"
+        )
         for ev in b.events:
             print(f"    [{ev.category}] t={ev.t_sim:.1f}s  {ev.text[:60]}")
 
@@ -2003,26 +2380,31 @@ def _print_attitude_focus(fl: FlightLog, bucket_s: float) -> None:
     print("  If FF dominates: contamination = attitude_error -> rate_FF_feedforward.")
     print("  If P dominates:  contamination = rate_error -> P gain.")
     print()
-    hdr2 = (f"  {'t_s':>6}  "
-            f"{'R.Tar':>6}  {'R.Act':>6}  {'R.P':>6}  {'R.FF':>6}  {'R.I':>6}  {'R.D':>6}  "
-            f"{'P.Tar':>6}  {'P.Act':>6}  {'P.P':>6}  {'P.FF':>6}  {'P.I':>6}  {'P.D':>6}")
+    hdr2 = (
+        f"  {'t_s':>6}  "
+        f"{'R.Tar':>6}  {'R.Act':>6}  {'R.P':>6}  {'R.FF':>6}  {'R.I':>6}  {'R.D':>6}  "
+        f"{'P.Tar':>6}  {'P.Act':>6}  {'P.P':>6}  {'P.FF':>6}  {'P.I':>6}  {'P.D':>6}"
+    )
     print(hdr2)
     print("  " + "-" * (len(hdr2) - 2))
     for b in buckets:
         if b.df_pidr_tar is None and b.df_pidp_tar is None:
             continue
-        print(f"  {b.t_start:6.1f}  "
-              f"{_fmt(b.df_pidr_tar)}  {_fmt(b.df_pidr_act)}  "
-              f"{_fmt(b.df_pidr_p,6,3)}  {_fmt(b.df_pidr_ff,6,3)}  "
-              f"{_fmt(b.df_pidr_i,6,3)}  {_fmt(b.df_pidr_d,6,3)}  "
-              f"{_fmt(b.df_pidp_tar)}  {_fmt(b.df_pidp_act)}  "
-              f"{_fmt(b.df_pidp_p,6,3)}  {_fmt(b.df_pidp_ff,6,3)}  "
-              f"{_fmt(b.df_pidp_i,6,3)}  {_fmt(b.df_pidp_d,6,3)}")
+        print(
+            f"  {b.t_start:6.1f}  "
+            f"{_fmt(b.df_pidr_tar)}  {_fmt(b.df_pidr_act)}  "
+            f"{_fmt(b.df_pidr_p, 6, 3)}  {_fmt(b.df_pidr_ff, 6, 3)}  "
+            f"{_fmt(b.df_pidr_i, 6, 3)}  {_fmt(b.df_pidr_d, 6, 3)}  "
+            f"{_fmt(b.df_pidp_tar)}  {_fmt(b.df_pidp_act)}  "
+            f"{_fmt(b.df_pidp_p, 6, 3)}  {_fmt(b.df_pidp_ff, 6, 3)}  "
+            f"{_fmt(b.df_pidp_i, 6, 3)}  {_fmt(b.df_pidp_d, 6, 3)}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def _list_test_dirs() -> list:
     """Return per-test subdirectories in logs/, sorted by modification time (newest first)."""
@@ -2035,7 +2417,7 @@ def _list_test_dirs() -> list:
     )
 
 
-def _resolve_telemetry_path(test_dir: Path, override: Optional[str]) -> Path:
+def _resolve_telemetry_path(test_dir: Path, override: str | None) -> Path:
     """Resolve telemetry CSV path with sane fallbacks for simtests.
 
     Priority:
@@ -2069,37 +2451,74 @@ def _resolve_pytest_log_path(test_dir: Path) -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("test_name", nargs="?", default=None,
-                        help="Test name to analyse (e.g. test_acro_armed). "
-                             "Reads logs/{test_name}/telemetry.csv and mediator.log. "
-                             "Omit to list available test directories.")
-    parser.add_argument("--telemetry", default=None,
-                        help="Override telemetry CSV path")
-    parser.add_argument("--mediator", default=None,
-                        help="Override mediator log path")
-    parser.add_argument("--plot", action="store_true",
-                        help="Save + show a 4-panel position/attitude/spin plot")
-    parser.add_argument("--all-statustext", action="store_true",
-                        help="Print every STATUSTEXT line (not just EKF/GPS)")
-    parser.add_argument("--bucket", type=float, default=5.0, metavar="S",
-                        help="Bucket size in seconds for the per-window analysis "
-                             "table (default: 5.0). Use a larger value for a "
-                             "high-level overview, smaller for detailed debugging.")
-    parser.add_argument("--release-window", type=float, default=1.0, metavar="S",
-                        help="Seconds after kinematic_exit to include in the release diagnostics section (default: 1.0).")
-    parser.add_argument("--release-pre", type=float, default=0.2, metavar="S",
-                        help="Seconds before kinematic_exit to include in the release diagnostics section (default: 0.2).")
-    parser.add_argument("--release-sample", type=float, default=0.05, metavar="S",
-                        help="Sample stride in seconds for the printed release-window timeline (default: 0.05).")
-    parser.add_argument("--focus", default=None, metavar="MODE",
-                        help="Focus mode: 'attitude' shows per-bucket "
-                             "DesRoll/Roll/dR, DesPitch/Pitch/dP, and "
-                             "swashplate PCyc/RCyc/Col from dataflash.BIN.")
-    parser.add_argument("--expected-mode", default="guided_nogps", metavar="MODE",
-                        help="Expected post-arm flight mode for mode-check diagnostics: "
-                            "guided_nogps (default), guided, or acro.")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "test_name",
+        nargs="?",
+        default=None,
+        help="Test name to analyse (e.g. test_acro_armed). "
+        "Reads logs/{test_name}/telemetry.csv and mediator.log. "
+        "Omit to list available test directories.",
+    )
+    parser.add_argument("--telemetry", default=None, help="Override telemetry CSV path")
+    parser.add_argument("--mediator", default=None, help="Override mediator log path")
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Save + show a 4-panel position/attitude/spin plot",
+    )
+    parser.add_argument(
+        "--all-statustext",
+        action="store_true",
+        help="Print every STATUSTEXT line (not just EKF/GPS)",
+    )
+    parser.add_argument(
+        "--bucket",
+        type=float,
+        default=5.0,
+        metavar="S",
+        help="Bucket size in seconds for the per-window analysis "
+        "table (default: 5.0). Use a larger value for a "
+        "high-level overview, smaller for detailed debugging.",
+    )
+    parser.add_argument(
+        "--release-window",
+        type=float,
+        default=1.0,
+        metavar="S",
+        help="Seconds after kinematic_exit to include in the release diagnostics section (default: 1.0).",
+    )
+    parser.add_argument(
+        "--release-pre",
+        type=float,
+        default=0.2,
+        metavar="S",
+        help="Seconds before kinematic_exit to include in the release diagnostics section (default: 0.2).",
+    )
+    parser.add_argument(
+        "--release-sample",
+        type=float,
+        default=0.05,
+        metavar="S",
+        help="Sample stride in seconds for the printed release-window timeline (default: 0.05).",
+    )
+    parser.add_argument(
+        "--focus",
+        default=None,
+        metavar="MODE",
+        help="Focus mode: 'attitude' shows per-bucket "
+        "DesRoll/Roll/dR, DesPitch/Pitch/dP, and "
+        "swashplate PCyc/RCyc/Col from dataflash.BIN.",
+    )
+    parser.add_argument(
+        "--expected-mode",
+        default="guided_nogps",
+        metavar="MODE",
+        help="Expected post-arm flight mode for mode-check diagnostics: "
+        "guided_nogps (default), guided, or acro.",
+    )
     args = parser.parse_args()
 
     if args.test_name is None:
@@ -2109,16 +2528,23 @@ def main() -> None:
         else:
             print(f"Available test runs in {_LOG_DIR}  (newest first):")
             for d in dirs:
-                has_tel = (d / "telemetry.csv").exists() or any(d.glob("telemetry_*.csv"))
+                has_tel = (d / "telemetry.csv").exists() or any(
+                    d.glob("telemetry_*.csv")
+                )
                 has_med = (d / "mediator.log").exists()
                 has_log = (d / "gcs.log").exists() or (d / "simtest.log").exists()
-                tags = " ".join(filter(None, [
-                    "telemetry" if has_tel else "",
-                    "mediator.log"  if has_med else "",
-                    "test.log" if has_log else "",
-                ]))
+                tags = " ".join(
+                    filter(
+                        None,
+                        [
+                            "telemetry" if has_tel else "",
+                            "mediator.log" if has_med else "",
+                            "test.log" if has_log else "",
+                        ],
+                    )
+                )
                 print(f"  {d.name:<45}  {tags}")
-            print(f"\nUsage: python analyse_run.py <test_name>")
+            print("\nUsage: python analyse_run.py <test_name>")
         return
 
     test_dir = _LOG_DIR / args.test_name
@@ -2137,7 +2563,7 @@ def main() -> None:
     # Also build RunReport for sections that still use it
     report = RunReport()
     tel_path = _resolve_telemetry_path(test_dir, args.telemetry)
-    med_path = Path(args.mediator)  if args.mediator  else test_dir / "mediator.log"
+    med_path = Path(args.mediator) if args.mediator else test_dir / "mediator.log"
     py_path = _resolve_pytest_log_path(test_dir)
     load_telemetry(tel_path, report)
     parse_mediator(med_path, report)
@@ -2186,7 +2612,9 @@ def main() -> None:
         }
         _key = str(args.expected_mode).strip().lower()
         if _key not in _mode_map:
-            raise ValueError(f"Unsupported --expected-mode={args.expected_mode!r}; choose guided_nogps|guided|acro")
+            raise ValueError(
+                f"Unsupported --expected-mode={args.expected_mode!r}; choose guided_nogps|guided|acro"
+            )
         _mode_id, _mode_name = _mode_map[_key]
         _print_mode_check(fl, expected_mode=_mode_id, expected_name=_mode_name)
         _print_sensor_consistency(report)

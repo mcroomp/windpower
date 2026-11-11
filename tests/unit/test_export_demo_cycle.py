@@ -10,7 +10,7 @@ from analysis.export_demo_cycle import export_cycle, quaternion
 
 
 @pytest.fixture
-def recording(tmp_path, monkeypatch):
+def recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     rows = []
     for time, phase in [(0, "hold"), (10, "reel-out"), (11, "reel-out"),
                         (12, "reel-in"), (13, "reel-in"), (14, "reel-out"),
@@ -45,7 +45,7 @@ def recording(tmp_path, monkeypatch):
         {"mavpackettype": "STATUSTEXT", "_sim_time_boot_ms": 14_000, "text": "outside"},
     ])
 
-    def query(command, **kwargs):
+    def query(command: list[str], **kwargs: object):
         assert command.count("--type") == 8
         assert kwargs["check"] is True
         return CompletedProcess(command, 0, "\n".join(json.dumps(record) for record in journal), "")
@@ -54,7 +54,7 @@ def recording(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_exports_complete_cycle_with_physics_provenance(recording):
+def test_exports_complete_cycle_with_physics_provenance(recording: Path):
     result = export_cycle(recording, recording / "journal", Path("linkhub.exe"), 1, 20)
     assert result["duration"] == 4
     assert result["groundHeight"] == -38
@@ -79,18 +79,18 @@ def test_exports_complete_cycle_with_physics_provenance(recording):
 
 
 @pytest.mark.parametrize("cycle", [0, 3])
-def test_rejects_missing_cycles(recording, cycle):
+def test_rejects_missing_cycles(recording: Path, cycle: int):
     with pytest.raises(ValueError, match="Cycle must be"):
         export_cycle(recording, recording / "journal", Path("linkhub.exe"), cycle, 20)
 
 
 @pytest.mark.parametrize("hz", [0, -1, math.inf, math.nan])
-def test_rejects_invalid_sample_rates(recording, hz):
+def test_rejects_invalid_sample_rates(recording: Path, hz: float):
     with pytest.raises(ValueError, match="Sample rate"):
         export_cycle(recording, recording / "journal", Path("linkhub.exe"), 1, hz)
 
 
-def test_rejects_cycle_before_release(recording):
+def test_rejects_cycle_before_release(recording: Path):
     (recording / "events.jsonl").write_text(json.dumps({"event": "kinematic_exit", "t_sim": 11}))
     with pytest.raises(ValueError, match="kinematic_exit"):
         export_cycle(recording, recording / "journal", Path("linkhub.exe"), 1, 20)

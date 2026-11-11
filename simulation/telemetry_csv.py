@@ -40,21 +40,41 @@ import csv
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
+from numpy.typing import ArrayLike
+from collections.abc import Mapping, Sequence
+from typing import Protocol
+from simulation.tether import TetherResult
 
 from simulation.telemetry_columns import (
-    ASYNC_MAV_COLUMNS,
     COLUMNS,
-    COLUMN_GROUPS,
-    COLUMN_SPECS,
 )
 
 
 # ---------------------------------------------------------------------------
 # TelRow
 # ---------------------------------------------------------------------------
+
+class _PhysicsTelemetry(Protocol):
+    @property
+    def hub_state(self) -> Mapping[str, np.ndarray]: ...
+
+    @property
+    def tether_result(self) -> TetherResult: ...
+
+    @property
+    def tension_now(self) -> float: ...
+
+    @property
+    def omega_spin(self) -> float: ...
+
+    @property
+    def t_sim(self) -> float: ...
+
+    @property
+    def rest_length(self) -> float: ...
+
 
 @dataclass
 class TelRow:
@@ -335,7 +355,7 @@ class TelRow:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_tel(cls, d: dict) -> "TelRow":
+    def from_tel(cls, d: dict) -> TelRow:
         """Construct from a make_tel() canonical dict."""
         pos  = d.get("pos_ned",   [0.0, 0.0, 0.0])
         vel  = d.get("vel_ned",   [0.0, 0.0, 0.0])
@@ -445,12 +465,12 @@ class TelRow:
     @classmethod
     def from_physics(
         cls,
-        runner,
+        runner: _PhysicsTelemetry,
         step_result: dict,
         collective_rad: float,
-        wind_ned,
+        wind_ned: Sequence[float] | np.ndarray,
         *,
-        body_z_eq=None,
+        body_z_eq: ArrayLike | None = None,
         phase: str = "",
         tension_feedforward_n: float = 0.0,
         tension_ic_n: float = 0.0,
@@ -492,7 +512,7 @@ class TelRow:
         rate_yaw_pdmod: float = float("nan"),
         rate_yaw_srate: float = float("nan"),
         vel_radial_mps: float = 0.0,
-        net_moment=None,
+        net_moment: ArrayLike | None = None,
         mav_att_roll_deg: float = float("nan"),
         mav_att_pitch_deg: float = float("nan"),
         mav_att_yaw_deg: float = float("nan"),
@@ -505,7 +525,7 @@ class TelRow:
         mav_att_target_roll_rate_rads: float = float("nan"),
         mav_att_target_pitch_rate_rads: float = float("nan"),
         mav_att_target_yaw_rate_rads: float = float("nan"),
-    ) -> "TelRow":
+    ) -> TelRow:
         """Build a TelRow from a PhysicsRunner and its step result (simtest use).
 
         Parameters
@@ -785,7 +805,7 @@ class TelRow:
 # CSV I/O
 # ---------------------------------------------------------------------------
 
-def write_csv(rows: "list[TelRow]", path: "Path | str") -> None:
+def write_csv(rows: list[TelRow], path: Path | str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -798,7 +818,7 @@ def write_csv(rows: "list[TelRow]", path: "Path | str") -> None:
             w.writerow(row_dict)
 
 
-def read_csv(path: "Path | str") -> "list[TelRow]":
+def read_csv(path: Path | str) -> list[TelRow]:
     path = Path(path)
     if not path.exists():
         return []
@@ -820,7 +840,7 @@ _INT_COLS   = frozenset({"tether_slack", "coll_saturated", "comms_ok"})
 _FLOAT_COLS = [c for c in COLUMNS if c not in _STR_COLS and c not in _INT_COLS and c != "t_sim"]
 
 
-def _f(s: object) -> Optional[float]:
+def _f(s: object) -> float | None:
     if s in (None, "", "None", "nan", "inf", "-inf"):
         return None
     try:
@@ -829,7 +849,7 @@ def _f(s: object) -> Optional[float]:
         return None
 
 
-def _row_from_raw(raw: dict) -> Optional[TelRow]:
+def _row_from_raw(raw: dict) -> TelRow | None:
     # DictReader returns None for columns missing from an incomplete final line.
     # Mediator telemetry is read while it is still being appended, so ignore that
     # transient row instead of filling missing physics fields with zero.

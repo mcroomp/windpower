@@ -16,21 +16,23 @@ from __future__ import annotations
 
 import argparse
 import math
-import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
+from simulation.rotor_physics import require_mass_kg
 
 
-from envelope.point_mass import simulate_point
 
 
 # ── Tension-band sweep worker ─────────────────────────────────────────────────
 
 
-def _ramp_full_column(args: tuple) -> list:
+def _ramp_full_column(
+    args: tuple[int, int, int, float, float, float, list[float], float, list[float]],
+) -> list[tuple[int, float, float, bool]]:
     """
     Ramp one column from T_min to T_max, sampling at each grid tension.
 
@@ -49,7 +51,7 @@ def _ramp_full_column(args: tuple) -> list:
     rotor     = load_default_rotor()
     aero      = create_aero(rotor, model="quasi_static")
     rotor_state = aero.initial_rotor_state()
-    mass      = float(rotor.inertia.mass_kg)
+    mass      = require_mass_kg(rotor)
     I_ode     = float(rotor.autorotation.I_ode_kgm2 or 10.0)
     omega_min = float(rotor.autorotation.omega_min_rad_s or 0.5)
     weight  = mass * 9.81
@@ -58,9 +60,9 @@ def _ramp_full_column(args: tuple) -> list:
     t_hat   = tether_hat(angle)
 
     # Fresh start: omega=28 (operational), vel=0, col=0
-    omega    = 28.0
-    spin_angle = 0.0
-    vel      = np.zeros(3)
+    omega: float = 28.0
+    spin_angle: float = 0.0
+    vel: NDArray[np.float64] = np.zeros(3)
     col_now  = 0.0
     c_lon    = c_lat = 0.0
     int_vx   = int_vy = int_vcol = 0.0
@@ -80,7 +82,7 @@ def _ramp_full_column(args: tuple) -> list:
     total_s     = t_settle + abs(t_end_tension - t_start_tension) / ramp_rate + 5.0
     total_steps = int(total_s / dt)
 
-    results = []
+    results: list[tuple[int, float, float, bool]] = []
     t_ramp_start = None
     tension = t_start_tension
     next_sample_idx = 0
@@ -136,7 +138,7 @@ def _ramp_full_column(args: tuple) -> list:
         if not np.all(np.isfinite(vel)):
             break
 
-        v_perp  = vel - float(np.dot(vel, t_hat)) * t_hat
+        v_perp: NDArray[np.float64] = vel - float(np.dot(vel, t_hat)) * t_hat
         t_norm  = max(abs(thrust), 1.0)
         c_lon_r = -(kp_cyc / t_norm * v_perp[0] + ki_cyc / t_norm * int_vx)
         c_lat_r = -(kp_cyc / t_norm * v_perp[1] + ki_cyc / t_norm * int_vy)
@@ -351,10 +353,12 @@ if __name__ == "__main__":
             tension_list = {float(k): list(map(float, v)) for k, v in tension_list_cfg.items()}  # type: ignore[union-attr]
             tension_list_min = min(min(v) for v in tension_list.values())
             tension_list_max = max(max(v) for v in tension_list.values())
-        else:
+        elif isinstance(tension_list_cfg, list):
             tension_list = list(map(float, tension_list_cfg))
             tension_list_min = tension_list[0]
             tension_list_max = tension_list[-1]
+        else:
+            raise TypeError("tension_list must be a list or a per-speed mapping")
 
         t_end        = float(cfg["t_end"])                   # type: ignore[arg-type]
         dt           = float(cfg["dt"])                      # type: ignore[arg-type]

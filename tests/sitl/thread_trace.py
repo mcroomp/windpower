@@ -174,7 +174,7 @@ class LinuxThreadTrace:
                         "runqueue_delta_ns": sched[1] - previous_sched[1],
                         "timeslices_delta": sched[2] - previous_sched[2],
                     })
-                previous_sched = sched
+                previous_sched = sched[0], sched[1], sched[2]
                 self._write(sample)
                 self.samples += 1
                 if "futex" in sample["wchan"]:

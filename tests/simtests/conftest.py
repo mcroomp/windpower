@@ -5,8 +5,6 @@ Simtests are full time-domain physics simulations (seconds to minutes of compute
 Run with:  pytest tests/simtests -m simtest
 Skip slow: pytest tests/simtests -m "not simtest"
 """
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -14,21 +12,21 @@ import pytest
 SIMTEST_TIMEOUT_S = 600
 
 
-def pytest_configure(config):
+def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "simtest: full physics simulation loop — slow, excluded from default unit test run",
     )
 
 
-def pytest_collection_modifyitems(items):
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         if item.get_closest_marker("simtest") and not item.get_closest_marker("timeout"):
             item.add_marker(pytest.mark.timeout(SIMTEST_TIMEOUT_S))
 
 
 @pytest.fixture
-def simtest_log(request):
+def simtest_log(request: pytest.FixtureRequest):
     """Per-test SimtestLog: logs land in simulation/logs/<test_name>/."""
     from simulation.simtest_log import SimtestLog
     log = SimtestLog(request.node.name)

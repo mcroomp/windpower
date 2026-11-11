@@ -33,11 +33,12 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field as dc_field
+import contextlib
 
 try:
     import serial
 except ImportError:
-    print("ERROR: pyserial not installed -- run: pip install pyserial")
+    print("ERROR: pyserial not installed -- run from the repository root: uv sync --dev")
     sys.exit(1)
 
 
@@ -350,7 +351,7 @@ class Am32Session:
         self._timeout = timeout
         self._ser: serial.Serial | None = None
 
-    def __enter__(self) -> "Am32Session":
+    def __enter__(self) -> Am32Session:
         self._ser = serial.Serial(
             self._port, baudrate=self._baud,
             bytesize=8, parity=serial.PARITY_NONE, stopbits=1,
@@ -619,7 +620,7 @@ def scan_ports(baud: int = 19200, timeout: float = 1.5) -> list[dict]:
 # CLI command handlers
 # ---------------------------------------------------------------------------
 
-def _get_session_and_info(args) -> tuple["Am32Session.__class__", EscInfo]:
+def _get_session_and_info(args) -> tuple[Am32Session.__class__, EscInfo]:
     """Open session, handshake, optionally read filename.  Returns (session, info)."""
     s = Am32Session(args.port, baud=args.baud, timeout=args.timeout)
     s.__enter__()
@@ -774,10 +775,8 @@ def cmd_load(args) -> None:
             for name, val in snap.get("settings", {}).items():
                 f = _BY_NAME.get(name)
                 if f and f.size == 1:
-                    try:
+                    with contextlib.suppress(ValueError, TypeError):
                         updates[name] = int(val) if isinstance(val, (int, float)) else int(val, 0)
-                    except (ValueError, TypeError):
-                        pass
             new_buf = apply_updates(live_buf, updates)
 
         print(f"  Writing snapshot from {args.file} ...")

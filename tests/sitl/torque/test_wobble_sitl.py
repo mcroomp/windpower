@@ -16,9 +16,11 @@ import math
 
 import pytest
 
+from tests.sitl.stack_infra import StackContext
+from tests.sitl.torque.torque_test_utils import run_observation_loop, save_telemetry, assert_physics_yaw_rate
+
 pytestmark = pytest.mark.sitl
 
-from tests.sitl.torque.torque_test_utils import run_observation_loop, save_telemetry, assert_physics_yaw_rate
 
 _SETTLE_S = 95.0
 _OBSERVE_S = 20.0
@@ -26,7 +28,7 @@ _THRESHOLD = math.radians(15.0)
 
 
 @pytest.mark.parametrize("torque_armed_profile", ["wobble"], indirect=True)
-def test_wobble_sitl(torque_armed_profile):
+def test_wobble_sitl(torque_armed_profile: StackContext):
     """
     Rotor RPM stays fixed at nominal while the hub wobbles in roll/pitch.
 

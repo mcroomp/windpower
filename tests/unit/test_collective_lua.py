@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import pytest
 
 from groundstation.rawes_modes import MODE_COLLECTIVE
@@ -5,7 +7,7 @@ from linkhub_client.messages import NamedValueFloat
 from simulation.rawes_lua_harness import RawesLua
 
 
-def collective_sim(**params):
+def collective_sim(**params: float):
     sim = RawesLua(
         mode=MODE_COLLECTIVE,
         **{"H_TAIL_TYPE": 3, "SERVO9_FUNCTION": 36, "H_SV_MAN": 0, **params},
@@ -14,18 +16,23 @@ def collective_sim(**params):
     return sim
 
 
-def send_collective(sim, value):
+def send_collective(sim: RawesLua, value: float):
     sim.send_message(NamedValueFloat(name="RAWES_COL", value=value))
 
 
-def record_cyclic_overrides(sim):
+def record_cyclic_overrides(sim: RawesLua):
     writes = {1: [], 2: []}
-    rc = sim._lua.globals().rc
+    rc = sim._lua.globals()["rc"]
     for number in writes:
         channel = rc.get_channel(rc, number)
         original = channel.set_override
 
-        def record(channel, pwm, number=number, original=original):
+        def record(
+            channel: object,
+            pwm: int,
+            number: int = number,
+            original: Callable[[object, int], None] = original,
+        ) -> None:
             writes[number].append(int(pwm))
             original(channel, pwm)
 
@@ -38,7 +45,9 @@ def record_cyclic_overrides(sim):
     (0, -1, (1500, 1000)),
     (0.6, -0.8, (1800, 1100)),
 ])
-def test_setup_does_not_pulse_neutral_between_cyclic_commands(roll, pitch, expected):
+def test_setup_does_not_pulse_neutral_between_cyclic_commands(
+    roll: float, pitch: float, expected: tuple[int, int],
+):
     sim = collective_sim()
     send_collective(sim, 0.5)
     sim.tick()
@@ -56,7 +65,7 @@ def test_setup_does_not_pulse_neutral_between_cyclic_commands(roll, pitch, expec
 
 
 @pytest.mark.parametrize("failure", ["armed", "configuration", "timeout"])
-def test_setup_failure_writes_only_neutral_cyclic(failure):
+def test_setup_failure_writes_only_neutral_cyclic(failure: str):
     sim = collective_sim()
     sim.send_message(NamedValueFloat(name="RAWES_RLL", value=0.6))
     sim.send_message(NamedValueFloat(name="RAWES_PIT", value=-0.8))
@@ -97,7 +106,7 @@ def test_collective_supports_bounded_cyclic_without_arming_or_guided_control():
 
 
 @pytest.mark.parametrize(("value", "expected"), [(-1, 1000), (0, 1000), (1, 2000), (2, 2000)])
-def test_collective_clamps_to_normalized_limits(value, expected):
+def test_collective_clamps_to_normalized_limits(value: float, expected: int):
     sim = collective_sim()
     send_collective(sim, value)
     sim.tick()
@@ -175,7 +184,7 @@ def test_collective_disarms_and_neutralizes_if_armed():
     ("H_FLYBAR_MODE", 0), ("H_SV_MAN", 2), ("IM_ACRO_COL_EXP", 0.3),
     ("H_TAIL_TYPE", 0), ("SERVO9_FUNCTION", 0),
 ])
-def test_collective_rejects_invalid_configuration(name, value):
+def test_collective_rejects_invalid_configuration(name: str, value: float):
     sim = collective_sim(**{name: value})
     send_collective(sim, 0.8)
     sim.tick()
@@ -204,7 +213,7 @@ def test_collective_ignores_stale_manual_seed():
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
-def test_collective_rejects_nonfinite_commands_without_refreshing_watchdog(value):
+def test_collective_rejects_nonfinite_commands_without_refreshing_watchdog(value: float):
     sim = collective_sim()
     send_collective(sim, value)
     sim.tick()
@@ -220,8 +229,10 @@ def test_cyclic_expires_independently_while_collective_is_refreshed():
     sim.send_message(NamedValueFloat(name="RAWES_PIT", value=0.5))
     send_collective(sim, 0.7)
     sim.tick()
-    assert sim.ch_out[1] > 1500
-    assert sim.ch_out[2] > 1500
+    servo1, servo2 = sim.ch_out[1], sim.ch_out[2]
+    assert servo1 is not None and servo2 is not None
+    assert servo1 > 1500
+    assert servo2 > 1500
     for _ in range(3):
         send_collective(sim, 0.7)
         sim.run(1)
@@ -245,7 +256,7 @@ def test_setup_discards_cyclic_seeds_on_exit_and_reentry():
 
 @pytest.mark.parametrize("name", ["RAWES_RLL", "RAWES_PIT"])
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
-def test_setup_rejects_nonfinite_cyclic(name, value):
+def test_setup_rejects_nonfinite_cyclic(name: str, value: float):
     sim = collective_sim()
     sim.send_message(NamedValueFloat(name=name, value=value))
     send_collective(sim, 0.5)

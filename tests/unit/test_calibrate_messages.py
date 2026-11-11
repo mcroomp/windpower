@@ -1,5 +1,8 @@
 """calibrate.messages.read_one keeps polling past LinkHub's early empty batches."""
+from unittest.mock import Mock
 from dataclasses import dataclass
+
+import pytest
 
 import calibrate.messages as messages_module
 from calibrate.messages import read_one
@@ -29,12 +32,19 @@ class _Session:
         self._batches = iter(batches)
         self.calls: list[dict] = []
 
-    def read_messages(self, after, message_types, **kwargs):
+    def read_messages(
+        self,
+        after: str,
+        message_types: str | list[str] | tuple[str, ...] | set[str],
+        **kwargs: object,
+    ):
         self.calls.append({"after": after, "types": message_types, **kwargs})
         return next(self._batches)
 
 
-def test_read_one_continues_from_the_advanced_cursor_until_a_match(monkeypatch) -> None:
+def test_read_one_continues_from_the_advanced_cursor_until_a_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(messages_module.time, "monotonic", _Clock(step=0.5))
     heartbeat = object()
     session = _Session(
@@ -45,7 +55,7 @@ def test_read_one_continues_from_the_advanced_cursor_until_a_match(monkeypatch) 
         ]
     )
 
-    message, cursor = read_one(session, "v1:10", "HEARTBEAT", wait=5.0)
+    message, cursor = read_one(Mock(wraps=session), "v1:10", "HEARTBEAT", wait=5.0)
 
     assert message is heartbeat
     assert cursor == "v1:30"
@@ -56,12 +66,12 @@ def test_read_one_continues_from_the_advanced_cursor_until_a_match(monkeypatch) 
 
 
 def test_read_one_returns_none_with_the_scanned_cursor_after_the_deadline(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(messages_module.time, "monotonic", _Clock(step=1.0))
     session = _Session([_Batch((), f"v1:{n}") for n in range(20, 40)])
 
-    message, cursor = read_one(session, "v1:10", "HEARTBEAT", wait=2.5)
+    message, cursor = read_one(Mock(wraps=session), "v1:10", "HEARTBEAT", wait=2.5)
 
     assert message is None
     assert cursor == f"v1:{20 + len(session.calls) - 1}"  # the last batch's cursor
@@ -72,16 +82,18 @@ def test_read_one_returns_none_with_the_scanned_cursor_after_the_deadline(
 def test_read_one_with_zero_wait_polls_exactly_once() -> None:
     session = _Session([_Batch((), "v1:11")])
 
-    message, cursor = read_one(session, "v1:10", "ATTITUDE", wait=0.0)
+    message, cursor = read_one(Mock(wraps=session), "v1:10", "ATTITUDE", wait=0.0)
 
     assert (message, cursor) == (None, "v1:11")
     assert len(session.calls) == 1
 
 
-def test_read_one_passes_the_generation_guard_on_every_poll(monkeypatch) -> None:
+def test_read_one_passes_the_generation_guard_on_every_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(messages_module.time, "monotonic", _Clock(step=0.5))
     session = _Session([_Batch((), "v1:11"), _Batch((object(),), "v1:12")])
 
-    read_one(session, "v1:10", "HEARTBEAT", wait=5.0, expected_generation="v1:run:1")
+    read_one(Mock(wraps=session), "v1:10", "HEARTBEAT", wait=5.0, expected_generation="v1:run:1")
 
     assert [call["expected_generation"] for call in session.calls] == ["v1:run:1"] * 2

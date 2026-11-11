@@ -24,7 +24,10 @@ class TestMockUint32:
         f = sim._lua.eval(
             "function() local v = millis(); return v:tofloat(), v:toint() end"
         )
-        tof, toi = f()
+        assert callable(f)
+        result = f()
+        assert isinstance(result, tuple)
+        tof, toi = result
         assert tof == 12345.0
         assert toi == 12345
 
@@ -33,6 +36,7 @@ class TestMockUint32:
         sim = RawesLua()
         sim._mock.millis_val = 5000
         mul = sim._lua.eval("function() return millis() * 0.001 end")
+        assert callable(mul)
         with pytest.raises(lua54.LuaError) as exc:
             mul()
         assert "coerce to uint32" in str(exc.value).lower()
@@ -47,7 +51,10 @@ class TestMockUint32:
             "return (a - b):tofloat(), (a >= 5000), (b < a) "
             "end"
         )
-        diff, ge, lt = f()
+        assert callable(f)
+        result = f()
+        assert isinstance(result, tuple)
+        diff, ge, lt = result
         assert diff == 2000.0
         assert ge is True
         assert lt is True
@@ -57,4 +64,5 @@ class TestMockUint32:
         sim = RawesLua()
         sim._mock.millis_val = 0
         f = sim._lua.eval("function() return (millis() - (-2000)):tofloat() end")
+        assert callable(f)
         assert f() == 2000.0

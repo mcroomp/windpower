@@ -5,8 +5,6 @@ Tests that simulate_point() with omega convergence detection can settle all
 cells from T=25 N to T=1000 N at el=30 deg, reel-out target v=-0.8 m/s.
 """
 import math
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -25,7 +23,7 @@ TENSIONS = list(range(25, 1025, 25))
 
 
 @pytest.fixture(scope="module", params=TENSIONS, ids=[f"T{int(t)}" for t in TENSIONS])
-def converged_cell(request):
+def converged_cell(request: pytest.FixtureRequest) -> tuple[int, dict]:
     """Run simulate_point at el=30 with omega convergence detection."""
     tension = request.param
     try:
@@ -47,7 +45,7 @@ def converged_cell(request):
     return tension, r
 
 
-def test_converged_and_finite(converged_cell):
+def test_converged_and_finite(converged_cell: tuple[int, dict]):
     """Each cell must produce finite v_along and collective."""
     tension, r = converged_cell
     eq = r.get("eq", {})
@@ -72,7 +70,7 @@ def test_converged_and_finite(converged_cell):
     )
 
 
-def test_omega_settled(converged_cell):
+def test_omega_settled(converged_cell: tuple[int, dict]):
     """Verify omega is settled in the final window."""
     tension, r = converged_cell
     h = r.get("history", [])
@@ -115,7 +113,7 @@ def test_omega_settled(converged_cell):
         )
 
 
-def test_v_along_near_target(converged_cell):
+def test_v_along_near_target(converged_cell: tuple[int, dict]):
     """v_along should be achievable within control limits (or skip if out-of-range)."""
     tension, r = converged_cell
     eq = r.get("eq", {})
