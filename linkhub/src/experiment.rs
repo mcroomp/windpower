@@ -8,9 +8,12 @@
 //! experiment lives in memory; a LinkHub restart ends it without writing
 //! `mavlog.json`, but the run journal still holds the records.
 //!
-//! Phones upload camera recordings as ordered chunks that are appended to
-//! `video-<stream>.<ext>` in the experiment directory. Uploads stay accepted
-//! for [`VIDEO_GRACE`] after stop so phones can deliver their final chunk.
+//! Phone cameras register independently of experiments with periodic
+//! heartbeats; a phone seen within [`CAMERA_TIMEOUT`] is listed as connected.
+//! While an experiment runs, each phone uploads its recording as ordered
+//! chunks appended to `video-<stream>.<ext>` in the experiment directory.
+//! Uploads stay accepted for [`VIDEO_GRACE`] after stop so phones can deliver
+//! their final chunk.
 
 use std::{
     collections::BTreeMap,
@@ -45,6 +48,8 @@ const DETAILS_FILE: &str = "experiment.txt";
 const MAVLOG_FILE: &str = "mavlog.json";
 const MAX_STREAM_ID_CHARS: usize = 32;
 pub const VIDEO_GRACE: Duration = Duration::from_secs(120);
+pub const CAMERA_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CAMERA_LABEL_CHARS: usize = 40;
 
 /// Where experiments are saved and how phones reach the camera page.
 #[derive(Clone, Debug)]
@@ -67,6 +72,16 @@ pub struct VideoStream {
     pub chunks: u64,
     pub updated_at_ns: u64,
     pub finished: bool,
+}
+
+/// A phone camera page that has recently sent a heartbeat.
+#[derive(Clone, Debug, Serialize)]
+pub struct CameraPhone {
+    pub stream: String,
+    pub label: String,
+    /// The experiment the phone reports it is recording, if any.
+    pub recording: Option<Uuid>,
+    pub last_seen_ns: u64,
 }
 
 struct VideoState {
@@ -163,6 +178,21 @@ pub struct ExperimentStore {
     marker_sequence: AtomicU64,
     /// Held across chunk writes so each stream's file grows in order.
     videos: tokio::sync::Mutex<VideoSessions>,
+    cameras: Mutex<BTreeMap<String, (CameraPhone, Instant)>>,
+}
+
+fn validate_stream_id(stream: &str) -> Result<(), ExperimentError> {
+    if stream.is_empty()
+        || stream.len() > MAX_STREAM_ID_CHARS
+        || !stream
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ExperimentError::InvalidVideo(format!(
+            "stream id must be 1-{MAX_STREAM_ID_CHARS} letters, digits, '-' or '_'"
+        )));
+    }
+    Ok(())
 }
 
 impl ExperimentStore {
@@ -175,7 +205,45 @@ impl ExperimentStore {
             operation: tokio::sync::Mutex::new(()),
             marker_sequence: AtomicU64::new(0),
             videos: tokio::sync::Mutex::new(VideoSessions::default()),
+            cameras: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Records a heartbeat from a phone camera page and returns the
+    /// experiment it should be recording, if any.
+    pub fn camera_heartbeat(
+        &self,
+        stream: &str,
+        label: &str,
+        recording: Option<Uuid>,
+    ) -> Result<Option<ActiveExperiment>, ExperimentError> {
+        validate_stream_id(stream)?;
+        let label: String = label.trim().chars().take(MAX_CAMERA_LABEL_CHARS).collect();
+        let phone = CameraPhone {
+            stream: stream.to_owned(),
+            label: if label.is_empty() {
+                stream.to_owned()
+            } else {
+                label
+            },
+            recording,
+            last_seen_ns: wall_time_ns(),
+        };
+        self.cameras
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(stream.to_owned(), (phone, Instant::now()));
+        Ok(self.active())
+    }
+
+    /// Phones that sent a heartbeat within [`CAMERA_TIMEOUT`].
+    pub fn cameras(&self) -> Vec<CameraPhone> {
+        let mut cameras = self
+            .cameras
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cameras.retain(|_, (_, seen)| seen.elapsed() < CAMERA_TIMEOUT);
+        cameras.values().map(|(phone, _)| phone.clone()).collect()
     }
 
     /// Video streams of the given experiment, active or recently stopped.
@@ -206,16 +274,7 @@ impl ExperimentStore {
         content_type: &str,
         data: &[u8],
     ) -> Result<VideoStream, ExperimentError> {
-        if stream.is_empty()
-            || stream.len() > MAX_STREAM_ID_CHARS
-            || !stream
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(ExperimentError::InvalidVideo(format!(
-                "stream id must be 1-{MAX_STREAM_ID_CHARS} letters, digits, '-' or '_'"
-            )));
-        }
+        validate_stream_id(stream)?;
         let mut sessions = self.videos.lock().await;
         let session = sessions
             .session(experiment_id)

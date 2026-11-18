@@ -1,6 +1,6 @@
 import type {
   CommandResult,
-  ExperimentCamera,
+  CameraStatus,
   ExperimentInfo,
   JsonObject,
   LinkHubStatus,
@@ -153,8 +153,8 @@ export class LinkHubApi {
     return this.request("POST", "/v1/experiment/stop", {}, AbortSignal.timeout(120_000));
   }
 
-  experimentCamera(): Promise<ExperimentCamera> {
-    return this.request("GET", "/v1/experiment/camera", undefined, AbortSignal.timeout(3_000));
+  cameraStatus(): Promise<CameraStatus> {
+    return this.request("GET", "/v1/camera", undefined, AbortSignal.timeout(3_000));
   }
 
   async currentCursor(signal?: AbortSignal): Promise<string> {

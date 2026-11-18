@@ -332,6 +332,15 @@ h2 {
   cursor: pointer;
 }
 
+.camera-button.recording {
+  border-color: #c0392b;
+  color: #ff8a80;
+}
+
+.camera-videos[hidden] {
+  display: none;
+}
+
 .camera-qr {
   width: 240px;
   margin: 8px auto;

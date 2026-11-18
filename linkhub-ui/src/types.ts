@@ -46,7 +46,7 @@ export interface SavedExperiment {
   path: string;
 }
 
-export interface ExperimentVideo {
+export interface CameraVideo {
   stream: string;
   file: string;
   bytes: number;
@@ -55,13 +55,24 @@ export interface ExperimentVideo {
   finished: boolean;
 }
 
-export interface ExperimentCamera {
-  experiment_id: string;
+export interface CameraPhone {
+  stream: string;
+  label: string;
+  /** Experiment the phone reports it is recording, if any. */
+  recording: string | null;
+  last_seen_ns: number;
+}
+
+export interface CameraStatus {
   /** HTTPS camera-page URL for phones; null when unavailable (see `reason`). */
   url: string | null;
   reason: string | null;
   qr_svg: string | null;
-  videos: ExperimentVideo[];
+  /** Phones that sent a heartbeat recently. */
+  phones: CameraPhone[];
+  experiment_id: string | null;
+  /** Recordings received for the running experiment. */
+  videos: CameraVideo[];
 }
 
 export interface LinkHubStatus {

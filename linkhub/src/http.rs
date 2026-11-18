@@ -280,7 +280,11 @@ pub fn router_with_motor_and_static(
             axum::routing::post(start_experiment),
         )
         .route("/v1/experiment/stop", axum::routing::post(stop_experiment))
-        .route("/v1/experiment/camera", get(experiment_camera))
+        .route("/v1/camera", get(camera_status))
+        .route(
+            "/v1/camera/{stream}/heartbeat",
+            axum::routing::post(camera_heartbeat),
+        )
         .route(
             "/v1/experiment/{id}/video/{stream}",
             axum::routing::post(upload_video_chunk)
@@ -1491,18 +1495,16 @@ fn require_experiments(state: &AppState) -> Result<&ExperimentStore, ApiError> {
         .ok_or_else(|| ApiError::NotFound("Experiment logging is not configured".to_owned()))
 }
 
-/// The phone camera URL (with QR code) for the running experiment, plus the
-/// phone streams recorded so far.
-async fn experiment_camera(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+/// The phone camera URL (with QR code), the connected phones, and the
+/// recordings received for the running experiment.
+async fn camera_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let store = require_experiments(&state)?;
-    let active = store.active().ok_or(ExperimentError::NotRunning)?;
     let url = match state.camera {
         None => Err("HTTPS is off; start LinkHub with --https-port for phone cameras".to_owned()),
         Some(camera) => crate::tls::lan_host(camera.listen).map(|host| {
             format!(
-                "https://{}/camera?experiment={}",
-                SocketAddr::new(host, camera.https_port),
-                active.id
+                "https://{}/camera",
+                SocketAddr::new(host, camera.https_port)
             )
         }),
     };
@@ -1517,13 +1519,40 @@ async fn experiment_camera(State(state): State<Arc<AppState>>) -> Result<Json<Va
                 .build()
         })
     });
+    let active = store.active();
+    let videos = match &active {
+        Some(active) => store.videos(active.id).await,
+        None => Vec::new(),
+    };
     Ok(Json(json!({
-        "experiment_id": active.id,
         "url": url,
         "reason": reason,
         "qr_svg": qr_svg,
-        "videos": store.videos(active.id).await,
+        "phones": store.cameras(),
+        "experiment_id": active.map(|active| active.id),
+        "videos": videos,
     })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CameraHeartbeat {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    recording: Option<Uuid>,
+}
+
+async fn camera_heartbeat(
+    State(state): State<Arc<AppState>>,
+    Path(stream): Path<String>,
+    Json(heartbeat): Json<CameraHeartbeat>,
+) -> Result<Json<Value>, ApiError> {
+    let active = require_experiments(&state)?.camera_heartbeat(
+        &stream,
+        &heartbeat.label,
+        heartbeat.recording,
+    )?;
+    Ok(Json(json!({ "active": active })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1738,7 +1767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn experiment_camera_links_phones_and_accepts_video_chunks() {
+    async fn camera_phones_register_independently_and_upload_video_chunks() {
         let temp = TempDir::new().expect("temp directory");
         let config = JournalConfig::for_directory(temp.path().join("journal"), Uuid::new_v4());
         let (journal, task) = JournalHandle::start(config).await.expect("journal");
@@ -1756,14 +1785,32 @@ mod tests {
             None,
             false,
         );
-        let (status, _) = json_response(
-            &app,
-            Request::get("/v1/experiment/camera")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT);
+        let camera_status = || {
+            json_response(
+                &app,
+                Request::get("/v1/camera").body(Body::empty()).unwrap(),
+            )
+        };
+        let heartbeat = |recording: &str| {
+            Request::post("/v1/camera/phone1/heartbeat")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"label":"Tripod","recording":{recording}}}"#
+                )))
+                .unwrap()
+        };
+        let (status, camera) = camera_status().await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(camera["url"], "https://192.168.1.20:9443/camera");
+        assert!(camera["qr_svg"].as_str().expect("svg").contains("<svg"));
+        assert_eq!(camera["phones"], json!([]));
+
+        let (status, idle) = json_response(&app, heartbeat("null")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(idle["active"], Value::Null);
+        let (_, camera) = camera_status().await;
+        assert_eq!(camera["phones"][0]["label"], "Tripod");
+
         let (_, started) = json_response(
             &app,
             Request::post("/v1/experiment/start")
@@ -1773,20 +1820,12 @@ mod tests {
         )
         .await;
         let id = started["active"]["id"].as_str().expect("id").to_owned();
-
-        let (status, camera) = json_response(
-            &app,
-            Request::get("/v1/experiment/camera")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            camera["url"],
-            format!("https://192.168.1.20:9443/camera?experiment={id}")
-        );
-        assert!(camera["qr_svg"].as_str().expect("svg").contains("<svg"));
+        let (_, polled) = json_response(&app, heartbeat("null")).await;
+        assert_eq!(polled["active"]["id"], id);
+        json_response(&app, heartbeat(&format!("\"{id}\""))).await;
+        let (_, camera) = camera_status().await;
+        assert_eq!(camera["experiment_id"], id);
+        assert_eq!(camera["phones"][0]["recording"], id);
 
         let (status, video) = json_response(
             &app,

@@ -177,13 +177,14 @@ The terminal (and Node CLI) offers `experiment status`,
 See [LinkHub experiment semantics](../design/linkhub.md#experiments) for the
 file format.
 
-To record video, scan the QR code that appears after **Start**, or reopen it
-with **📷 Phone camera**. Each phone that scans the code and taps **Start
-recording** saves its own video file in the experiment directory. Phones need
-the same network. They also need LinkHub on the LAN with HTTPS enabled;
-`run_linkhub_ui.cmd` does this on port 9443. Accept the self-signed
-certificate warning once per phone. Stopping the experiment ends every phone
-recording. See [phone video](../design/linkhub.md#phone-video).
+To record video, click **📷 Cameras** (it shows how many phones are connected)
+and scan the QR code with each phone. Accept the self-signed certificate
+warning and tap **Enable camera** once, then leave the page open. From then
+on, every phone records each experiment automatically into its own video file
+in the experiment directory, starting on **Start** and finishing on **Stop**.
+Phones need the same network. They also need LinkHub on the LAN with HTTPS
+enabled; `run_linkhub_ui.cmd` does this on port 9443. See
+[phone video](../design/linkhub.md#phone-video).
 
 ## `npm` scripts
 

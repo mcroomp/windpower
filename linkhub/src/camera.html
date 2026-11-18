@@ -3,15 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LinkHub experiment camera</title>
+<title>LinkHub camera</title>
 <style>
   body { margin: 0; font: 16px system-ui, sans-serif; background: #111; color: #eee; }
   main { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
   video { width: 100%; max-height: 60vh; background: #000; border-radius: 8px; }
-  button { font: inherit; font-weight: 600; padding: 14px; border: 0; border-radius: 8px; color: #fff; }
-  #start { background: #1f8f4e; }
-  #stop { background: #c0392b; }
+  label { display: flex; gap: 8px; align-items: center; }
+  input { flex: 1; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; }
+  button { font: inherit; font-weight: 600; padding: 14px; border: 0; border-radius: 8px; color: #fff; background: #1f6feb; }
   button:disabled { opacity: 0.4; }
+  #state { font-weight: 600; white-space: pre-line; }
+  #state.recording { color: #ff6b6b; }
   #status { white-space: pre-line; color: #bbb; }
   .error { color: #ff7b72 !important; }
   h1 { font-size: 1.1rem; margin: 0; }
@@ -19,91 +21,175 @@
 </head>
 <body>
 <main>
-  <h1 id="title">Experiment camera</h1>
+  <h1>LinkHub camera</h1>
+  <label>Name <input id="label" maxlength="40" autocomplete="off"></label>
+  <button id="enable" type="button">Enable camera</button>
   <video id="preview" autoplay muted playsinline></video>
-  <button id="start" type="button" disabled>● Start recording</button>
-  <button id="stop" type="button" disabled>■ Stop recording</button>
-  <div id="status">Connecting…</div>
+  <div id="state">Camera off</div>
+  <div id="status">Tap Enable camera. This phone then records automatically whenever a LinkHub experiment is running.</div>
 </main>
 <script>
 "use strict";
 const CHUNK_MS = 2000;
-const POLL_MS = 1500;
+const HEARTBEAT_MS = 1500;
 const MIME_TYPES = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
-const experimentId = new URLSearchParams(location.search).get("experiment");
-const streamId = Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, "0")).join("");
-const title = document.getElementById("title");
-const preview = document.getElementById("preview");
-const startButton = document.getElementById("start");
-const stopButton = document.getElementById("stop");
-const statusLine = document.getElementById("status");
+const randomHex = (bytes) => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, "0")).join("");
+const deviceId = localStorage.getItem("linkhub-camera-id") || randomHex(4);
+localStorage.setItem("linkhub-camera-id", deviceId);
 
-let recorder = null;
+const labelInput = document.getElementById("label");
+const enableButton = document.getElementById("enable");
+const preview = document.getElementById("preview");
+const stateLine = document.getElementById("state");
+const statusLine = document.getElementById("status");
+labelInput.value = localStorage.getItem("linkhub-camera-label") || `Phone ${deviceId.slice(0, 4)}`;
+labelInput.addEventListener("change", () => localStorage.setItem("linkhub-camera-label", labelInput.value.trim()));
+
 let mediaStream = null;
 let wakeLock = null;
-let contentType = "";
-let sequence = 0;
-let uploadedBytes = 0;
-let uploading = false;
-let failed = false;
+let heartbeatTimer = null;
+/** The live MediaRecorder and its recording, or null while waiting. */
+let recorder = null;
+let recording = null;
+/** Experiments whose upload LinkHub rejected; never restarted. */
+const rejected = new Set();
 const queue = [];
+let uploading = false;
 
 function show(text, error = false) {
   statusLine.textContent = text;
   statusLine.className = error ? "error" : "";
 }
 
-function progress() {
-  const mb = (uploadedBytes / 1e6).toFixed(1);
-  const pending = queue.length ? `, ${queue.length} chunk(s) waiting` : "";
-  const state = recorder && recorder.state === "recording" ? "Recording" : "Stopped";
-  show(`${state} — stream ${streamId}\nUploaded ${sequence} chunks, ${mb} MB${pending}`);
-}
-
-async function activeExperiment() {
-  const response = await fetch("/v1/experiment", { cache: "no-store" });
-  if (!response.ok) throw new Error(`LinkHub returned ${response.status}`);
-  return (await response.json()).active;
+function renderState() {
+  if (!mediaStream) {
+    stateLine.textContent = "Camera off";
+    stateLine.className = "";
+  } else if (recording) {
+    const mb = (recording.bytes / 1e6).toFixed(1);
+    const pending = queue.length ? `, ${queue.length} waiting` : "";
+    stateLine.textContent = `● Recording: ${recording.name}\n${recording.uploaded} chunks, ${mb} MB uploaded${pending}`;
+    stateLine.className = "recording";
+  } else {
+    stateLine.textContent = queue.length ? `Finishing upload, ${queue.length} chunk(s) left` : "Ready — waiting for an experiment";
+    stateLine.className = "";
+  }
 }
 
 async function upload() {
   if (uploading) return;
   uploading = true;
-  while (queue.length && !failed) {
-    const chunk = queue[0];
-    const url = `/v1/experiment/${experimentId}/video/${streamId}?seq=${sequence}&final=${chunk.final}`;
+  while (queue.length) {
+    const item = queue[0];
+    const { rec } = item;
+    const url = `/v1/experiment/${rec.experimentId}/video/${rec.stream}?seq=${item.seq}&final=${item.final}`;
     try {
-      const response = await fetch(url, { method: "POST", headers: { "Content-Type": contentType }, body: chunk.blob });
+      const response = await fetch(url, { method: "POST", headers: { "Content-Type": rec.contentType }, body: item.blob });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
-        failed = true;
-        stopRecording();
+        rec.failed = true;
+        rejected.add(rec.experimentId);
+        for (let i = queue.length - 1; i >= 0; i -= 1) if (queue[i].rec === rec) queue.splice(i, 1);
+        if (recording === rec) stopRecording();
         show(`Upload rejected: ${body.message || response.status}`, true);
-        break;
+        continue;
       }
       queue.shift();
-      uploadedBytes += chunk.blob.size;
-      sequence += 1;
-      if (chunk.final) {
-        show(`Saved ${sequence} chunks, ${(uploadedBytes / 1e6).toFixed(1)} MB. You can close this page.`);
-      } else {
-        progress();
-      }
+      rec.uploaded += 1;
+      rec.bytes += item.blob.size;
+      if (item.final) show(`Saved ${rec.uploaded} chunks, ${(rec.bytes / 1e6).toFixed(1)} MB for "${rec.name}".`);
     } catch (error) {
       show(`Upload failed, retrying: ${error.message}`, true);
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
+    renderState();
   }
   uploading = false;
+  renderState();
 }
 
-function enqueue(blob, final) {
-  queue.push({ blob, final });
+function enqueue(rec, blob, final) {
+  if (rec.failed) return;
+  queue.push({ rec, seq: rec.nextSeq++, blob, final });
   void upload();
 }
 
-async function startRecording() {
-  startButton.disabled = true;
+function startRecording(experiment) {
+  const mimeType = MIME_TYPES.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+  const media = new MediaRecorder(mediaStream, mimeType ? { mimeType, videoBitsPerSecond: 4_000_000 } : {});
+  // A fresh stream id per recording keeps a reloaded page from colliding with its earlier file.
+  const rec = {
+    experimentId: experiment.id,
+    name: experiment.name,
+    stream: `${deviceId}-${randomHex(2)}`,
+    contentType: media.mimeType || mimeType || "video/mp4",
+    nextSeq: 0,
+    uploaded: 0,
+    bytes: 0,
+    failed: false,
+  };
+  media.addEventListener("dataavailable", (event) => {
+    if (event.data.size > 0) enqueue(rec, event.data, false);
+  });
+  media.addEventListener("stop", () => {
+    enqueue(rec, new Blob([]), true);
+    if (recorder === media) {
+      recorder = null;
+      recording = null;
+    }
+    renderState();
+  });
+  media.start(CHUNK_MS);
+  recorder = media;
+  recording = rec;
+  show(`Recording into experiment "${experiment.name}".`);
+  renderState();
+}
+
+function stopRecording() {
+  if (recorder && recorder.state !== "inactive") recorder.stop();
+}
+
+async function heartbeat() {
+  try {
+    const response = await fetch(`/v1/camera/${deviceId}/heartbeat`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: labelInput.value, recording: recording ? recording.experimentId : null }),
+    });
+    if (!response.ok) throw new Error(`LinkHub returned ${response.status}`);
+    const { active } = await response.json();
+    if (recording && (!active || active.id !== recording.experimentId)) {
+      stopRecording();
+    } else if (!recorder && mediaStream && active && !rejected.has(active.id)) {
+      startRecording(active);
+    }
+  } catch (error) {
+    show(`LinkHub unreachable: ${error.message}`, true);
+  }
+}
+
+async function requestWakeLock() {
+  try {
+    wakeLock = await navigator.wakeLock?.request("screen");
+  } catch {
+    wakeLock = null;
+  }
+}
+
+function cameraLost() {
+  stopRecording();
+  mediaStream = null;
+  preview.srcObject = null;
+  enableButton.disabled = false;
+  enableButton.hidden = false;
+  show("The camera stopped. Tap Enable camera to continue.", true);
+  renderState();
+}
+
+async function enableCamera() {
+  enableButton.disabled = true;
   const video = { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } };
   try {
     try {
@@ -112,74 +198,36 @@ async function startRecording() {
       mediaStream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
     }
   } catch (error) {
-    startButton.disabled = false;
+    enableButton.disabled = false;
     show(`Camera unavailable: ${error.message}`, true);
     return;
   }
+  for (const track of mediaStream.getTracks()) track.addEventListener("ended", cameraLost);
   preview.srcObject = mediaStream;
-  const mimeType = MIME_TYPES.find((type) => MediaRecorder.isTypeSupported(type)) || "";
-  recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType, videoBitsPerSecond: 4_000_000 } : {});
-  contentType = recorder.mimeType || mimeType || "video/mp4";
-  recorder.addEventListener("dataavailable", (event) => {
-    if (event.data.size > 0) enqueue(event.data, false);
-  });
-  recorder.addEventListener("stop", () => {
-    enqueue(new Blob([]), true);
-    for (const track of mediaStream.getTracks()) track.stop();
-    preview.srcObject = null;
-    stopButton.disabled = true;
-    if (wakeLock) void wakeLock.release().catch(() => undefined);
-  });
-  recorder.start(CHUNK_MS);
-  stopButton.disabled = false;
-  try {
-    wakeLock = await navigator.wakeLock?.request("screen");
-  } catch {
-    wakeLock = null;
-  }
-  progress();
-}
-
-function stopRecording() {
-  if (recorder && recorder.state !== "inactive") recorder.stop();
-}
-
-async function poll() {
-  try {
-    const active = await activeExperiment();
-    if (!active || active.id !== experimentId) {
-      if (recorder && recorder.state !== "inactive") {
-        stopRecording();
-      } else if (!recorder) {
-        startButton.disabled = true;
-        show("This experiment is not running.", true);
-      }
-      return;
-    }
-    title.textContent = `Experiment: ${active.name}`;
-    if (!recorder) {
-      startButton.disabled = false;
-      if (statusLine.textContent === "Connecting…") show("Ready. Point the camera and start recording.");
-    }
-  } catch (error) {
-    if (!recorder) show(`LinkHub unreachable: ${error.message}`, true);
-  }
+  enableButton.hidden = true;
+  await requestWakeLock();
+  show("Connected. Keep this page open; recording starts with each experiment.");
+  renderState();
+  if (!heartbeatTimer) heartbeatTimer = setInterval(() => void heartbeat(), HEARTBEAT_MS);
+  void heartbeat();
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && recorder && recorder.state === "recording") {
+  if (document.hidden && recorder) {
     show("Keep this page in the foreground; the phone may pause recording.", true);
+  } else if (!document.hidden && mediaStream) {
+    void requestWakeLock();
   }
 });
-startButton.addEventListener("click", () => void startRecording());
-stopButton.addEventListener("click", stopRecording);
-if (!experimentId) {
-  show("Missing experiment id. Scan the QR code from LinkHub again.", true);
-} else if (!window.isSecureContext || !navigator.mediaDevices || !window.MediaRecorder) {
+enableButton.addEventListener("click", () => void enableCamera());
+if (!window.isSecureContext || !navigator.mediaDevices || !window.MediaRecorder) {
+  enableButton.disabled = true;
   show("This browser cannot record here. Open the HTTPS link from the LinkHub QR code.", true);
 } else {
-  void poll();
-  setInterval(() => void poll(), POLL_MS);
+  // Permission is asked once; after that, reloads reconnect without a tap.
+  navigator.permissions?.query({ name: "camera" }).then((permission) => {
+    if (permission.state === "granted" && !mediaStream) void enableCamera();
+  }, () => undefined);
 }
 </script>
 </body>

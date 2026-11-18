@@ -81,8 +81,8 @@
           </div>
           <div class="terminal-header-actions">
             <div id="operation-state" class="badge">idle</div>
-            <button id="camera-button" class="camera-button" type="button" hidden
-              title="Show the QR code that lets phones record video into this experiment">📷 Phone camera</button>
+            <button id="camera-button" class="camera-button" type="button"
+              title="Show the QR code that connects phone cameras">📷 Cameras</button>
             <button id="experiment-button" class="experiment-button start" type="button"
               title="Arm and motor actions are disabled until an experiment is started">▶ Start Experiment</button>
           </div>
@@ -121,14 +121,15 @@
       </form>
     </dialog>
     <dialog id="camera-dialog" class="experiment-dialog camera-dialog" aria-labelledby="camera-dialog-title">
-      <h2 id="camera-dialog-title">Record video with a phone</h2>
-      <p>Scan with each phone on the same network. Accept the certificate warning once,
-        then tap <b>Start recording</b>. Stopping the experiment ends every recording; videos
-        are saved in the experiment directory.</p>
+      <h2 id="camera-dialog-title">Phone cameras</h2>
+      <p>Scan with each phone on the same network, accept the certificate warning, and tap
+        <b>Enable camera</b> once. Keep the page open: the phone then records every experiment
+        automatically and saves its video in the experiment directory.</p>
       <div id="camera-qr" class="camera-qr" hidden></div>
       <a id="camera-url" class="camera-url" target="_blank" rel="noopener" hidden></a>
       <p id="camera-reason" class="experiment-error" role="alert" hidden></p>
-      <ul id="camera-videos" class="camera-videos"></ul>
+      <ul id="camera-phones" class="camera-videos"></ul>
+      <ul id="camera-videos" class="camera-videos" hidden></ul>
       <div class="experiment-dialog-actions">
         <button id="camera-close" class="experiment-button cancel" type="button">Close</button>
       </div>
