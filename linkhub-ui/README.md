@@ -7,6 +7,19 @@ JavaScript numbers represent all supported Int32 values exactly. Classic
 MAVLink encoding limits still apply at the vehicle boundary; see
 [Parameter values](../design/linkhub.md#parameter-values).
 
+## CSVs pane
+
+When LinkHub receives CSV rows, the **CSVs** button appears and its pane opens.
+It shows the last five newly accepted rows, their filenames and host receive
+times, with columns driven by the runtime mapping rather than sensor-specific
+code. Use the button to collapse/reopen it. Polling is independent of MAVLink,
+so no vehicle heartbeat is needed. Old values retain their receive time; network
+errors are displayed explicitly, not presented as fresh readings.
+The offline demo has no CSV feed and does not fabricate samples.
+
+Enable the receiver with `LINKHUB_CSV_MAP` or `--csv-map`; see
+[CSV ingestion and the ESP32 example](../linkhub/README.md#generic-csv-ingestion).
+
 ## Build and launch
 
 ### Standalone offline demo / GitHub Pages

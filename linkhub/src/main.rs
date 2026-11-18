@@ -6,6 +6,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use linkhub::{
+    csv_ingest::CsvMapping,
     discovery::{self, DiscoveryConfig},
     dronebridge::DroneBridge,
     experiment::{CameraConfig, ExperimentConfig},
@@ -83,6 +84,9 @@ enum Command {
         data_dir: PathBuf,
         #[arg(long, env = "LINKHUB_STATIC_DIR")]
         static_dir: Option<PathBuf>,
+        /// Runtime source and column mapping for the generic CSV upload endpoint.
+        #[arg(long, env = "LINKHUB_CSV_MAP")]
+        csv_map: Option<PathBuf>,
         /// Send `Cache-Control: no-store` on every response so browsers
         /// always load the latest rebuilt UI.
         #[arg(long)]
@@ -151,6 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             https_port,
             data_dir,
             static_dir,
+            csv_map,
             no_cache,
             run_id,
             flush_ms,
@@ -165,6 +170,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             motor_heartbeat_ms,
             motor_max_command_timeout_ms,
         } => {
+            let csv_mapping = match csv_map {
+                Some(path) => Some(CsvMapping::from_json(&fs::read_to_string(path).await?)?),
+                None => None,
+            };
             let mut link_config = link_config(
                 &connection,
                 baud,
@@ -244,6 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
                 static_dir,
                 no_cache,
+                csv_mapping,
             );
             tracing::info!(%bind, %run_id, "LinkHub listening");
             let https_handle = axum_server::Handle::new();

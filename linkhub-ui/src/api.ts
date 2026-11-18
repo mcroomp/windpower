@@ -1,6 +1,7 @@
 import type {
   CommandResult,
   CameraStatus,
+  CsvStatus,
   ExperimentInfo,
   JsonObject,
   LinkHubStatus,
@@ -155,6 +156,14 @@ export class LinkHubApi {
 
   cameraStatus(): Promise<CameraStatus> {
     return this.request("GET", "/v1/camera", undefined, AbortSignal.timeout(3_000));
+  }
+
+  csvStatus(signal?: AbortSignal): Promise<CsvStatus> {
+    const timeout = AbortSignal.timeout(3_000);
+    return this.request(
+      "GET", "/v1/csv", undefined,
+      signal ? AbortSignal.any([signal, timeout]) : timeout,
+    );
   }
 
   async currentCursor(signal?: AbortSignal): Promise<string> {

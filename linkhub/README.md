@@ -184,6 +184,7 @@ Defaults come from `linkhub\src\main.rs`.
 | `--https-port` | unset | Also serve over HTTPS with a self-signed certificate kept in `<data-dir>\tls\` (needed for phone cameras). Also `LINKHUB_HTTPS_PORT`; `run_linkhub_ui.cmd` uses `9443`. |
 | `--data-dir` | `linkhub-data` | Parent directory where each run creates `<run-id>\run.json` and `<run-id>\journal\`. |
 | `--static-dir` | unset | Optional directory served as fallback static assets. |
+| `--csv-map` | unset | Enable CSV ingestion using this runtime JSON source/column mapping (`LINKHUB_CSV_MAP`). See [CSV ingestion](#generic-csv-ingestion). |
 | `--no-cache` | off | Sends `Cache-Control: no-store` on every response. |
 | `--run-id` | random UUID | Override the per-run UUID. |
 | `--flush-ms` | `60000` | Journal flush interval in milliseconds. |
@@ -230,6 +231,7 @@ Routes come from `linkhub\src\http.rs`.
 | `/health/live` | `GET` | Liveness probe. |
 | `/health/ready` | `GET` | Ready when MAVLink is connected and has a heartbeat. |
 | `/v1/status` | `GET` | Service/run/journal status. |
+| `/v1/csv` | `GET`, `POST` | Latest and recent mapped CSV rows; ingest raw `text/csv` with `?filename=...` when `--csv-map` is configured. |
 | `/v1/journal/flush` | `POST` | Flush the active in-memory journal chunk. |
 | `/v1/records` | `GET` | Mixed journal view over diagnostic + MAVLink records. |
 | `/v1/diagnostics/events` | `GET`, `POST` | Read or ingest diagnostic events. |
@@ -280,6 +282,84 @@ All targets and stop paths use the Rust-owned smooth profile, with a 5 s
 settled full-scale transition. Stop waits for ramp-down; cancelling the request
 does not cancel the ramp. Run commands during a stop return HTTP 409.
 See [motor lease semantics](../design/linkhub.md#bluetooth-bench-motor).
+
+### Generic CSV ingestion
+
+Start LinkHub with a runtime mapping, adding these arguments to your usual
+`serve` command:
+
+```powershell
+--listen 0.0.0.0 --csv-map .\linkhub\csv-map.json
+```
+
+The supplied [example mapping](csv-map.json) describes an ESP32's ordered
+columns, but the receiver contains no sensor-specific schema:
+
+```json
+{
+  "source": "bench.temperature",
+  "sequence_column": "sample",
+  "columns": [
+    { "column": "sample", "field": "index", "type": "u64" },
+    { "column": "temperature", "field": "temperature_c", "type": "number" },
+    { "column": "label", "field": "sensor", "type": "string" }
+  ]
+}
+```
+
+`source` identifies the device/feed in the journal. Each ordered entry specifies
+the incoming `column`, output `field`, and `type` (`u64`, `number`, or `string`).
+`sequence_column` selects a mapped `u64` column for retry deduplication; it
+need not be the first column. Change this JSON and restart LinkHub to change
+source, names, types, or columns without rebuilding Rust. Invalid mappings
+prevent startup. Standard CSV quoting, escaped quotes, and CRLF are supported.
+One mapping configures the endpoint per service run.
+
+On the ESP32 servo interface (port **88**), set **CSVStorageURL** to
+`http://<LinkHub-LAN-IP>:8999/v1/csv`. The firmware appends `?filename=...`
+and sends raw CSV in POST bodies with `Content-Type: text/csv`.
+Allow inbound HTTP from the ESP32 through the host firewall; do not enter
+`localhost` or `0.0.0.0` as its destination. Changing this setting requests a
+new CSV file; it does not command servo motion.
+
+For the investigated device, configuration can be sent explicitly:
+
+```powershell
+curl.exe --get "http://192.168.9.122:88/create_new_csv" `
+  --data-urlencode "url=http://<LinkHub-LAN-IP>:8999/v1/csv"
+curl.exe "http://127.0.0.1:8999/v1/csv"
+```
+
+`GET /v1/csv` returns `available`, ordered output-field names in `columns`,
+`latest`, and `recent` (at most five newly accepted rows, oldest first).
+Before the first sample, `latest` is `null` and `recent` is empty, never
+fabricated zero readings. An accepted reading includes
+`source`, `filename`, `received_time_ns` (host ingestion time), `sequence` (journal
+sequence), `source_sequence` (device row counter), and a `values` object with
+the configured output fields. Values retain device units and calibration;
+LinkHub does not infer Newtons or reinterpret the device's time-of-day string.
+The host timestamp permits clients to detect stale readings.
+
+POSTs are limited to 64 KiB. A matching header may appear alone or with rows;
+headerless row batches are also supported. Headers alone do not create a
+reading. `filename` is a logical identifier, not a filesystem path: use 1..255
+ASCII letters, digits, dots, underscores or hyphens.
+The complete batch is validated before journaling: wrong column
+counts, invalid UTF-8, non-finite numbers, invalid unsigned counters, and
+empty bodies are rejected with HTTP 400. Missing/wrong content types also
+return 400; oversized bodies return 413. POST returns 409 when no mapping
+is configured.
+
+Successful POSTs return HTTP 200 with `accepted`, `duplicates`, and `cursor`.
+Retries are deduplicated by filename and device sequence within the LinkHub
+run, so each acquisition file must have a unique filename and increasing
+row counters. Latest means the last newly accepted row, not the last retry.
+Samples are journaled as `diagnostic.event` records with the configured source,
+event `csv.sample`, and structured `filename`/`values` fields. They are
+available through the existing diagnostic cursor API and included in active
+experiment recordings; no second CSV archive is created. The latest-value
+and recent-row cache starts empty on each service run. Duplicate retries do not
+change it. The [UI CSVs pane](../linkhub-ui/README.md#csvs-pane) displays this view.
 
 ### Common query/body parameters
 

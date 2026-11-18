@@ -1,0 +1,13 @@
+{
+  "source": "esp32.strain",
+  "sequence_column": "_rownum",
+  "columns": [
+    { "column": "_rownum", "field": "rownum", "type": "u64" },
+    { "column": "_time", "field": "device_time", "type": "string" },
+    { "column": "rpm", "field": "rpm", "type": "number" },
+    { "column": "flap_angle", "field": "flap_angle", "type": "number" },
+    { "column": "pitch_angle", "field": "pitch_angle", "type": "number" },
+    { "column": "lift", "field": "lift", "type": "number" },
+    { "column": "drag", "field": "drag", "type": "number" }
+  ]
+}

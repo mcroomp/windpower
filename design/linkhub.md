@@ -144,6 +144,25 @@ Route-by-route invocation examples, request bodies, and CLI usage live in
 [linkhub/README.md](../linkhub/README.md); this document keeps the shared API
 semantics.
 
+### Configured CSV feeds
+
+`--csv-map` loads a JSON source/column mapping at startup for the generic
+`/v1/csv` HTTP receiver. The mapping, not Rust code, owns incoming column order,
+output field names, value types, and the unsigned sequence column. The checked
+example describes ESP32 strain measurements, but the receiver is sensor-agnostic.
+Invalid mappings fail startup; malformed batches are validated before any rows
+are accepted. Header-only uploads acknowledge file creation without fabricating
+measurements.
+
+Accepted rows become ordinary `diagnostic.event` records with event `csv.sample`
+and the configured source. The existing journal owns ordering, persistence,
+retry deduplication (source, filename, device sequence), cursor reads, and
+experiment inclusion. There is no separate CSV transport archive. A per-run
+five-row cache exposes recent and latest mapped values and host receive time without
+claiming a device clock, units, or freshness. HTTP ingestion works independently
+of MAVLink readiness. It never commands or reconfigures the sending device.
+See [CSV usage and mapping format](../linkhub/README.md#generic-csv-ingestion).
+
 ### Bluetooth bench motor
 
 `--motor-name-prefix` enables the external rotor-drive backend. It starts

@@ -205,6 +205,9 @@ export class DemoBackend {
       const body = init?.body === undefined ? {} : object(JSON.parse(String(init.body)));
       const path = url.pathname;
       if (method === "GET" && path === "/v1/motor") return json({ available: false });
+      if (method === "GET" && path === "/v1/csv") {
+        return json({ available: false, columns: [], latest: null, recent: [] });
+      }
       if (path.startsWith("/v1/motor")) return json({ message: READ_ONLY }, 403);
       if (method === "GET" && path === "/v1/experiment") return json({ active: null });
       if (path.startsWith("/v1/experiment")) return json({ message: READ_ONLY }, 403);
