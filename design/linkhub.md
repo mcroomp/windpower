@@ -332,14 +332,22 @@ experiment without writing `mavlog.json`. The journal still holds the records.
 Phone browsers expose the camera only to secure contexts, so
 `serve --https-port PORT` also serves the full router over HTTPS. The
 self-signed certificate lives in `<data-dir>/tls/` and is regenerated only
-when its host set (localhost plus the LAN address) changes, so a phone accepts
-the certificate warning once. `GET /v1/camera` returns the phone URL
-`https://<lan-ip>:<https-port>/camera`, a QR code SVG (`qr_svg`), the
+when its host set changes, so a phone accepts the certificate warning once.
+With `--listen 0.0.0.0` or `::`, the certificate covers `localhost`, `127.0.0.1`,
+and `<computername>.local`, using the lowercase short OS hostname. Its identity
+does not change when DHCP assigns a different LAN IP. An explicit non-loopback
+`--listen IP` uses that IP instead of the computer name.
+`GET /v1/camera` returns the phone URL
+`https://<computername>.local:<https-port>/camera` for all-interface listeners,
+a QR code SVG (`qr_svg`), the
 connected phones (`phones`), and, while an experiment runs, its
 `experiment_id` and the recordings received so far (`videos`). When
 `--listen` is loopback or HTTPS is off, it returns `url: null` with a
-`reason`. `--listen 0.0.0.0` resolves the LAN address from the default-route
-interface.
+`reason`. The client network must resolve the computer's `.local` name (normally
+through mDNS); the certificate does not advertise a hostname or configure DNS.
+Existing IP-based certificates regenerate once when switching to the hostname,
+so clients must accept the new self-signed certificate. The certificate remains
+self-signed, not publicly trusted.
 
 `GET /camera` serves a self-contained page (`linkhub/src/camera.html`). A
 phone enables its camera once (one permission prompt; reloads reconnect

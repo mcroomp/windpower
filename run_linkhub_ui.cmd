@@ -108,7 +108,7 @@ if "%CONFIGURE_FIREWALL%"=="1" (
     )
 )
 echo [INFO] Starting LinkHub on http://0.0.0.0:%PORT%/ (all network interfaces)
-echo [INFO] LAN access: use this PC's LAN IP with HTTP port %PORT% or HTTPS port %LINKHUB_HTTPS_PORT% (phone cameras)
+echo [INFO] LAN access: http://%COMPUTERNAME%.local:%PORT%/ or https://%COMPUTERNAME%.local:%LINKHUB_HTTPS_PORT%/ (phone cameras)
 echo [INFO] Connection: %CONNECTION%  Baud: %BAUD%
 echo [INFO] Press Ctrl+C to stop.
 call :run_linkhub
