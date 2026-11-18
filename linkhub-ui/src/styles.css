@@ -405,7 +405,8 @@ h2 {
 #yaw-toggle,
 #wobble-toggle,
 #swash-toggle,
-#motor-toggle {
+#motor-toggle,
+#csv-toggle {
   padding: 4px 10px;
   border: 1px solid #40506b;
   border-radius: 999px;
@@ -419,7 +420,8 @@ h2 {
 #yaw-toggle[aria-pressed="true"],
 #wobble-toggle[aria-pressed="true"],
 #swash-toggle[aria-pressed="true"],
-#motor-toggle[aria-pressed="true"] {
+#motor-toggle[aria-pressed="true"],
+#csv-toggle[aria-pressed="true"] {
   border-color: #2d8f6f;
   color: #71ddb4;
   background: rgba(30, 123, 89, 0.14);
@@ -519,6 +521,33 @@ h2 {
 .motor-panel .motor-off { border-color: #ed7777; color: #ffaaaa; }
 .motor-warning, .motor-panel .error { color: #f0c36b; }
 .motor-panel small { color: #aebdd2; }
+
+.csv-panel {
+  position: relative;
+  z-index: 3;
+  flex: none;
+  max-height: 30vh;
+  overflow: auto;
+  padding: 10px;
+  border-top: 1px solid #263249;
+  background: #080d16;
+  font-size: 11px;
+}
+
+.csv-panel[hidden] { display: none; }
+.csv-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.csv-head h2 { font-size: 13px; }
+.csv-head span { color: #aebdd2; }
+.csv-head .error { color: #f0c36b; }
+.csv-rows { overflow-x: auto; margin-top: 8px; }
+.csv-rows table { width: 100%; border-collapse: collapse; }
+.csv-rows th, .csv-rows td {
+  padding: 4px 8px;
+  border-bottom: 1px solid #263249;
+  text-align: left;
+  white-space: nowrap;
+}
+.csv-rows th { color: #7591b8; }
 
 .swash-head, .swash-actions {
   display: flex;

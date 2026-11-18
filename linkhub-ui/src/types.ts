@@ -9,6 +9,22 @@ import type {
 
 export type JsonObject = Record<string, unknown>;
 
+export interface CsvReading {
+  source: string;
+  filename: string;
+  received_time_ns: number;
+  sequence: number;
+  source_sequence: number;
+  values: Record<string, string | number>;
+}
+
+export interface CsvStatus {
+  available: boolean;
+  columns: string[];
+  latest: CsvReading | null;
+  recent: CsvReading[];
+}
+
 export interface MotorDevice {
   id: string;
   name: string;

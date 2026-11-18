@@ -1,4 +1,5 @@
 pub mod ble;
+pub mod csv_ingest;
 pub mod discovery;
 pub mod dronebridge;
 pub mod experiment;

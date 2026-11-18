@@ -31,6 +31,12 @@ function fixture() {
 }
 
 describe("recorded SITL demo", () => {
+  it("reports no CSV feed instead of inventing replay measurements", async () => {
+    expect(await fixture().api.csvStatus()).toEqual({
+      available: false, columns: [], latest: null, recent: [],
+    });
+  });
+
   it("disables Bluetooth motor access in the offline replay", async () => {
     const { api } = fixture();
     expect(await api.motorStatus()).toEqual({ available: false });

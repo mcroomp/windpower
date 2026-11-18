@@ -11,6 +11,7 @@ import type { LinkHubStatus } from "./types";
 import { ExperimentController } from "./experiment";
 import { ExperimentButton } from "./experiment-button";
 import { CameraPanel } from "./camera-panel";
+import { CsvPanel } from "./csv-panel";
 import { formatCopterMode } from "./modes";
 import { isArmed } from "./mav";
 import { PassiveController, type PassivePhase } from "./passive";
@@ -94,6 +95,13 @@ const experimentButton = new ExperimentButton(
   write,
 );
 const scene = new VehicleScene(required<HTMLElement>("#scene"), telemetry, sceneOptions);
+const csvPanel = new CsvPanel(
+  required<HTMLButtonElement>("#csv-toggle"),
+  required<HTMLElement>("#csv-panel"),
+  api,
+  (message) => write(message, "error"),
+);
+window.addEventListener("beforeunload", () => csvPanel.dispose(), { once: true });
 
 function updateOverlay(): void {
   const status = telemetry.status;

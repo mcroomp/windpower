@@ -28,6 +28,7 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 use uuid::Uuid;
 
 use crate::{
+    csv_ingest::{CsvBatchResult, CsvError, CsvMapping, CsvStore, MAX_CSV_BYTES},
     experiment::{CameraConfig, ExperimentConfig, ExperimentError, ExperimentStore},
     journal::{JournalError, JournalHandle, TimeWindow},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
@@ -51,6 +52,7 @@ pub struct AppState {
     motor: Option<MotorHandle>,
     experiments: Option<Arc<ExperimentStore>>,
     camera: Option<CameraConfig>,
+    csv: Option<Arc<CsvStore>>,
 }
 
 fn collapse_state_records(records: Vec<JournalRecord>) -> Vec<JournalRecord> {
@@ -91,6 +93,8 @@ enum ApiError {
     Motor(#[from] MotorError),
     #[error(transparent)]
     Experiment(#[from] ExperimentError),
+    #[error(transparent)]
+    Csv(#[from] CsvError),
     /// The caller's `expected_generation` no longer matches LinkHub's live
     /// generation: the service restarted, the serial link reconnected, or
     /// the vehicle rebooted since the caller captured its baseline. A
@@ -159,6 +163,10 @@ impl IntoResponse for ApiError {
                 (StatusCode::CONFLICT, "experiment_closed")
             }
             Self::Experiment(_) => (StatusCode::INTERNAL_SERVER_ERROR, "experiment_save_failed"),
+            Self::Csv(CsvError::Invalid(_)) => (StatusCode::BAD_REQUEST, "invalid_csv"),
+            Self::Csv(CsvError::Journal(_)) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "journal_unavailable")
+            }
             Self::GenerationChanged { .. } => (StatusCode::CONFLICT, "generation_changed"),
         };
         let mut body = json!({
@@ -195,7 +203,7 @@ pub fn router_with_motor(
     link: Option<MavlinkLinkHandle>,
     motor: Option<MotorHandle>,
 ) -> Router {
-    router_with_motor_and_static(journal, link, motor, None, None, false)
+    router_with_motor_and_static(journal, link, motor, None, None, false, None)
 }
 
 /// `experiments` enables `/v1/experiment`; experiment directories are created there.
@@ -206,6 +214,7 @@ pub fn router_with_motor_and_static(
     experiments: Option<ExperimentConfig>,
     static_dir: Option<PathBuf>,
     no_cache: bool,
+    csv_mapping: Option<CsvMapping>,
 ) -> Router {
     let operations = link
         .clone()
@@ -217,6 +226,12 @@ pub fn router_with_motor_and_static(
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/v1/status", get(status))
+        .route(
+            "/v1/csv",
+            get(csv_status)
+                .post(ingest_csv)
+                .layer(DefaultBodyLimit::max(MAX_CSV_BYTES)),
+        )
         .route("/v1/records", get(records))
         .route("/v1/journal/flush", axum::routing::post(flush_journal))
         .route(
@@ -303,6 +318,7 @@ pub fn router_with_motor_and_static(
         .route("/camera", get(camera_page))
         .route("/v1/mavlink/status", get(mavlink_status))
         .with_state(Arc::new(AppState {
+            csv: csv_mapping.map(|mapping| Arc::new(CsvStore::new(journal.clone(), mapping))),
             journal,
             link,
             operations,
@@ -327,6 +343,44 @@ pub fn router_with_motor_and_static(
 
 async fn live() -> Json<Value> {
     Json(json!({"status": "live"}))
+}
+
+#[derive(Debug, Deserialize)]
+struct CsvQuery {
+    filename: String,
+}
+
+async fn csv_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match &state.csv {
+        Some(csv) => Json(csv.status().await),
+        None => Json(json!({
+            "available": false, "columns": [], "latest": null, "recent": [],
+        })),
+    }
+}
+
+async fn ingest_csv(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CsvQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<CsvBatchResult>, ApiError> {
+    let csv = state
+        .csv
+        .as_ref()
+        .ok_or_else(|| ApiError::Conflict("CSV mapping is not configured".to_owned()))?;
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next());
+    if !content_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("text/csv")) {
+        return Err(ApiError::BadRequest(
+            "Content-Type must be text/csv".to_owned(),
+        ));
+    }
+    let body = std::str::from_utf8(&body)
+        .map_err(|_| ApiError::BadRequest("CSV body must be UTF-8".to_owned()))?;
+    Ok(Json(csv.ingest(&query.filename, body).await?))
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
@@ -1785,6 +1839,220 @@ mod tests {
         (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
     }
 
+    fn csv_app(journal: JournalHandle) -> Router {
+        let mapping = CsvMapping::from_json(include_str!("../csv-map.json")).expect("CSV mapping");
+        router_with_motor_and_static(journal, None, None, None, None, false, Some(mapping))
+    }
+
+    fn csv_post(filename: &str, body: impl Into<Body>) -> Request<Body> {
+        Request::post(format!("/v1/csv?filename={filename}"))
+            .header(CONTENT_TYPE, "text/csv; charset=utf-8")
+            .body(body.into())
+            .expect("CSV request")
+    }
+
+    #[tokio::test]
+    async fn csv_is_mapped_deduplicated_readable_and_persisted() {
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let app = csv_app(journal.clone());
+        let (_, initial) =
+            json_response(&app, Request::get("/v1/csv").body(Body::empty()).unwrap()).await;
+        assert_eq!(initial["available"], true);
+        assert_eq!(initial["latest"], Value::Null);
+        assert_eq!(initial["recent"], json!([]));
+
+        let (status, header) = json_response(
+            &app,
+            csv_post(
+                "test.csv",
+                "_rownum,_time,rpm,flap_angle,pitch_angle,lift,drag\r\n",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header["accepted"], 0);
+        assert_eq!(journal.tail(), 0);
+
+        let rows = "1,12:34:56.001,200,85,-2,1.25,-0.5\r\n2,12:34:56.101,201,86,-1,1.5,-0.4\n";
+        let (status, accepted) = json_response(&app, csv_post("test.csv", rows)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(accepted["accepted"], 2);
+        assert_eq!(accepted["cursor"], "v1:2");
+        let (_, duplicate) = json_response(&app, csv_post("test.csv", rows)).await;
+        assert_eq!(duplicate["accepted"], 0);
+        assert_eq!(duplicate["duplicates"], 2);
+
+        let (_, latest) =
+            json_response(&app, Request::get("/v1/csv").body(Body::empty()).unwrap()).await;
+        assert_eq!(latest["latest"]["filename"], "test.csv");
+        assert_eq!(latest["latest"]["source_sequence"], 2);
+        assert_eq!(latest["latest"]["sequence"], 2);
+        assert!(latest["latest"]["received_time_ns"].as_u64().unwrap() > 0);
+        assert_eq!(latest["latest"]["values"]["rownum"], 2);
+        assert_eq!(latest["latest"]["values"]["device_time"], "12:34:56.101");
+        assert_eq!(latest["latest"]["values"]["lift"], 1.5);
+        assert_eq!(latest["latest"]["values"]["drag"], -0.4);
+        assert_eq!(latest["recent"].as_array().unwrap().len(), 2);
+
+        let (_, next_file) = json_response(
+            &app,
+            csv_post("next.csv", "1,12:35:00.001,0,85,0,2.5,0.2\n"),
+        )
+        .await;
+        assert_eq!(next_file["accepted"], 1);
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+        let saved = crate::journal::read_persisted(temp.path(), 0, None)
+            .await
+            .expect("saved readings");
+        assert_eq!(saved.len(), 3);
+        let RecordPayload::Diagnostic(event) = &saved[0].payload else {
+            panic!("expected CSV diagnostic");
+        };
+        assert_eq!(event.source, "esp32.strain");
+        assert_eq!(event.event, "csv.sample");
+        assert_eq!(event.source_sequence, 1);
+        assert_eq!(event.fields["filename"], "test.csv");
+        assert_eq!(event.fields["values"]["lift"], 1.25);
+    }
+
+    #[tokio::test]
+    async fn csv_rejects_invalid_batches_without_partial_ingestion() {
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let app = csv_app(journal.clone());
+        for body in [
+            "",
+            "1,12:00:00,0,0,0,1.0,2.0\n2,12:00:01,0,0,0,NaN,2.0\n",
+            "1,12:00:00,0,0,0,1.0\n",
+            "-1,12:00:00,0,0,0,1.0,2.0\n",
+        ] {
+            let (status, error) = json_response(&app, csv_post("test.csv", body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(error["error"], "invalid_csv");
+            assert_eq!(journal.tail(), 0);
+        }
+        for request in [
+            csv_post("..%2Ftest.csv", "1,12:00:00,0,0,0,1,2"),
+            csv_post("test.csv", vec![0xff]),
+            Request::post("/v1/csv?filename=test.csv")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            Request::post("/v1/csv")
+                .header(CONTENT_TYPE, "text/csv")
+                .body(Body::from("1,12:00:00,0,0,0,1,2"))
+                .unwrap(),
+        ] {
+            let (status, _) = json_response(&app, request).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(journal.tail(), 0);
+        }
+        let response = app
+            .oneshot(csv_post("test.csv", vec![b'1'; MAX_CSV_BYTES + 1]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(journal.tail(), 0);
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn csv_requires_a_runtime_mapping() {
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let app = router(journal.clone(), None);
+        let (_, status) =
+            json_response(&app, Request::get("/v1/csv").body(Body::empty()).unwrap()).await;
+        assert_eq!(
+            status,
+            json!({
+                "available": false, "columns": [], "latest": null, "recent": [],
+            })
+        );
+        let (status, error) =
+            json_response(&app, csv_post("test.csv", "1,12:00:00,0,0,0,1,2")).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error["error"], "not_ready");
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn csv_accepts_a_different_runtime_schema_and_quoted_text() {
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .unwrap();
+        let mapping = CsvMapping::from_json(
+            r#"{
+                "source": "bench.temperature",
+                "sequence_column": "sample",
+                "columns": [
+                    {"column": "temperature", "field": "temperature_c", "type": "number"},
+                    {"column": "sample", "field": "index", "type": "u64"},
+                    {"column": "label", "field": "sensor", "type": "string"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let app = router_with_motor_and_static(
+            journal.clone(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some(mapping),
+        );
+        let rows: String = (42..49)
+            .map(|sequence| format!("-12.5,{sequence},\"bench, \"\"left\"\"\"\r\n"))
+            .collect();
+        let (status, result) = json_response(
+            &app,
+            csv_post(
+                "temperature.csv",
+                format!("temperature,sample,label\r\n{rows}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["accepted"], 7);
+        let (_, status) =
+            json_response(&app, Request::get("/v1/csv").body(Body::empty()).unwrap()).await;
+        assert_eq!(status["latest"]["source"], "bench.temperature");
+        assert_eq!(
+            status["latest"]["values"],
+            json!({"temperature_c": -12.5, "index": 48, "sensor": "bench, \"left\""})
+        );
+        assert_eq!(
+            status["columns"],
+            json!(["temperature_c", "index", "sensor"])
+        );
+        assert_eq!(status["recent"].as_array().unwrap().len(), 5);
+        assert_eq!(status["recent"][0]["source_sequence"], 44);
+        assert_eq!(status["recent"][4]["source_sequence"], 48);
+        let records = journal.read_after(0).await.unwrap().records;
+        let RecordPayload::Diagnostic(event) = &records[0].payload else {
+            panic!("expected CSV diagnostic");
+        };
+        assert_eq!(event.source, "bench.temperature");
+        journal.shutdown().await.unwrap();
+        task.await.unwrap();
+    }
+
     #[tokio::test]
     async fn camera_urls_use_local_hostname_for_wildcard_listeners() {
         let temp = TempDir::new().expect("temp directory");
@@ -1812,6 +2080,7 @@ mod tests {
                 }),
                 None,
                 false,
+                None,
             );
             let (status, camera) = json_response(
                 &app,
@@ -1844,6 +2113,7 @@ mod tests {
             }),
             None,
             false,
+            None,
         );
         let camera_status = || {
             json_response(
@@ -2281,6 +2551,7 @@ mod tests {
             None,
             Some(static_dir.clone()),
             true,
+            None,
         );
 
         let index = app
@@ -2327,6 +2598,7 @@ mod tests {
             None,
             Some(static_dir),
             false,
+            None,
         )
         .oneshot(Request::get("/").body(Body::empty()).expect("request"))
         .await

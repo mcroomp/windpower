@@ -46,6 +46,19 @@ describe("formatMavResult", () => {
 });
 
 describe("typed wire contract", () => {
+  it("reads CSV rows independently and propagates caller cancellation", async () => {
+    const status = { available: false, columns: [], latest: null, recent: [] };
+    const fetchMock = stubFetch(status);
+    const controller = new AbortController();
+    expect(await new LinkHubApi().csvStatus(controller.signal)).toEqual(status);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/csv", expect.objectContaining({ method: "GET", signal: expect.any(AbortSignal) }),
+    );
+    const signal = fetchMock.mock.lastCall?.[1].signal as AbortSignal;
+    controller.abort();
+    expect(signal.aborted).toBe(true);
+  });
+
   it("uses the motor discovery, exact selection, leased command and stop endpoints", async () => {
     const fetchMock = stubFetch({ available: true });
     const api = new LinkHubApi();
