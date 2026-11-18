@@ -125,6 +125,25 @@ With compatible artifacts present, a normal launch needs no Python or uv.
   initially disconnected;
 - adds `--no-cache` so a browser refresh picks up a new build immediately.
 
+For trusted LAN access, opt in to a persistent Windows Firewall rule:
+
+```powershell
+.\run_linkhub_ui.cmd --configure-firewall auto
+```
+
+Approve the administrator prompt. Only the firewall helper is elevated; LinkHub
+continues under the original user. The rule allows inbound TCP for this
+checkout's LinkHub executable, using the selected HTTP and HTTPS ports, from
+`LocalSubnet` on **Private** networks only. Repeating the option updates the
+same `RAWES-LinkHub-Private-LAN` rule, including changed ports or executable path.
+Normal launches never change firewall rules. Cancellation or configuration
+failure prevents startup. Public networks, explicit block rules, and managed
+firewall policy are not overridden; rule creation does not prove remote
+reachability. Use only a trusted LAN, not Internet port forwarding.
+
+To remove the rule, run `Remove-NetFirewallRule -Name RAWES-LinkHub-Private-LAN`
+in an administrator PowerShell.
+
 ## Bluetooth motor panel
 
 Click **Motor**, then **Scan**, select the intended device by name and ID, and

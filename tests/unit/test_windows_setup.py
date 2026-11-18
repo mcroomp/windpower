@@ -90,6 +90,10 @@ def bootstrap(tmp_path: Path, mock_server_exe: Path) -> tuple[Path, Path, Path, 
     write_cmd(bin_dir / "powershell.cmd", r"""
         @echo off
         echo powershell %*>>"%MOCK_LOG%"
+        if /i "%~5"=="%MOCK_PROJECT%\scripts\configure_linkhub_firewall.ps1" (
+            if "%MOCK_FAIL%"=="firewall" exit /b 23
+            exit /b 0
+        )
         if "%MOCK_FAIL%"=="node-setup" exit /b 1
         mkdir "%MOCK_PROJECT%\.tools\node" 2>nul
         copy /y "%MOCK_BIN%\node.template" "%MOCK_PROJECT%\.tools\node\node.cmd" >nul
@@ -552,6 +556,83 @@ def test_launcher_preserves_environment_defaults_and_explicit_baud(
     assert '--baud "115200"' in result.stdout
     assert '--port "9124"' in result.stdout
     assert not commands(bootstrap)
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("fails", [False, True])
+def test_launcher_configures_firewall_only_when_requested(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], fails: bool,
+):
+    server_artifacts(bootstrap)
+    project, _, _, env = bootstrap
+    env["LINKHUB_HTTPS_PORT"] = "9444"
+    if fails:
+        env["MOCK_FAIL"] = "firewall"
+    result = run_script(
+        bootstrap, "run_linkhub_ui.cmd", "--configure-firewall", "auto", "auto", "9123",
+    )
+    assert result.returncode == (1 if fails else 7), result.stdout + result.stderr
+    calls = commands(bootstrap)
+    assert len(calls) == 1
+    assert f'-File "{project / "scripts" / "configure_linkhub_firewall.ps1"}"' in calls[0]
+    assert f'-ProgramPath "{project / "linkhub" / "target" / "release" / "linkhub.exe"}"' in calls[0]
+    assert '-HttpPort "9123" -HttpsPort "9444"' in calls[0]
+    assert ("MOCK_SERVER" in result.stdout) is not fails
+    if fails:
+        assert "Firewall configuration failed or was cancelled" in result.stdout
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("existing", [False, True])
+def test_firewall_helper_scopes_new_and_updated_rules_to_private_lan(
+    tmp_path: Path, mock_server_exe: Path, existing: bool,
+):
+    wrapper = tmp_path / "mock-firewall.ps1"
+    wrapper.write_text(textwrap.dedent(r"""
+        function Get-NetFirewallRule {
+            param($PolicyStore)
+            if ($env:TEST_EXISTING -eq 'True') {
+                [pscustomobject]@{ Name = 'RAWES-LinkHub-Private-LAN' }
+            }
+        }
+        function Save-FirewallRule {
+            [CmdletBinding(SupportsShouldProcess = $true)]
+            param($Name, $DisplayName, $Description, $PolicyStore, $Enabled,
+                  $Direction, $Action, $Profile, $Program, $Protocol,
+                  $LocalPort, $RemoteAddress, $EdgeTraversalPolicy)
+            @{
+                Operation = $MyInvocation.InvocationName
+                Settings = $PSBoundParameters
+            } | ConvertTo-Json -Depth 4 | Set-Content $env:TEST_RULE -WhatIf:$false
+        }
+        Set-Alias New-NetFirewallRule Save-FirewallRule
+        Set-Alias Set-NetFirewallRule Save-FirewallRule
+        & $args[0] -ProgramPath $args[1] -HttpPort 9123 -HttpsPort 9444 -WhatIf
+    """), encoding="ascii")
+    env = os.environ.copy()
+    env["TEST_EXISTING"] = str(existing)
+    rule_path = tmp_path / "rule.json"
+    env["TEST_RULE"] = str(rule_path)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper),
+         str(REPO / "scripts" / "configure_linkhub_firewall.ps1"), str(mock_server_exe)],
+        capture_output=True, text=True, env=env, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rule = json.loads(rule_path.read_text(encoding="utf-8-sig"))
+    assert rule["Operation"] == ("Set-NetFirewallRule" if existing else "New-NetFirewallRule")
+    settings = rule["Settings"]
+    assert settings["Program"] == str(mock_server_exe)
+    assert settings["LocalPort"] == [9123, 9444]
+    assert settings["Protocol"] == "TCP"
+    assert settings["Direction"] == "Inbound"
+    assert settings["Action"] == "Allow"
+    assert settings["Enabled"] == "True"
+    assert settings["Profile"] == "Private"
+    assert settings["RemoteAddress"] == "LocalSubnet"
+    assert settings["EdgeTraversalPolicy"] == "Block"
+    assert settings["PolicyStore"] == "PersistentStore"
+    assert settings["WhatIf"]["IsPresent"] is True
 
 
 @WINDOWS_ONLY

@@ -4,6 +4,7 @@ setlocal
 set "REPO=%~dp0"
 set "REPO=%REPO:~0,-1%"
 set "BUILD=0"
+set "CONFIGURE_FIREWALL=0"
 set "SETUP_DONE=0"
 set "CONNECTION="
 set "BAUD="
@@ -13,6 +14,11 @@ set "PORT="
 if "%~1"=="" goto args_done
 if /i "%~1"=="--build" (
     set "BUILD=1"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="--configure-firewall" (
+    set "CONFIGURE_FIREWALL=1"
     shift
     goto parse_args
 )
@@ -39,13 +45,14 @@ if not defined PORT set "PORT=8999"
 if not defined LINKHUB_HTTPS_PORT set "LINKHUB_HTTPS_PORT=9443"
 
 if not defined CONNECTION (
-    echo Usage: %~nx0 [--build] ^<connection^> [baud] [port]
+    echo Usage: %~nx0 [--build] [--configure-firewall] ^<connection^> [baud] [port]
     echo.
     echo Hardware:
     echo   %~nx0 auto
     echo   %~nx0 COM7
     echo   %~nx0 COM7 57600 8999
     echo   %~nx0 --build auto
+    echo   %~nx0 --configure-firewall auto
     echo   %~nx0 ble:DroneBridge
     echo.
     echo SITL:
@@ -93,6 +100,13 @@ echo [INFO] Existing LinkHub does not accept the launcher arguments. Rebuilding 
 goto setup
 
 :start
+if "%CONFIGURE_FIREWALL%"=="1" (
+    call powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\scripts\configure_linkhub_firewall.ps1" -ProgramPath "%REPO%\linkhub\target\release\linkhub.exe" -HttpPort "%PORT%" -HttpsPort "%LINKHUB_HTTPS_PORT%"
+    if errorlevel 1 (
+        echo ERROR: Firewall configuration failed or was cancelled. LinkHub was not started.
+        exit /b 1
+    )
+)
 echo [INFO] Starting LinkHub on http://0.0.0.0:%PORT%/ (all network interfaces)
 echo [INFO] LAN access: use this PC's LAN IP with HTTP port %PORT% or HTTPS port %LINKHUB_HTTPS_PORT% (phone cameras)
 echo [INFO] Connection: %CONNECTION%  Baud: %BAUD%
