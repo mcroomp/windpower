@@ -9,7 +9,7 @@ const INFO: ExperimentInfo = {
   id: "e1", name: "Spin", description: "", run_id: "r1", started_at_ns: 0, start_cursor: "v1:1", directory: "x",
 };
 
-function motor(speed: number, stopping = false): MotorStatus {
+function motor(speed: number, stopping = false): Extract<MotorStatus, { available: true }> {
   return {
     available: true, connected: true, device: "BLDC", device_id: "m1",
     running: speed > 0 && !stopping, stopping, speed_percent: speed, target_speed_percent: 0,
@@ -92,6 +92,26 @@ describe("experiment controller", () => {
     expect(passive.stop).not.toHaveBeenCalled();
     expect(api.stopExperiment).not.toHaveBeenCalled();
     expect(controller.running).toBe(true);
+  });
+
+  it("saves without hardware commands when no motor or vehicle has connected", async () => {
+    const { controller, api, passive, calls } = setup([]);
+    passive.phase = "idle";
+    api.motorStatus.mockResolvedValue({
+      ...motor(0), connected: false, device: null, device_id: null,
+    });
+    api.status.mockResolvedValue({
+      connected: false, ready: false, base_mode: "", received_messages: 0,
+    } as LinkHubStatus);
+    await controller.refresh();
+
+    await controller.stop();
+
+    expect(api.stopMotor).not.toHaveBeenCalled();
+    expect(passive.stop).not.toHaveBeenCalled();
+    expect(calls).toEqual(["save"]);
+    expect(controller.active).toBeNull();
+    expect(controller.stage).toBe("idle");
   });
 
   it("refuses gated actions without an active experiment", async () => {

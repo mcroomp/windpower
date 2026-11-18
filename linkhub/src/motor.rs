@@ -406,8 +406,11 @@ impl<B: MotorBackend> MotorController<B> {
 
     pub async fn scan(&self) -> Result<Vec<MotorDevice>, MotorError> {
         let _operation = self.inner.operation.lock().await;
-        if lock(&self.inner.state).running {
-            return Err(MotorError::Running);
+        {
+            let state = lock(&self.inner.state);
+            if state.connected && state.running {
+                return Err(MotorError::Running);
+            }
         }
         self.inner
             .backend
@@ -808,6 +811,9 @@ async fn advance_motor<B: MotorBackend>(
     .await;
     if let Err(error) = result {
         record_motor_error(inner, &error).await;
+        if let Err(cleanup_error) = inner.backend.lock().await.disconnect().await {
+            tracing::error!(%cleanup_error, "Failed to release disconnected Bluetooth motor");
+        }
         return Err(error);
     }
     if finished {
@@ -1004,6 +1010,7 @@ mod bluetooth {
         }
 
         async fn disconnect(&mut self) -> Result<(), MotorError> {
+            self.adapter = None;
             let Some(peripheral) = self.peripheral.take() else {
                 return Ok(());
             };
@@ -1136,11 +1143,44 @@ mod tests {
                 check_profile_step(&mut profile);
                 assert!(!profile.segments.is_empty());
             }
+
             check_profile_step(&mut profile);
             assert!(profile.segments.is_empty());
             assert_eq!(profile.position, f64::from(target));
             assert_eq!(profile.velocity, 0.0);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn link_loss_releases_backend_and_allows_scanning_and_reconnection() {
+        let backend = MockBackend::default();
+        let fail_writes = Arc::clone(&backend.fail_writes);
+        let calls = Arc::clone(&backend.calls);
+        let motor = MotorController::with_backend(backend, MotorConfig::default(), None).unwrap();
+        motor.connect().await.unwrap();
+        motor
+            .set_running("motor-1", 50, MotorDirection::Forward, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(motor.scan().await, Err(MotorError::Running));
+        *lock(&fail_writes) = true;
+        elapse(500).await;
+        let disconnected = motor.status();
+        assert!(!disconnected.connected);
+        assert!(disconnected.running);
+        assert!(disconnected.error.is_some());
+        assert_eq!(lock(&calls).last().unwrap(), "disconnect");
+        let released_calls = lock(&calls).len();
+        elapse(1_000).await;
+        assert_eq!(lock(&calls).len(), released_calls);
+        assert_eq!(motor.scan().await.unwrap().len(), 1);
+        assert_eq!(motor.status(), disconnected);
+        *lock(&fail_writes) = false;
+        motor.connect_device("motor-1".to_owned()).await.unwrap();
+        assert!(motor.status().connected);
+        assert!(!motor.status().running);
+        assert!(motor.status().error.is_none());
+        motor.close().await.unwrap();
     }
 
     #[test]

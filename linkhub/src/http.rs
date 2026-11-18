@@ -1,4 +1,10 @@
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -1506,10 +1512,11 @@ async fn camera_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>
     let url = match state.camera {
         None => Err("HTTPS is off; start LinkHub with --https-port for phone cameras".to_owned()),
         Some(camera) => crate::tls::lan_host(camera.listen).map(|host| {
-            format!(
-                "https://{}/camera",
-                SocketAddr::new(host, camera.https_port)
-            )
+            let authority = match host.parse::<IpAddr>() {
+                Ok(address) => SocketAddr::new(address, camera.https_port).to_string(),
+                Err(_) => format!("{host}:{}", camera.https_port),
+            };
+            format!("https://{authority}/camera")
         }),
     };
     let (url, reason) = match url {
@@ -1776,6 +1783,47 @@ mod tests {
             .await
             .expect("body");
         (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn camera_urls_use_local_hostname_for_wildcard_listeners() {
+        let temp = TempDir::new().expect("temp directory");
+        let config = JournalConfig::for_directory(temp.path().join("journal"), Uuid::new_v4());
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        let computer_name = hostname::get().unwrap().into_string().unwrap();
+        let short_name = computer_name.split('.').next().unwrap().to_ascii_lowercase();
+        let named_url = format!("https://{short_name}.local:9443/camera");
+        for (listen, expected) in [
+            ("0.0.0.0", named_url.as_str()),
+            ("::", named_url.as_str()),
+            ("192.168.1.20", "https://192.168.1.20:9443/camera"),
+            ("2001:db8::1", "https://[2001:db8::1]:9443/camera"),
+        ] {
+            let app = router_with_motor_and_static(
+                journal.clone(),
+                None,
+                None,
+                Some(ExperimentConfig {
+                    directory: temp.path().join("experiments"),
+                    camera: Some(CameraConfig {
+                        listen: listen.parse().unwrap(),
+                        https_port: 9443,
+                    }),
+                }),
+                None,
+                false,
+            );
+            let (status, camera) = json_response(
+                &app,
+                Request::get("/v1/camera").body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(camera["url"], expected, "{listen}");
+            assert_eq!(camera["reason"], Value::Null);
+            assert!(camera["qr_svg"].as_str().unwrap().contains("<svg"));
+        }
+        task.abort();
     }
 
     #[tokio::test]

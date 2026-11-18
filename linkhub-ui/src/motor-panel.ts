@@ -248,6 +248,16 @@ export class MotorPanel {
   }
 
   private update(status: MotorStatus): void {
+    if (!status.available || !status.connected) {
+      if (this.status?.available && this.status.connected && status.available) {
+        this.write("Motor: Bluetooth disconnected; motor state is unconfirmed. Reconnect before restarting.", "error");
+      }
+      if (this.ownedDevice) {
+        this.ownedDevice = null;
+        this.leaseDeadline = 0;
+        this.revision += 1;
+      }
+    }
     this.status = status;
     if (status.available && status.device_id && !Array.from(this.device.options).some((option) => option.value === status.device_id)) {
       this.device.add(new Option(`${status.device ?? "Motor"} (${status.device_id})`, status.device_id));
@@ -259,25 +269,29 @@ export class MotorPanel {
     const status = this.status;
     const available = status?.available === true;
     const connected = available && status.connected;
-    const running = available && status.running;
+    const running = connected && status.running;
     const busy = this.busy > 0;
     const speedText = `${this.speed.value}%`;
     if (this.speedValue.textContent !== speedText) this.speedValue.textContent = speedText;
-    const stateText = this.error
+    const disconnected = available && !connected;
+    const detail = this.error ?? (available ? status.error : null);
+    const stateText = disconnected
+      ? `Disconnected - motor state unconfirmed. Reconnect before restarting.${detail ? ` ${detail}` : ""}`
+      : this.error
       ?? (available ? status.error : null)
       ?? (status?.available === false ? "Motor backend disabled in LinkHub" : !status ? "Loading"
         : status.available && status.stopping ? `STOPPING - ${status.speed_percent}%`
         : running ? `ON - ${status.speed_percent}% -> ${status.target_speed_percent}%${this.ownedDevice ? "" : " (another client)"}`
         : connected ? `OFF - ${status.device}` : "Disconnected");
     if (this.state.textContent !== stateText) this.state.textContent = stateText;
-    this.state.classList.toggle("error", Boolean(this.error || (available && status.error)));
+    this.state.classList.toggle("error", disconnected || Boolean(this.error || (available && status.error)));
     this.scanButton.disabled = !available || busy || running;
     this.device.disabled = !available || busy || running;
     this.connectButton.disabled = !available || busy || running || !this.device.value;
     this.experimentHint.hidden = this.experiment.running;
     this.onButton.disabled = !this.experiment.running || !connected || busy || running || Boolean(this.error)
       || this.device.value !== (available ? status.device_id : null) || Number(this.speed.value) === 0;
-    this.offButton.disabled = !available;
+    this.offButton.disabled = !connected;
     this.speed.disabled = !connected || busy || (running && !this.ownedDevice);
   }
 }

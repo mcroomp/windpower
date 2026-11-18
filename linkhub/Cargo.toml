@@ -32,9 +32,11 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 axum-server = { version = "0.9.2", features = ["tls-rustls-ring"] }
+hostname = "0.4"
 
 [dev-dependencies]
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
 tempfile = "3.23"
 tokio = { version = "1.48", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

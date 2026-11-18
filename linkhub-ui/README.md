@@ -105,7 +105,9 @@ Add `--build` to run the complete project setup before launching
 `setup.cmd` owns tool installation, uv-managed Python, dependencies, and both
 builds; see the [root setup instructions](../README.md#running-tests).
 The launcher also runs setup automatically when either build artifact is
-missing. With both artifacts present, a normal launch needs no Python or uv.
+missing or the existing LinkHub binary rejects the launcher's arguments. It
+checks argument compatibility with `serve --help` before opening connections.
+With compatible artifacts present, a normal launch needs no Python or uv.
 
 `run_linkhub_ui.cmd` also:
 
@@ -115,10 +117,35 @@ missing. With both artifacts present, a normal launch needs no Python or uv.
   telemetry radio; set a numeric baud only when intentionally restricting the
   scan;
 - defaults the HTTP port to `8999`;
+- listens on `0.0.0.0` (all network interfaces) for HTTP and HTTPS. From another
+  device, use `http://<computername>.local:8999` or
+  `https://<computername>.local:9443`, not `0.0.0.0`. The HTTPS certificate and
+  camera QR code use that `.local` hostname; the client network must resolve it.
+  Windows Firewall must allow the selected ports on the trusted network.
+  See [phone HTTPS identity](../design/linkhub.md#phone-video);
 - serves `linkhub-ui\dist` through LinkHub's `--static-dir`;
 - enables the optional external motor backend with `--motor-name-prefix BLDC`,
   initially disconnected;
 - adds `--no-cache` so a browser refresh picks up a new build immediately.
+
+For trusted LAN access, opt in to a persistent Windows Firewall rule:
+
+```powershell
+.\run_linkhub_ui.cmd --configure-firewall auto
+```
+
+Approve the administrator prompt. Only the firewall helper is elevated; LinkHub
+continues under the original user. The rule allows inbound TCP for this
+checkout's LinkHub executable, using the selected HTTP and HTTPS ports, from
+`LocalSubnet` on **Private** networks only. Repeating the option updates the
+same `RAWES-LinkHub-Private-LAN` rule, including changed ports or executable path.
+Normal launches never change firewall rules. Cancellation or configuration
+failure prevents startup. Public networks, explicit block rules, and managed
+firewall policy are not overridden; rule creation does not prove remote
+reachability. Use only a trusted LAN, not Internet port forwarding.
+
+To remove the rule, run `Remove-NetFirewallRule -Name RAWES-LinkHub-Private-LAN`
+in an administrator PowerShell.
 
 ## Bluetooth motor panel
 
@@ -145,6 +172,10 @@ the supervisor starts controlled ramp-down on its next profile tick. Stops are
 not immediate; the request waits for the server-owned ramp to finish. There is no
 automatic restart after expiry, reconnect, or reopening the panel.
 Another client's running motor is displayed but never adopted for renewal.
+Bluetooth loss revokes renewal and disables speed/start/stop controls. The panel
+shows the motor state as unconfirmed, not off, and keeps Scan and Connect
+available even if the last command was running or stopping. Reconnect explicitly,
+then click Turn on to restart; reconnecting alone never resumes the motor.
 The offline demo shows the backend as unavailable and never accesses Bluetooth.
 Keep clear of the mechanism; a transport-level stop is not physical stop feedback.
 See [LinkHub motor semantics](../design/linkhub.md#bluetooth-bench-motor).
@@ -168,6 +199,11 @@ Stop runs these steps in order:
 4. saves the experiment's journal window as `mavlog.json` in the experiment
    directory. With `run_linkhub_ui.cmd`, experiment directories land in
    `simulation/logs/linkhub/experiments/`.
+
+An experiment started with no motor or vehicle connected can stop and save
+without sending hardware commands. Initial MAVLink status has no mode flags
+until a heartbeat arrives; absence of telemetry is not a disarm confirmation
+for a previously connected vehicle.
 
 If a step fails, for example the rotor is still turning or the motor stop
 times out, the experiment stays open so you can press Stop again. Experiment
