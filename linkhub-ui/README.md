@@ -149,6 +149,32 @@ The offline demo shows the backend as unavailable and never accesses Bluetooth.
 Keep clear of the mechanism; a transport-level stop is not physical stop feedback.
 See [LinkHub motor semantics](../design/linkhub.md#bluetooth-bench-motor).
 
+## Experiments
+
+Arming and the bench motor are locked until an experiment is running. Click
+**▶ Start Experiment** in the terminal header and enter a name and what is
+being tested. While locked, the terminal refuses `arm`, `run passive`, and raw
+`ARM_DISARM` arm requests, and the motor panel's **Turn on** is disabled.
+`stop`, `disarm`, `run collective`, and calibration commands stay available.
+
+While an experiment runs, the button shows **■ Stop** and the elapsed time.
+Stop runs these steps in order:
+
+1. ramps the Bluetooth motor down and waits for the ramp to finish;
+2. waits up to 60 s for rotor RPM to fall to about zero (if RPM telemetry is
+   missing, it warns and continues);
+3. applies canonical safe-off, which disarms the vehicle;
+4. saves the experiment's journal window as JSON. With `run_linkhub_ui.cmd`,
+   files land in `simulation/logs/linkhub/experiments/`.
+
+If a step fails, for example the rotor is still turning or the motor stop
+times out, the experiment stays open so you can press Stop again. Experiment
+state lives on the server, so a page reload picks up a running experiment.
+The terminal (and Node CLI) offers `experiment status`,
+`experiment start NAME [--description TEXT]`, and `experiment stop`.
+See [LinkHub experiment semantics](../design/linkhub.md#experiments) for the
+file format.
+
 ## `npm` scripts
 
 `linkhub-ui\package.json` defines the following scripts:

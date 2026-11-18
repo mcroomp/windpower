@@ -10,6 +10,7 @@ import { MavCmd, MavParamType, MavType } from "../src/generated/protocol";
 import { enumIs, isArmed } from "../src/mav";
 import { PassiveController } from "../src/passive";
 import { TelemetryStore } from "../src/telemetry";
+import { activeExperiment } from "./experiment-stub";
 import { TELEMETRY_PROFILES } from "../src/telemetry-rates";
 import { VehicleMotion } from "../src/vehicle-motion";
 import { WobbleModel } from "../src/wobble-model";
@@ -187,7 +188,7 @@ describe("recorded SITL demo", () => {
     const messages: string[] = [];
     const write = (message: string) => messages.push(message);
     const passive = new PassiveController(api, telemetry, write, () => {});
-    const runner = new CommandRunner(api, telemetry, passive, write, browserConfigProvider);
+    const runner = new CommandRunner(api, telemetry, passive, activeExperiment(), write, browserConfigProvider);
     await passive.reconcile();
     expect(passive.phase).toBe("idle");
     await runner.execute("status");

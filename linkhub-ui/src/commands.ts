@@ -10,6 +10,7 @@ import {
   type ConfigProvider,
 } from "./config-core";
 import { diagValue, DIAG_ARRAY_NAME } from "./diag-array";
+import type { ExperimentController } from "./experiment";
 import { MavCmd, MavParamType, MavResult } from "./generated/protocol";
 import { formatCopterMode } from "./modes";
 import { enumIs, isArmed, parseFlags } from "./mav";
@@ -48,6 +49,7 @@ export class CommandRunner {
     private readonly api: LinkHubApi,
     private readonly telemetry: TelemetryStore,
     private readonly passive: PassiveController,
+    private readonly experiment: Pick<ExperimentController, "requireActive" | "refresh" | "start" | "stop">,
     private readonly write: CommandWriter,
     private readonly configProvider: ConfigProvider,
   ) {
@@ -96,13 +98,17 @@ export class CommandRunner {
       if (this.compass.active) {
         throw new Error("run passive refused: a compass calibration is active");
       }
-      await this.passive.start(parseRunPassive(tokens.slice(2)));
+      const options = parseRunPassive(tokens.slice(2));
+      await this.experiment.requireActive("run passive");
+      await this.passive.start(options);
     } else if (tokens[0] === "stop" && tokens.length === 1) {
       await this.passive.stop();
     } else if (tokens[0] === "reboot" && tokens.length === 1) {
       await this.reboot();
     } else if (tokens[0] === "compass") {
       await this.compassCommand(tokens.slice(1));
+    } else if (tokens[0] === "experiment") {
+      await this.experimentCommand(tokens.slice(1));
     } else if (tokens[0] === "config") {
       await this.config(tokens.slice(1));
     } else if (tokens[0] === "help" && tokens.length === 1) {
@@ -166,6 +172,10 @@ export class CommandRunner {
       throw new Error("Usage: message send NAME COMPACT_JSON_FIELDS");
     }
     const fields = parseJsonObject(args[2] as string, "message fields");
+    if ((args[1] === "COMMAND_LONG" || args[1] === "COMMAND_INT")
+      && isArmCommand(fields.command) && Number(fields.param1) === 1) {
+      await this.experiment.requireActive("arm");
+    }
     this.write(await this.api.sendRawMessage(args[1] as string, fields));
   }
 
@@ -187,6 +197,9 @@ export class CommandRunner {
       } else {
         params.push(parseFiniteNumber(value, "command parameter"));
       }
+    }
+    if (isArmCommand(args[1]) && params[0] === 1) {
+      await this.experiment.requireActive("arm");
     }
     this.writeJson(await this.api.command(args[1] as string, params, timeoutMs));
   }
@@ -246,6 +259,7 @@ export class CommandRunner {
       throw new Error("arm refused: a run is active");
     }
     const force = args[0] === "--force";
+    await this.experiment.requireActive("arm");
     await this.api.setArmedAndWait(true, force);
     this.write(`Vehicle armed${force ? " (pre-arm checks bypassed)" : ""}`);
   }
@@ -447,6 +461,23 @@ export class CommandRunner {
     }
   }
 
+  private async experimentCommand(args: string[]): Promise<void> {
+    if (args[0] === "status" && args.length === 1) {
+      const active = await this.experiment.refresh();
+      this.write(active ? JSON.stringify(active, null, 2) : "No experiment running");
+      return;
+    }
+    if (args[0] === "stop" && args.length === 1) {
+      this.writeJson(await this.experiment.stop());
+      return;
+    }
+    if (args[0] === "start" && (args.length === 2 || (args.length === 4 && args[2] === "--description"))) {
+      await this.experiment.start(args[1] as string, args[3] ?? "");
+      return;
+    }
+    throw new Error("Usage: experiment status | experiment start NAME [--description TEXT] | experiment stop");
+  }
+
   private help(): void {
     this.write("status");
     this.write("hub status                print LinkHub service status as JSON");
@@ -456,6 +487,10 @@ export class CommandRunner {
     this.write("command send MAV_CMD_NAME [PARAM ...] [--timeout S]");
     this.write("param get NAME | param list | param set NAME VALUE [--type TYPE]");
     this.write("mode set CUSTOM_MODE");
+    this.write("experiment start NAME [--description TEXT]");
+    this.write("                         required before arming or running the motor");
+    this.write("experiment stop          stop motor, wait for spin-down, safe-off, save log");
+    this.write("experiment status");
     this.write("arm [--force]            arm and confirm heartbeat state");
     this.write("disarm                   apply canonical safe-off");
     this.write("rates set MESSAGE=HZ|default [...]");
@@ -470,6 +505,13 @@ export class CommandRunner {
     this.write("                         disarmed only; streams progress (Esc cancels)");
     this.write("compass accept|cancel    save a finished calibration / abort");
   }
+}
+
+function isArmCommand(command: unknown): boolean {
+  if (command === 400) return true;
+  if (typeof command !== "string") return false;
+  const name = command.trim().toUpperCase();
+  return name === MavCmd.COMPONENT_ARM_DISARM || `MAV_CMD_${name}` === MavCmd.COMPONENT_ARM_DISARM || name === "400";
 }
 
 function parseJsonObject(value: string, label: string): Record<string, unknown> {

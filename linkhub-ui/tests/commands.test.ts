@@ -12,20 +12,23 @@ import { mavEnum } from "../src/mav";
 import { PassiveController } from "../src/passive";
 import { TelemetryStore } from "../src/telemetry";
 import type { LinkHubStatus } from "../src/types";
+import { activeExperiment } from "./experiment-stub";
 
-function sharedRunner() {
+function sharedRunner(experimentActive = true) {
   const output: string[] = [];
   const api = new LinkHubApi();
   const telemetry = new TelemetryStore(api);
   const passive = new PassiveController(api, telemetry, () => undefined, () => undefined);
+  const experiment = activeExperiment(experimentActive);
   const runner = new CommandRunner(
     api,
     telemetry,
     passive,
+    experiment,
     (message) => output.push(message),
     { sources: () => [], targets: () => new Map() },
   );
-  return { api, passive, runner, output };
+  return { api, passive, runner, output, experiment };
 }
 
 describe("shared command runner", () => {
@@ -111,6 +114,40 @@ describe("shared command runner", () => {
       expect(stop).toHaveBeenCalledExactlyOnceWith();
     });
 
+    it("refuses every arming path until an experiment is started", async () => {
+      const { api, passive, runner } = sharedRunner(false);
+      const arm = vi.spyOn(api, "setArmedAndWait").mockResolvedValue();
+      const command = vi.spyOn(api, "command");
+      const send = vi.spyOn(api, "sendRawMessage");
+      const start = vi.spyOn(passive, "start").mockResolvedValue();
+      const stop = vi.spyOn(passive, "stop").mockResolvedValue();
+      const refused = "refused: start an experiment first";
+
+      await expect(runner.executeTokens(["arm"])).rejects.toThrow(refused);
+      await expect(runner.executeTokens(["run", "passive"])).rejects.toThrow(refused);
+      await expect(runner.executeTokens([
+        "command", "send", "MAV_CMD_COMPONENT_ARM_DISARM", "1", "21196",
+      ])).rejects.toThrow(refused);
+      await expect(runner.executeTokens([
+        "message", "send", "COMMAND_LONG", "{\"command\":400,\"param1\":1}",
+      ])).rejects.toThrow(refused);
+      expect(arm).not.toHaveBeenCalled();
+      expect(command).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+
+      await runner.executeTokens(["disarm"]);
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it("starts and stops experiments from the terminal", async () => {
+      const { runner, experiment } = sharedRunner();
+      await runner.executeTokens(["experiment", "start", "Spin test", "--description", "30% sweep"]);
+      expect(experiment.start).toHaveBeenCalledExactlyOnceWith("Spin test", "30% sweep");
+      await runner.executeTokens(["experiment", "stop"]);
+      expect(experiment.stop).toHaveBeenCalledOnce();
+    });
+
     it("sets typed parameters and message rates", async () => {
       const { api, runner } = sharedRunner();
       const setParameter = vi.spyOn(api, "setParameter").mockResolvedValue({
@@ -148,6 +185,7 @@ describe("shared command runner", () => {
       api,
       telemetry,
       passive,
+      activeExperiment(),
       (message) => output.push(message),
       {
         sources: () => [],
@@ -176,7 +214,7 @@ describe("shared command runner", () => {
       const telemetry = new TelemetryStore(api);
       const passive = new PassiveController(api, telemetry, () => undefined, () => undefined);
       const runner = new CommandRunner(
-        api, telemetry, passive, (message) => output.push(message),
+        api, telemetry, passive, activeExperiment(), (message) => output.push(message),
         { sources: () => [], targets: () => new Map() },
       );
       return { runner, command, output };

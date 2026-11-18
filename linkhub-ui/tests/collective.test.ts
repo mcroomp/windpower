@@ -6,6 +6,7 @@ import { MavModeFlag, MavParamType, MavState } from "../src/generated/protocol";
 import { mavEnum } from "../src/mav";
 import { parseRunCollective, PassiveController } from "../src/passive";
 import { TelemetryStore } from "../src/telemetry";
+import { activeExperiment } from "./experiment-stub";
 import type { LinkHubStatus, MessageRecord, MotorStatus } from "../src/types";
 
 const controllers: PassiveController[] = [];
@@ -83,7 +84,7 @@ function setup() {
   const controller = new PassiveController(api, telemetry, (line) => output.push(line), () => {});
   controllers.push(controller);
   const runner = new CommandRunner(
-    api, telemetry, controller, (line) => output.push(line),
+    api, telemetry, controller, activeExperiment(), (line) => output.push(line),
     { sources: () => [], targets: () => new Map() },
   );
   return { api, status, params, setParameter, setParameters, mode, arm, send, output, controller, runner, feedServos };

@@ -3,8 +3,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 pub const SCHEMA_VERSION: u16 = 2;
@@ -221,6 +222,53 @@ impl JournalRecord {
     }
 }
 
+impl JournalRecord {
+    /// Full-fidelity HTTP/JSON form used by `/v1/records` and experiment logs.
+    #[must_use]
+    pub fn to_api_value(&self) -> Value {
+        let (kind, data) = match &self.payload {
+            RecordPayload::Diagnostic(event) => (
+                "diagnostic.event",
+                serde_json::to_value(event).expect("DiagnosticEvent is serializable"),
+            ),
+            RecordPayload::MavlinkFrame(frame) => (
+                match frame.direction {
+                    Direction::Rx => "mavlink.rx",
+                    Direction::Tx => "mavlink.tx",
+                },
+                json!({
+                    "link_id": frame.link_id,
+                    "direction": frame.direction,
+                    "protocol_version": frame.protocol_version,
+                    "sequence": frame.sequence,
+                    "system_id": frame.system_id,
+                    "component_id": frame.component_id,
+                    "message_id": frame.message_id,
+                    "message_name": frame.message_name,
+                    "fields": frame.fields,
+                    "signed": frame.signed,
+                    "frame_base64": BASE64.encode(&frame.frame),
+                }),
+            ),
+        };
+        json!({
+            "schema_version": self.schema_version,
+            "sequence": self.sequence,
+            "cursor": format_cursor(self.sequence),
+            "ingest_time_ns": self.ingest_time_ns,
+            "correlation_id": self.correlation_id,
+            "sim_clock": self.sim_clock,
+            "kind": kind,
+            "data": data,
+        })
+    }
+}
+
+#[must_use]
+pub fn format_cursor(sequence: u64) -> String {
+    format!("v1:{sequence}")
+}
+
 const fn schema_version() -> u16 {
     SCHEMA_VERSION
 }
@@ -236,8 +284,6 @@ pub fn wall_time_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
 
     fn frame(message_name: &str, fields: Value) -> MavlinkFrame {

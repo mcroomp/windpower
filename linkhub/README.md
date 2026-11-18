@@ -255,6 +255,9 @@ Routes come from `linkhub\src\http.rs`.
 | `/v1/motor/connect` | `POST` | Connect an exact `device_id`, safely stopping any previous connection; leaves the motor off. |
 | `/v1/motor/stop` | `POST` | Optional Bluetooth motor stop command. |
 | `/v1/motor/reconnect` | `POST` | Reconnect the selected motor, or the first matching device if none has been selected; leaves it off. |
+| `/v1/experiment` | `GET` | The active experiment, or `{"active": null}`. |
+| `/v1/experiment/start` | `POST` | Start an experiment: `{"name": "...", "description": "..."}`. Returns 409 `experiment_running` if one is active. |
+| `/v1/experiment/stop` | `POST` | End the active experiment and save its journal window as JSON. Returns the path and record count; 409 `experiment_not_running` otherwise. |
 
 `GET /v1/motor` returns `available: false` when the backend is disabled.
 When enabled, status includes `connected`, `device`, `device_id`, `running`,

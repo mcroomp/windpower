@@ -8,6 +8,8 @@ import {
   messageThroughputRows,
 } from "./link-throughput";
 import type { LinkHubStatus } from "./types";
+import { ExperimentController } from "./experiment";
+import { ExperimentButton } from "./experiment-button";
 import { formatCopterMode } from "./modes";
 import { isArmed } from "./mav";
 import { PassiveController, type PassivePhase } from "./passive";
@@ -77,7 +79,14 @@ const setPhase = (phase: PassivePhase) => {
   operationState.className = `badge ${phase}`;
 };
 const passive = new PassiveController(api, telemetry, write, setPhase);
-terminal = new Terminal(form, input, output, api, telemetry, passive);
+const experiment = new ExperimentController(api, telemetry, passive, write);
+terminal = new Terminal(form, input, output, api, telemetry, passive, experiment);
+const experimentButton = new ExperimentButton(
+  required<HTMLButtonElement>("#experiment-button"),
+  required<HTMLDialogElement>("#experiment-dialog"),
+  experiment,
+  write,
+);
 const scene = new VehicleScene(required<HTMLElement>("#scene"), telemetry, sceneOptions);
 
 function updateOverlay(): void {
@@ -249,7 +258,7 @@ telemetry.onWarning((message) => write(message, "error"));
 
 const scenePanel = required<HTMLElement>(".scene-panel");
 const motorToggle = required<HTMLButtonElement>("#motor-toggle");
-const motorPanel = new MotorPanel(required<HTMLElement>("#motor-panel"), api, write);
+const motorPanel = new MotorPanel(required<HTMLElement>("#motor-panel"), api, write, experiment);
 motorToggle.addEventListener("click", () => {
   const open = !motorPanel.isOpen;
   scenePanel.classList.toggle("motor-open", open);
@@ -416,6 +425,7 @@ window.addEventListener("beforeunload", () => {
   wobblePanel.dispose();
   swashPanel.dispose();
   motorPanel.dispose();
+  experimentButton.dispose();
   scene.dispose();
   telemetry.stop();
 });

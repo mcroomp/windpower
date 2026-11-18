@@ -1,6 +1,7 @@
 pub mod ble;
 pub mod discovery;
 pub mod dronebridge;
+pub mod experiment;
 pub mod http;
 pub mod journal;
 pub mod link_events;
