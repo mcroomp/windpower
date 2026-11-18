@@ -205,6 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 motor_scan_timeout_ms,
                 motor_heartbeat_ms,
                 motor_max_command_timeout_ms,
+                journal.clone(),
             )
             .await?;
 
@@ -382,18 +383,22 @@ async fn configure_motor(
     scan_timeout_ms: u64,
     heartbeat_ms: u64,
     maximum_command_timeout_ms: u64,
+    journal: JournalHandle,
 ) -> Result<Option<MotorHandle>, Box<dyn std::error::Error>> {
     use linkhub::motor::{BleMotorController, MotorConfig};
 
     let Some(name_prefix) = name_prefix else {
         return Ok(None);
     };
-    let controller = BleMotorController::bluetooth(MotorConfig {
-        name_prefix,
-        scan_timeout: Duration::from_millis(scan_timeout_ms),
-        heartbeat_interval: Duration::from_millis(heartbeat_ms),
-        maximum_command_timeout_ms,
-    })
+    let controller = BleMotorController::bluetooth(
+        MotorConfig {
+            name_prefix,
+            scan_timeout: Duration::from_millis(scan_timeout_ms),
+            heartbeat_interval: Duration::from_millis(heartbeat_ms),
+            maximum_command_timeout_ms,
+        },
+        journal,
+    )
     .await?;
     Ok(Some(std::sync::Arc::new(controller)))
 }
