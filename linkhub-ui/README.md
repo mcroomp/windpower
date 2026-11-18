@@ -145,6 +145,10 @@ the supervisor starts controlled ramp-down on its next profile tick. Stops are
 not immediate; the request waits for the server-owned ramp to finish. There is no
 automatic restart after expiry, reconnect, or reopening the panel.
 Another client's running motor is displayed but never adopted for renewal.
+Bluetooth loss revokes renewal and disables speed/start/stop controls. The panel
+shows the motor state as unconfirmed, not off, and keeps Scan and Connect
+available even if the last command was running or stopping. Reconnect explicitly,
+then click Turn on to restart; reconnecting alone never resumes the motor.
 The offline demo shows the backend as unavailable and never accesses Bluetooth.
 Keep clear of the mechanism; a transport-level stop is not physical stop feedback.
 See [LinkHub motor semantics](../design/linkhub.md#bluetooth-bench-motor).

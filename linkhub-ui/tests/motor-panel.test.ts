@@ -105,6 +105,72 @@ afterEach(() => {
 });
 
 describe("Bluetooth motor panel", () => {
+  it.each([
+    { running: false, stopping: false },
+    { running: true, stopping: false },
+    { running: true, stopping: true },
+  ])("allows recovery after disconnect with last command $running/$stopping", async (lastCommand) => {
+    const { panel, api, elements, setStatus, write, speed } = setup();
+    await vi.advanceTimersByTimeAsync(0);
+    setStatus({
+      ...connected(), ...lastCommand, connected: false,
+      speed_percent: 30, target_speed_percent: 80, error: "Bluetooth motor is disconnected",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(elements.get("state")!.textContent).toContain("Disconnected - motor state unconfirmed");
+    expect(elements.get("state")!.textContent).toContain("Bluetooth motor is disconnected");
+    expect(elements.get("scan")!.disabled).toBe(false);
+    expect(elements.get("device")!.disabled).toBe(false);
+    expect(elements.get("connect")!.disabled).toBe(false);
+    expect(elements.get("on")!.disabled).toBe(true);
+    expect(elements.get("off")!.disabled).toBe(true);
+    expect(speed.disabled).toBe(true);
+    expect(api.stopMotor).not.toHaveBeenCalled();
+    expect(write).toHaveBeenCalledTimes(1);
+    await panel.connect();
+    expect(elements.get("on")!.disabled).toBe(false);
+    expect(api.runMotor).not.toHaveBeenCalled();
+    panel.dispose();
+  });
+
+  it("revokes its lease on Bluetooth loss without attempting an impossible stop or restarting", async () => {
+    const { panel, api, setStatus, elements } = setup();
+    await panel.turnOn();
+    setStatus({
+      ...connected(), connected: false, running: true, speed_percent: 10,
+      target_speed_percent: 10, error: "Bluetooth motor is disconnected",
+    });
+    api.stopMotor.mockRejectedValue(new Error("Bluetooth motor is disconnected"));
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(api.runMotor).toHaveBeenCalledTimes(1);
+    expect(api.stopMotor).not.toHaveBeenCalled();
+    expect(elements.get("connect")!.disabled).toBe(false);
+    await panel.connect();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(api.runMotor).toHaveBeenCalledTimes(1);
+    await panel.turnOn();
+    expect(api.runMotor).toHaveBeenCalledTimes(2);
+    panel.dispose();
+  });
+
+  it("handles disconnect in a run response without retaining renewal ownership", async () => {
+    const { panel, api, setStatus, elements } = setup();
+    const disconnected: MotorStatus = {
+      ...connected(), connected: false, running: true, error: "Bluetooth motor is disconnected",
+    };
+    api.runMotor.mockImplementationOnce(async () => {
+      setStatus(disconnected);
+      return disconnected;
+    });
+    await panel.turnOn();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(api.runMotor).toHaveBeenCalledTimes(1);
+    expect(api.stopMotor).not.toHaveBeenCalled();
+    expect(elements.get("on")!.disabled).toBe(true);
+    expect(elements.get("connect")!.disabled).toBe(false);
+    panel.dispose();
+  });
+
   it("shows applied versus target commands and a server-owned stop", async () => {
     const { panel, elements, api, setStatus } = setup({
       ...connected(), running: true, speed_percent: 30, target_speed_percent: 80,

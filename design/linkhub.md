@@ -154,7 +154,9 @@ an explicit connection selects one exact ID, never another matching device.
 The Nordic UART service is verified at connection time.
 Connecting initializes the motor off. Switching devices first completes the
 previous motor's controlled stop and never starts the selected motor.
-Scanning is rejected while running.
+Scanning is rejected while connected and running. After Bluetooth loss, scanning
+is allowed even if the last running command remains unconfirmed; scanning does
+not clear that state. Explicit reconnection initializes the motor off.
 
 Every running command includes the connected `device_id`, speed percentage,
 direction, and a finite lease duration. The current motor is forward-only;
@@ -192,6 +194,10 @@ A zero command does not establish zero mechanical RPM. Link loss, process crash,
 power loss, and the motor controller's own watchdog/braking behavior need
 motor-firmware/hardware protection. Write failures are reported as unconfirmed
 motor state; LinkHub does not send an abrupt brake as an error fallback.
+On link/write failure the supervisor exits and releases the Bluetooth peripheral
+and adapter handles. Cleanup failures are logged without clearing the original
+unconfirmed motor state. A subsequent UI connection acquires fresh handles and
+initializes the motor off; it never resumes the previous command.
 
 The browser renews a 2 s lease every 500 ms only for a motor it explicitly
 started. Closing its motor panel, hiding the tab, or a request failure revokes
