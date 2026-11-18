@@ -197,6 +197,11 @@ Stop runs these steps in order:
    directory. With `run_linkhub_ui.cmd`, experiment directories land in
    `simulation/logs/linkhub/experiments/`.
 
+An experiment started with no motor or vehicle connected can stop and save
+without sending hardware commands. Initial MAVLink status has no mode flags
+until a heartbeat arrives; absence of telemetry is not a disarm confirmation
+for a previously connected vehicle.
+
 If a step fails, for example the rotor is still turning or the motor stop
 times out, the experiment stays open so you can press Stop again. Experiment
 state lives on the server, so a page reload picks up a running experiment.

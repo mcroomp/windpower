@@ -144,6 +144,11 @@ Route-by-route invocation examples, request bodies, and CLI usage live in
 [linkhub/README.md](../linkhub/README.md); this document keeps the shared API
 semantics.
 
+Before any vehicle heartbeat, MAVLink status has an empty `base_mode` mask and
+`system_status=UNINIT`; generated dialect flag defaults must not imply an armed
+vehicle. Consumers must still use connection/readiness and observed heartbeats
+to distinguish unknown state from confirmed disarmed state.
+
 ### Bluetooth bench motor
 
 `--motor-name-prefix` enables the external rotor-drive backend. It starts
