@@ -153,7 +153,8 @@ See [LinkHub motor semantics](../design/linkhub.md#bluetooth-bench-motor).
 
 Arming and the bench motor are locked until an experiment is running. Click
 **▶ Start Experiment** in the terminal header and enter a name and what is
-being tested. While locked, the terminal refuses `arm`, `run passive`, and raw
+being tested. Starting creates the experiment's directory and saves those
+details in `experiment.txt` there. While locked, the terminal refuses `arm`, `run passive`, and raw
 `ARM_DISARM` arm requests, and the motor panel's **Turn on** is disabled.
 `stop`, `disarm`, `run collective`, and calibration commands stay available.
 
@@ -164,8 +165,9 @@ Stop runs these steps in order:
 2. waits up to 60 s for rotor RPM to fall to about zero (if RPM telemetry is
    missing, it warns and continues);
 3. applies canonical safe-off, which disarms the vehicle;
-4. saves the experiment's journal window as JSON. With `run_linkhub_ui.cmd`,
-   files land in `simulation/logs/linkhub/experiments/`.
+4. saves the experiment's journal window as `mavlog.json` in the experiment
+   directory. With `run_linkhub_ui.cmd`, experiment directories land in
+   `simulation/logs/linkhub/experiments/`.
 
 If a step fails, for example the rotor is still turning or the motor stop
 times out, the experiment stays open so you can press Stop again. Experiment

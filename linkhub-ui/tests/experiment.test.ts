@@ -6,7 +6,7 @@ import type { PassivePhase } from "../src/passive";
 import type { ExperimentInfo, LinkHubStatus, MessageRecord, MotorStatus } from "../src/types";
 
 const INFO: ExperimentInfo = {
-  id: "e1", name: "Spin", description: "", run_id: "r1", started_at_ns: 0, start_cursor: "v1:1",
+  id: "e1", name: "Spin", description: "", run_id: "r1", started_at_ns: 0, start_cursor: "v1:1", directory: "x",
 };
 
 function motor(speed: number, stopping = false): MotorStatus {
@@ -35,7 +35,7 @@ function setup(rotorRpmAfterSleeps: number[]) {
       calls.push("save");
       const experiment = active!;
       active = null;
-      return { experiment, stopped_at_ns: 1, end_cursor: "v1:9", record_count: 5, path: "x.json" };
+      return { experiment, stopped_at_ns: 1, end_cursor: "v1:9", record_count: 5, path: "x/mavlog.json" };
     }),
     motorStatus: vi.fn(async () => {
       calls.push("motor-status");

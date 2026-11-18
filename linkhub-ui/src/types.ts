@@ -35,6 +35,7 @@ export interface ExperimentInfo {
   run_id: string;
   started_at_ns: number;
   start_cursor: string;
+  directory: string;
 }
 
 export interface SavedExperiment {

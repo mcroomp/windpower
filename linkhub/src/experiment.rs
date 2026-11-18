@@ -1,10 +1,12 @@
-//! Operator experiments: a named journal window saved as one JSON file.
+//! Operator experiments: a named journal window saved into its own directory.
 //!
-//! Start and stop are journaled as `experiment.started`/`experiment.stopped`
-//! diagnostic markers. Stopping streams every journal record between the two
-//! markers (inclusive) into `<directory>/<UTC start>_<slug>_<id>.json`. The
-//! active experiment lives in memory; a LinkHub restart ends it unsaved, but
-//! the run journal still holds the records.
+//! Starting creates `<directory>/<UTC start>_<slug>_<id>/` holding
+//! `experiment.txt` (the details entered at start) and journals an
+//! `experiment.started` diagnostic marker. Stopping journals
+//! `experiment.stopped` and streams every journal record between the two
+//! markers (inclusive) into `mavlog.json` in that directory. The active
+//! experiment lives in memory; a LinkHub restart ends it without writing
+//! `mavlog.json`, but the run journal still holds the records.
 
 use std::{
     path::{Path, PathBuf},
@@ -32,6 +34,8 @@ const MAX_NAME_CHARS: usize = 200;
 const MAX_DESCRIPTION_CHARS: usize = 10_000;
 const MAX_SLUG_CHARS: usize = 48;
 const READ_BATCH_RECORDS: usize = 10_000;
+const DETAILS_FILE: &str = "experiment.txt";
+const MAVLOG_FILE: &str = "mavlog.json";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ActiveExperiment {
@@ -41,6 +45,7 @@ pub struct ActiveExperiment {
     pub run_id: Uuid,
     pub started_at_ns: u64,
     pub start_cursor: String,
+    pub directory: PathBuf,
     #[serde(skip)]
     start_sequence: u64,
 }
@@ -123,11 +128,20 @@ impl ExperimentStore {
         }
         let id = Uuid::new_v4();
         let started_at_ns = wall_time_ns();
+        let run_id = self.journal.run_id();
+        let directory = self.directory.join(directory_name(id, name, started_at_ns));
+        create_experiment_directory(
+            &self.directory,
+            &directory,
+            &details_text(id, name, description, run_id, started_at_ns),
+        )
+        .await?;
         let mut fields = Map::new();
         fields.insert("experiment_id".to_owned(), json!(id));
         fields.insert("name".to_owned(), json!(name));
         fields.insert("description".to_owned(), json!(description));
-        let start_sequence = self
+        fields.insert("directory".to_owned(), json!(directory));
+        let marker = self
             .journal
             .append_diagnostic(self.marker(
                 id,
@@ -135,15 +149,22 @@ impl ExperimentStore {
                 format!("Experiment {name:?} started"),
                 fields,
             ))
-            .await?
-            .sequence;
+            .await;
+        let start_sequence = match marker {
+            Ok(record) => record.sequence,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&directory).await;
+                return Err(error.into());
+            }
+        };
         let experiment = ActiveExperiment {
             id,
             name: name.to_owned(),
             description: description.to_owned(),
-            run_id: self.journal.run_id(),
+            run_id,
             started_at_ns,
             start_cursor: format_cursor(start_sequence),
+            directory,
             start_sequence,
         };
         *self.lock_active() = Some(experiment.clone());
@@ -169,7 +190,7 @@ impl ExperimentStore {
             ))
             .await?
             .sequence;
-        let path = self.directory.join(file_name(&experiment));
+        let path = experiment.directory.join(MAVLOG_FILE);
         let header = json!({
             "schema_version": FILE_SCHEMA_VERSION,
             "experiment": {
@@ -208,9 +229,6 @@ impl ExperimentStore {
             path: path.to_owned(),
             source,
         };
-        fs::create_dir_all(&self.directory)
-            .await
-            .map_err(write_error)?;
         let result = async {
             let file = fs::File::create(&temporary).await.map_err(write_error)?;
             let mut writer = BufWriter::new(file);
@@ -300,14 +318,50 @@ impl ExperimentStore {
     }
 }
 
-fn file_name(experiment: &ActiveExperiment) -> String {
-    let id = experiment.id.simple().to_string();
+fn directory_name(id: Uuid, name: &str, started_at_ns: u64) -> String {
+    let id = id.simple().to_string();
+    format!("{}_{}_{}", utc_stamp(started_at_ns), slug(name), &id[..8])
+}
+
+fn details_text(
+    id: Uuid,
+    name: &str,
+    description: &str,
+    run_id: Uuid,
+    started_at_ns: u64,
+) -> String {
+    let description = if description.is_empty() {
+        "(none)"
+    } else {
+        description
+    };
     format!(
-        "{}_{}_{}.json",
-        utc_stamp(experiment.started_at_ns),
-        slug(&experiment.name),
-        &id[..8]
+        "Name: {name}\nStarted (UTC): {}\nExperiment ID: {id}\nLinkHub run ID: {run_id}\n\nWhat is being tested:\n{description}\n",
+        utc_iso(started_at_ns)
     )
+}
+
+/// Creates the experiment directory and its details file. `create_dir`
+/// (not `_all`) on the leaf refuses to reuse an existing directory.
+async fn create_experiment_directory(
+    root: &Path,
+    directory: &Path,
+    details: &str,
+) -> Result<(), ExperimentError> {
+    let write_error = |path: &Path| {
+        let path = path.to_owned();
+        move |source| ExperimentError::Write { path, source }
+    };
+    fs::create_dir_all(root).await.map_err(write_error(root))?;
+    fs::create_dir(directory)
+        .await
+        .map_err(write_error(directory))?;
+    let details_path = directory.join(DETAILS_FILE);
+    if let Err(error) = fs::write(&details_path, details).await {
+        let _ = fs::remove_dir_all(directory).await;
+        return Err(write_error(&details_path)(error));
+    }
+    Ok(())
 }
 
 fn slug(name: &str) -> String {
@@ -331,14 +385,26 @@ fn slug(name: &str) -> String {
 }
 
 fn utc_stamp(wall_time_ns: u64) -> String {
+    let (year, month, day, hour, minute, second) = utc_parts(wall_time_ns);
+    format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
+}
+
+fn utc_iso(wall_time_ns: u64) -> String {
+    let (year, month, day, hour, minute, second) = utc_parts(wall_time_ns);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn utc_parts(wall_time_ns: u64) -> (i64, u32, u32, u64, u64, u64) {
     let seconds = wall_time_ns / 1_000_000_000;
     let (year, month, day) = civil_from_days((seconds / 86_400) as i64);
     let second_of_day = seconds % 86_400;
-    format!(
-        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+    (
+        year,
+        month,
+        day,
         second_of_day / 3_600,
         second_of_day % 3_600 / 60,
-        second_of_day % 60
+        second_of_day % 60,
     )
 }
 
@@ -392,6 +458,7 @@ mod tests {
         assert_eq!(utc_stamp(0), "19700101T000000Z");
         assert_eq!(utc_stamp(1_735_689_599_000_000_000), "20241231T235959Z");
         assert_eq!(utc_stamp(951_782_400_000_000_000), "20000229T000000Z");
+        assert_eq!(utc_iso(1_735_689_599_000_000_000), "2024-12-31T23:59:59Z");
         assert_eq!(slug("  Rotor spin-up #3 (5 m/s)!"), "rotor-spin-up-3-5-m-s");
         assert_eq!(slug("***"), "experiment");
     }
@@ -407,6 +474,26 @@ mod tests {
 
         let started = store.start(" Spin test ", "bench").await.expect("start");
         assert_eq!(started.name, "Spin test");
+        let directory_name = started
+            .directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(directory_name.ends_with(&format!(
+            "_spin-test_{}",
+            &started.id.simple().to_string()[..8]
+        )));
+        assert_eq!(
+            started.directory.parent(),
+            Some(temp.path().join("experiments").as_path())
+        );
+        let details =
+            std::fs::read_to_string(started.directory.join(DETAILS_FILE)).expect("details");
+        assert!(details.starts_with("Name: Spin test\nStarted (UTC): "));
+        assert!(details.contains(&format!("Experiment ID: {}\n", started.id)));
+        assert!(details.ends_with("What is being tested:\nbench\n"));
+        assert!(!started.directory.join(MAVLOG_FILE).exists());
         assert!(matches!(
             store.start("other", "").await,
             Err(ExperimentError::AlreadyRunning(_))
@@ -422,16 +509,7 @@ mod tests {
             Err(ExperimentError::NotRunning)
         ));
         assert_eq!(saved.record_count, 4);
-        let name = saved
-            .path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        assert!(name.ends_with(&format!(
-            "_spin-test_{}.json",
-            &started.id.simple().to_string()[..8]
-        )));
+        assert_eq!(saved.path, started.directory.join(MAVLOG_FILE));
         let log: Value =
             serde_json::from_slice(&std::fs::read(&saved.path).expect("log")).expect("log JSON");
         assert_eq!(log["experiment"]["name"], "Spin test");
