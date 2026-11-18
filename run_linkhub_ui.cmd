@@ -93,8 +93,8 @@ echo [INFO] Existing LinkHub does not accept the launcher arguments. Rebuilding 
 goto setup
 
 :start
-echo [INFO] Starting LinkHub on http://127.0.0.1:%PORT%/
-echo [INFO] LAN access: http port %PORT%, https port %LINKHUB_HTTPS_PORT% (phone cameras)
+echo [INFO] Starting LinkHub on http://0.0.0.0:%PORT%/ (all network interfaces)
+echo [INFO] LAN access: use this PC's LAN IP with HTTP port %PORT% or HTTPS port %LINKHUB_HTTPS_PORT% (phone cameras)
 echo [INFO] Connection: %CONNECTION%  Baud: %BAUD%
 echo [INFO] Press Ctrl+C to stop.
 call :run_linkhub

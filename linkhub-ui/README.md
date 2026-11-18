@@ -117,6 +117,9 @@ With compatible artifacts present, a normal launch needs no Python or uv.
   telemetry radio; set a numeric baud only when intentionally restricting the
   scan;
 - defaults the HTTP port to `8999`;
+- listens on `0.0.0.0` (all network interfaces) for HTTP and HTTPS. From another
+  device, use this PC's LAN IP, not `0.0.0.0`; Windows Firewall must allow the
+  selected ports on the trusted network;
 - serves `linkhub-ui\dist` through LinkHub's `--static-dir`;
 - enables the optional external motor backend with `--motor-name-prefix BLDC`,
   initially disconnected;

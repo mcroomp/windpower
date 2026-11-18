@@ -492,12 +492,13 @@ def test_launcher_delegates_setup_and_preserves_connection_arguments(
     result = run_script(bootstrap, "run_linkhub_ui.cmd", *args)
     assert result.returncode == 7
     assert 'uv python install --upgrade --no-bin --no-registry "3.14"' in commands(bootstrap)
-    assert "http://127.0.0.1:9123/" in result.stdout
+    assert "http://0.0.0.0:9123/ (all network interfaces)" in result.stdout
     assert "Connection: tcp:127.0.0.1:5760  Baud: auto" in result.stdout
     assert "MOCK_SERVER" in result.stdout
     assert 'serve ' in result.stdout
     assert '--connection "tcp:127.0.0.1:5760"' in result.stdout
     assert '--port "9123"' in result.stdout
+    assert "--listen 0.0.0.0" in result.stdout
     assert "--baud" not in result.stdout
 
 
