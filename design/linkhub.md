@@ -144,6 +144,11 @@ Route-by-route invocation examples, request bodies, and CLI usage live in
 [linkhub/README.md](../linkhub/README.md); this document keeps the shared API
 semantics.
 
+Before any vehicle heartbeat, MAVLink status has an empty `base_mode` mask and
+`system_status=UNINIT`; generated dialect flag defaults must not imply an armed
+vehicle. Consumers must still use connection/readiness and observed heartbeats
+to distinguish unknown state from confirmed disarmed state.
+
 ### Configured CSV feeds
 
 `--csv-map` loads a JSON source/column mapping at startup for the generic
@@ -173,7 +178,9 @@ an explicit connection selects one exact ID, never another matching device.
 The Nordic UART service is verified at connection time.
 Connecting initializes the motor off. Switching devices first completes the
 previous motor's controlled stop and never starts the selected motor.
-Scanning is rejected while running.
+Scanning is rejected while connected and running. After Bluetooth loss, scanning
+is allowed even if the last running command remains unconfirmed; scanning does
+not clear that state. Explicit reconnection initializes the motor off.
 
 Every running command includes the connected `device_id`, speed percentage,
 direction, and a finite lease duration. The current motor is forward-only;
@@ -211,6 +218,10 @@ A zero command does not establish zero mechanical RPM. Link loss, process crash,
 power loss, and the motor controller's own watchdog/braking behavior need
 motor-firmware/hardware protection. Write failures are reported as unconfirmed
 motor state; LinkHub does not send an abrupt brake as an error fallback.
+On link/write failure the supervisor exits and releases the Bluetooth peripheral
+and adapter handles. Cleanup failures are logged without clearing the original
+unconfirmed motor state. A subsequent UI connection acquires fresh handles and
+initializes the motor off; it never resumes the previous command.
 
 The browser renews a 2 s lease every 500 ms only for a motor it explicitly
 started. Closing its motor panel, hiding the tab, or a request failure revokes
@@ -340,14 +351,22 @@ experiment without writing `mavlog.json`. The journal still holds the records.
 Phone browsers expose the camera only to secure contexts, so
 `serve --https-port PORT` also serves the full router over HTTPS. The
 self-signed certificate lives in `<data-dir>/tls/` and is regenerated only
-when its host set (localhost plus the LAN address) changes, so a phone accepts
-the certificate warning once. `GET /v1/camera` returns the phone URL
-`https://<lan-ip>:<https-port>/camera`, a QR code SVG (`qr_svg`), the
+when its host set changes, so a phone accepts the certificate warning once.
+With `--listen 0.0.0.0` or `::`, the certificate covers `localhost`, `127.0.0.1`,
+and `<computername>.local`, using the lowercase short OS hostname. Its identity
+does not change when DHCP assigns a different LAN IP. An explicit non-loopback
+`--listen IP` uses that IP instead of the computer name.
+`GET /v1/camera` returns the phone URL
+`https://<computername>.local:<https-port>/camera` for all-interface listeners,
+a QR code SVG (`qr_svg`), the
 connected phones (`phones`), and, while an experiment runs, its
 `experiment_id` and the recordings received so far (`videos`). When
 `--listen` is loopback or HTTPS is off, it returns `url: null` with a
-`reason`. `--listen 0.0.0.0` resolves the LAN address from the default-route
-interface.
+`reason`. The client network must resolve the computer's `.local` name (normally
+through mDNS); the certificate does not advertise a hostname or configure DNS.
+Existing IP-based certificates regenerate once when switching to the hostname,
+so clients must accept the new self-signed certificate. The certificate remains
+self-signed, not publicly trusted.
 
 `GET /camera` serves a self-contained page (`linkhub/src/camera.html`). A
 phone enables its camera once (one permission prompt; reloads reconnect

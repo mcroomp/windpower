@@ -52,7 +52,7 @@ pub enum LinkPhase {
     Backoff,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct LinkStatus {
     pub connected: bool,
     pub ready: bool,
@@ -101,6 +101,46 @@ pub struct LinkStatus {
     pub connected_since_ns: Option<u64>,
     /// Most recent serial discovery scan, with per-port probe outcomes.
     pub last_scan: Option<ScanReport>,
+}
+
+impl Default for LinkStatus {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            ready: false,
+            phase: LinkPhase::Idle,
+            connection: String::new(),
+            port: None,
+            baud: None,
+            clock_epoch: 0,
+            target_system: 0,
+            target_component: 0,
+            // The generated flag default is SAFETY_ARMED, not an empty mask.
+            base_mode: MavModeFlag::empty(),
+            custom_mode: 0,
+            system_status: MavState::MAV_STATE_UNINIT,
+            latest_time_boot_ms: 0,
+            received_messages: 0,
+            transmitted_messages: 0,
+            received_bytes: 0,
+            transmitted_bytes: 0,
+            rx_bps: None,
+            tx_bps: None,
+            received_bytes_by_message: BTreeMap::new(),
+            transmitted_bytes_by_message: BTreeMap::new(),
+            rx_bps_by_message: BTreeMap::new(),
+            tx_bps_by_message: BTreeMap::new(),
+            dropped_frames: 0,
+            last_received_ns: None,
+            error: None,
+            last_error_stage: None,
+            last_error_ns: None,
+            attempts: 0,
+            consecutive_failures: 0,
+            connected_since_ns: None,
+            last_scan: None,
+        }
+    }
 }
 
 struct LinkThroughput {
@@ -1342,6 +1382,15 @@ mod tests {
             throughput.sample(start + Duration::from_secs(4), 300, 600),
             (0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn initial_status_does_not_report_armed_without_a_heartbeat() {
+        let status = LinkStatus::default();
+        let value = serde_json::to_value(&status).expect("status is serializable");
+        assert!(!status.connected);
+        assert_eq!(status.received_messages, 0);
+        assert_eq!(value["base_mode"], "");
     }
 
     #[test]
