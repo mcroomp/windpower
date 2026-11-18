@@ -1,15 +1,21 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use linkhub::{
     discovery::{self, DiscoveryConfig},
     dronebridge::DroneBridge,
+    experiment::{CameraConfig, ExperimentConfig},
     http,
     journal::{JournalConfig, JournalHandle},
     mavlink::{MavlinkLinkConfig, MavlinkTransport, start_link},
     motor::MotorHandle,
     query::QueryArgs,
     records::{DiagnosticEvent, DiagnosticLevel, wall_time_ns},
+    tls,
 };
 use mavlink_protocol::codec::{FrameReader, MavHeader, serialize_message};
 use serde_json::{Map, json};
@@ -68,6 +74,11 @@ enum Command {
         listen: String,
         #[arg(long, default_value_t = 8999)]
         port: u16,
+        /// Also serve the API and UI over HTTPS on this port with a
+        /// self-signed certificate kept in `<data-dir>/tls/`. Phone camera
+        /// pages need HTTPS; use with `--listen 0.0.0.0` for LAN phones.
+        #[arg(long, env = "LINKHUB_HTTPS_PORT")]
+        https_port: Option<u16>,
         #[arg(long, default_value = "linkhub-data")]
         data_dir: PathBuf,
         #[arg(long, env = "LINKHUB_STATIC_DIR")]
@@ -137,6 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dronebridge_url,
             listen,
             port,
+            https_port,
             data_dir,
             static_dir,
             no_cache,
@@ -198,8 +210,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             journal.append_diagnostic(startup_event(run_id)).await?;
 
-            let bind: SocketAddr = format!("{listen}:{port}").parse()?;
+            let listen: IpAddr = listen.parse()?;
+            let bind = SocketAddr::new(listen, port);
             let listener = TcpListener::bind(bind).await?;
+            let https = match https_port {
+                Some(https_port) => {
+                    let _ = rustls::crypto::ring::default_provider().install_default();
+                    let config = tls::load_or_create(&data_dir.join("tls"), listen).await?;
+                    let https_bind = SocketAddr::new(listen, https_port);
+                    let https_listener = std::net::TcpListener::bind(https_bind)?;
+                    https_listener.set_nonblocking(true)?;
+                    Some((https_bind, https_listener, config))
+                }
+                None => None,
+            };
             let motor = configure_motor(
                 motor_name_prefix,
                 motor_scan_timeout_ms,
@@ -210,20 +234,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
 
             let (link, link_task) = start_link(link_config, journal.clone());
+            let app = http::router_with_motor_and_static(
+                journal.clone(),
+                Some(link),
+                motor.clone(),
+                Some(ExperimentConfig {
+                    directory: data_dir.join("experiments"),
+                    camera: https_port.map(|https_port| CameraConfig { listen, https_port }),
+                }),
+                static_dir,
+                no_cache,
+            );
             tracing::info!(%bind, %run_id, "LinkHub listening");
-            let server_result = axum::serve(
-                listener,
-                http::router_with_motor_and_static(
-                    journal.clone(),
-                    Some(link),
-                    motor.clone(),
-                    Some(data_dir.join("experiments")),
-                    static_dir,
-                    no_cache,
-                ),
-            )
-            .with_graceful_shutdown(shutdown_signal())
-            .await;
+            let https_handle = axum_server::Handle::new();
+            let https_task = match https {
+                Some((https_bind, https_listener, config)) => {
+                    tracing::info!(%https_bind, "LinkHub listening (HTTPS, self-signed)");
+                    let server = axum_server::from_tcp_rustls(https_listener, config)?
+                        .handle(https_handle.clone())
+                        .serve(app.clone().into_make_service());
+                    Some(tokio::spawn(server))
+                }
+                None => None,
+            };
+            let server_result = axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal())
+                .await;
+            https_handle.graceful_shutdown(Some(Duration::from_secs(2)));
+            if let Some(task) = https_task {
+                match task.await {
+                    Ok(Err(error)) => tracing::error!(%error, "HTTPS server failed"),
+                    Err(error) => tracing::error!(%error, "HTTPS server task failed"),
+                    Ok(Ok(())) => {}
+                }
+            }
 
             link_task.abort();
             let link_result = link_task.await;

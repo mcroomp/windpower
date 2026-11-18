@@ -179,8 +179,9 @@ Defaults come from `linkhub\src\main.rs`.
 | --- | --- | --- |
 | `--connection` | `auto` | `tcp:IP:PORT`, `udp:IP:PORT` (remote peer), `udpin:IP:PORT` (local listener), `ble:DEVICE_NAME_OR_ADDRESS`, bare `IP:PORT` (TCP), `auto`, or a serial-port restriction such as `COM7` / `serial:COM7`. Serial values still go through heartbeat-based discovery. |
 | `--dronebridge-url` | unset | Exclusive DroneBridge HTTP origin, e.g. `http://192.168.9.143`. Requires `udp:`. Clears ALL UDP clients and the saved target on graceful stop, then verifies an empty list. Also available through `LINKHUB_DRONEBRIDGE_URL` and on `test-connection`. |
-| `--listen` | `127.0.0.1` | HTTP bind address. |
+| `--listen` | `127.0.0.1` | HTTP/HTTPS bind address. `run_linkhub_ui.cmd` uses `0.0.0.0` so LAN phones can connect. |
 | `--port` | `8999` | HTTP port. |
+| `--https-port` | unset | Also serve over HTTPS with a self-signed certificate kept in `<data-dir>\tls\` (needed for phone cameras). Also `LINKHUB_HTTPS_PORT`; `run_linkhub_ui.cmd` uses `9443`. |
 | `--data-dir` | `linkhub-data` | Parent directory where each run creates `<run-id>\run.json` and `<run-id>\journal\`. |
 | `--static-dir` | unset | Optional directory served as fallback static assets. |
 | `--no-cache` | off | Sends `Cache-Control: no-store` on every response. |
@@ -257,7 +258,12 @@ Routes come from `linkhub\src\http.rs`.
 | `/v1/motor/reconnect` | `POST` | Reconnect the selected motor, or the first matching device if none has been selected; leaves it off. |
 | `/v1/experiment` | `GET` | The active experiment, or `{"active": null}`. |
 | `/v1/experiment/start` | `POST` | Start an experiment: `{"name": "...", "description": "..."}`. Returns 409 `experiment_running` if one is active. |
-| `/v1/experiment/stop` | `POST` | End the active experiment and save its journal window as JSON. Returns the path and record count; 409 `experiment_not_running` otherwise. |
+| `/v1/experiment/stop` | `POST` | End the active experiment and save its journal window as `mavlog.json` in the experiment directory. Returns the path and record count; 409 `experiment_not_running` otherwise. |
+| `/v1/camera` | `GET` | Phone camera URL and QR code SVG, connected phones, and recordings received for the active experiment. |
+| `/v1/camera/{device}/heartbeat` | `POST` | Phone camera registration: `{"label": "...", "recording": <experiment id or null>}`. Returns `{"active": ...}`. |
+| `/v1/camera/{device}` | `DELETE` | Remove a phone camera registration. Returns `{"removed": bool}`. |
+| `/v1/experiment/{id}/video/{stream}` | `POST` | Append chunk `?seq=N[&final=true]` of a phone recording (body is the video bytes, `Content-Type` `video/webm` or `video/mp4`). |
+| `/camera` | `GET` | Phone camera recording page (open over HTTPS). |
 
 `GET /v1/motor` returns `available: false` when the backend is disabled.
 When enabled, status includes `connected`, `device`, `device_id`, `running`,

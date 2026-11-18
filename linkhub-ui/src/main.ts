@@ -10,6 +10,7 @@ import {
 import type { LinkHubStatus } from "./types";
 import { ExperimentController } from "./experiment";
 import { ExperimentButton } from "./experiment-button";
+import { CameraPanel } from "./camera-panel";
 import { formatCopterMode } from "./modes";
 import { isArmed } from "./mav";
 import { PassiveController, type PassivePhase } from "./passive";
@@ -81,6 +82,11 @@ const setPhase = (phase: PassivePhase) => {
 const passive = new PassiveController(api, telemetry, write, setPhase);
 const experiment = new ExperimentController(api, telemetry, passive, write);
 terminal = new Terminal(form, input, output, api, telemetry, passive, experiment);
+const cameraPanel = new CameraPanel(
+  required<HTMLButtonElement>("#camera-button"),
+  required<HTMLDialogElement>("#camera-dialog"),
+  api,
+);
 const experimentButton = new ExperimentButton(
   required<HTMLButtonElement>("#experiment-button"),
   required<HTMLDialogElement>("#experiment-dialog"),
@@ -426,6 +432,7 @@ window.addEventListener("beforeunload", () => {
   swashPanel.dispose();
   motorPanel.dispose();
   experimentButton.dispose();
+  cameraPanel.dispose();
   scene.dispose();
   telemetry.stop();
 });
