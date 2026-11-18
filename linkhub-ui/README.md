@@ -105,7 +105,9 @@ Add `--build` to run the complete project setup before launching
 `setup.cmd` owns tool installation, uv-managed Python, dependencies, and both
 builds; see the [root setup instructions](../README.md#running-tests).
 The launcher also runs setup automatically when either build artifact is
-missing. With both artifacts present, a normal launch needs no Python or uv.
+missing or the existing LinkHub binary rejects the launcher's arguments. It
+checks argument compatibility with `serve --help` before opening connections.
+With compatible artifacts present, a normal launch needs no Python or uv.
 
 `run_linkhub_ui.cmd` also:
 

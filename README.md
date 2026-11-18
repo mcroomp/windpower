@@ -212,7 +212,8 @@ On native Linux, install uv, Node.js 24.x/npm, and Rust/Cargo before running
 
 `run_linkhub_ui.cmd --build <connection>` calls `setup.cmd` before launching.
 Without `--build`, the launcher reuses existing artifacts, running setup
-automatically if the LinkHub binary or compiled UI is missing.
+automatically if the LinkHub binary or compiled UI is missing, or the binary
+rejects the launcher's arguments. See the [launcher documentation](linkhub-ui/README.md#live-ui).
 
 Docker image builds:
 

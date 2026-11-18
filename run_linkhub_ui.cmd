@@ -4,6 +4,7 @@ setlocal
 set "REPO=%~dp0"
 set "REPO=%REPO:~0,-1%"
 set "BUILD=0"
+set "SETUP_DONE=0"
 set "CONNECTION="
 set "BAUD="
 set "PORT="
@@ -55,6 +56,9 @@ if not defined CONNECTION (
     exit /b 2
 )
 
+set "BAUD_ARG="
+if /i not "%BAUD%"=="auto" set BAUD_ARG=--baud "%BAUD%"
+
 if "%BUILD%"=="1" goto setup
 if not exist "%REPO%\linkhub\target\release\linkhub.exe" goto setup
 if not exist "%REPO%\linkhub-ui\dist\index.html" goto setup
@@ -66,6 +70,7 @@ if errorlevel 1 (
     echo ERROR: Project setup failed. LinkHub was not started.
     exit /b 1
 )
+set "SETUP_DONE=1"
 
 :verify_build
 if not exist "%REPO%\linkhub\target\release\linkhub.exe" (
@@ -78,12 +83,27 @@ if not exist "%REPO%\linkhub-ui\dist\index.html" (
     exit /b 1
 )
 
+call :run_linkhub --help >nul
+if not errorlevel 1 goto start
+if "%SETUP_DONE%"=="1" (
+    echo ERROR: Built LinkHub does not accept the launcher arguments. LinkHub was not started.
+    exit /b 1
+)
+echo [INFO] Existing LinkHub does not accept the launcher arguments. Rebuilding through setup.cmd ...
+goto setup
+
+:start
 echo [INFO] Starting LinkHub on http://127.0.0.1:%PORT%/
 echo [INFO] LAN access: http port %PORT%, https port %LINKHUB_HTTPS_PORT% (phone cameras)
 echo [INFO] Connection: %CONNECTION%  Baud: %BAUD%
 echo [INFO] Press Ctrl+C to stop.
-set "BAUD_ARG="
-if /i not "%BAUD%"=="auto" set BAUD_ARG=--baud "%BAUD%"
+call :run_linkhub
+
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" echo ERROR: LinkHub exited with code %EXIT_CODE%.
+exit /b %EXIT_CODE%
+
+:run_linkhub
 call "%REPO%\linkhub\target\release\linkhub.exe" serve ^
     --connection "%CONNECTION%" ^
     %BAUD_ARG% ^
@@ -93,8 +113,5 @@ call "%REPO%\linkhub\target\release\linkhub.exe" serve ^
     --data-dir "%REPO%\simulation\logs\linkhub" ^
     --static-dir "%REPO%\linkhub-ui\dist" ^
     --motor-name-prefix BLDC ^
-    --no-cache
-
-set "EXIT_CODE=%ERRORLEVEL%"
-if not "%EXIT_CODE%"=="0" echo ERROR: LinkHub exited with code %EXIT_CODE%.
-exit /b %EXIT_CODE%
+    --no-cache %*
+exit /b %ERRORLEVEL%

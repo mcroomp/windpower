@@ -15,6 +15,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Windows bootstrap")
+pytestmark = pytest.mark.timeout(60)
 
 
 def write_cmd(path: Path, source: str) -> None:
@@ -23,7 +24,7 @@ def write_cmd(path: Path, source: str) -> None:
 
 
 @pytest.fixture
-def bootstrap(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
+def bootstrap(tmp_path: Path, mock_server_exe: Path) -> tuple[Path, Path, Path, dict[str, str]]:
     project = tmp_path / "project with spaces"
     project.mkdir()
     for name in ("setup.cmd", "setup.sh", "run_linkhub_ui.cmd", ".node-version", ".python-version"):
@@ -50,6 +51,7 @@ def bootstrap(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
         "MOCK_CPP_READY": str(tmp_path / "cpp-ready"),
         "MOCK_CPP_ROOT": str(tmp_path / "visual studio"),
         "MOCK_PYTHON": str(project / ".tools" / "python" / "cpython-3.14" / "python.exe"),
+        "MOCK_SERVER_EXE": str(mock_server_exe),
         "UV_NO_SYNC": "1",
     })
     for name in ("LINKHUB_CONNECTION", "LINKHUB_BAUD", "LINKHUB_PORT"):
@@ -101,6 +103,7 @@ def bootstrap(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
         if "%MOCK_FAIL%"=="cargo" exit /b 15
         if not defined MOCK_BUILD_ARTIFACTS exit /b 0
         copy /y "%MOCK_SERVER_EXE%" "%MOCK_PROJECT%\linkhub\target\release\linkhub.exe" >nul
+        if exist "%MOCK_PROJECT%\linkhub\target\release\outdated" del "%MOCK_PROJECT%\linkhub\target\release\outdated"
         mkdir "%MOCK_PROJECT%\linkhub-ui\dist" 2>nul
         echo built>"%MOCK_PROJECT%\linkhub-ui\dist\index.html"
         exit /b 0
@@ -172,7 +175,6 @@ def run_script(
         cwd=project.parent,
         capture_output=True,
         text=True,
-        input="echo MOCK_SERVER %cmdcmdline%\nexit /b 7\n",
         timeout=20,
     )
 
@@ -430,10 +432,43 @@ def test_setup_repairs_an_existing_build_tools_installation_missing_sdk(
     assert any(line.startswith("visual-studio modify ") for line in commands(bootstrap))
 
 
+@pytest.fixture(scope="session")
+def mock_server_exe(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if sys.platform != "win32":
+        pytest.skip("Windows launcher executable")
+    path = tmp_path_factory.mktemp("mock-linkhub") / "linkhub.exe"
+    source = r"""
+        public class MockLinkHub {
+            public static int Main(string[] args) {
+                if (System.Array.IndexOf(args, "--help") >= 0) {
+                    if (System.Environment.GetEnvironmentVariable("MOCK_FAIL") == "server-help"
+                        || System.IO.File.Exists(System.IO.Path.Combine(
+                            System.AppDomain.CurrentDomain.BaseDirectory, "outdated"))) {
+                        System.Console.Error.WriteLine("error: unexpected argument '--https-port' found");
+                        return 2;
+                    }
+                    return 0;
+                }
+                System.Console.WriteLine("MOCK_SERVER " + System.Environment.CommandLine);
+                return 7;
+            }
+        }
+    """
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "$source = [Console]::In.ReadToEnd(); "
+            f"Add-Type -TypeDefinition $source -OutputAssembly '{path}' -OutputType ConsoleApplication",
+        ],
+        input=source, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return path
+
+
 def server_artifacts(bootstrap: tuple[Path, Path, Path, dict[str, str]]) -> None:
     project, _, _, env = bootstrap
-    env["MOCK_SERVER_EXE"] = env["COMSPEC"]
-    shutil.copy2(env["COMSPEC"], project / "linkhub" / "target" / "release" / "linkhub.exe")
+    shutil.copy2(env["MOCK_SERVER_EXE"], project / "linkhub" / "target" / "release" / "linkhub.exe")
     (project / "linkhub-ui" / "dist").mkdir(exist_ok=True)
     (project / "linkhub-ui" / "dist" / "index.html").write_text("built")
 
@@ -460,7 +495,8 @@ def test_launcher_delegates_setup_and_preserves_connection_arguments(
     assert "http://127.0.0.1:9123/" in result.stdout
     assert "Connection: tcp:127.0.0.1:5760  Baud: auto" in result.stdout
     assert "MOCK_SERVER" in result.stdout
-    assert 'serve     --connection "tcp:127.0.0.1:5760"' in result.stdout
+    assert 'serve ' in result.stdout
+    assert '--connection "tcp:127.0.0.1:5760"' in result.stdout
     assert '--port "9123"' in result.stdout
     assert "--baud" not in result.stdout
 
@@ -475,6 +511,28 @@ def test_prebuilt_launcher_does_not_require_python_uv_or_winget(
     assert "Starting LinkHub" in result.stdout
     assert not commands(bootstrap)
     assert "MOCK_SERVER" in result.stdout
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("fails_after_build", [False, True])
+def test_launcher_rebuilds_incompatible_binary_before_starting(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], fails_after_build: bool,
+):
+    installed_tools(bootstrap)
+    server_artifacts(bootstrap)
+    project, _, _, env = bootstrap
+    (project / "linkhub" / "target" / "release" / "outdated").touch()
+    env["MOCK_BUILD_ARTIFACTS"] = "1"
+    if fails_after_build:
+        env["MOCK_FAIL"] = "server-help"
+    result = run_script(bootstrap, "run_linkhub_ui.cmd", "auto")
+    assert result.returncode == (1 if fails_after_build else 7), result.stdout + result.stderr
+    assert "Existing LinkHub does not accept the launcher arguments" in result.stdout
+    assert sum(line.startswith("cargo build ") for line in commands(bootstrap)) == 1
+    assert ("MOCK_SERVER" in result.stdout) is not fails_after_build
+    assert ("Starting LinkHub" in result.stdout) is not fails_after_build
+    if fails_after_build:
+        assert "Built LinkHub does not accept the launcher arguments" in result.stdout
 
 
 @WINDOWS_ONLY
