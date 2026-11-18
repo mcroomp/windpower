@@ -199,6 +199,22 @@ renewal and attempts a stop. A suspended browser must not revive an expired
 lease, and reopening the panel never starts or adopts a running motor.
 UI operation is described in the [motor panel guide](../linkhub-ui/README.md#bluetooth-motor-panel).
 
+The controller journals its state changes as diagnostics with source
+`linkhub.motor` and category `motor`, so they share the MAVLink timeline and
+appear in an experiment's `mavlog.json`:
+
+| Event | Fields | When |
+|---|---|---|
+| `motor.connected` | `device`, `device_id` | A device connects (initialized off) |
+| `motor.command` | `device_id`, `speed_percent`, `direction`, `timeout_ms` | A command starts the motor or changes its target or direction |
+| `motor.stop_requested` | `reason` (`request`, `command_expired`, `disconnect`) | A controlled ramp-down of a running motor begins |
+| `motor.stopped` | | The ramp reaches zero and the safe-stop command is written |
+| `motor.disconnected` | `device`, `error` | A connected device is disconnected (warning when disconnect failed) |
+| `motor.error` | `error` | A Bluetooth operation fails and motor state is unconfirmed (error level) |
+
+Lease renewals that keep the same target and direction are not journaled.
+Query them with `linkhub query <dir> diagnostics --source linkhub.motor`.
+
 Generic records, diagnostics, raw MAVLink frames, and decoded MAVLink messages
 are finite projections over the same cursor space. Every journal-backed GET
 projection accepts an explicit `after` cursor and returns:

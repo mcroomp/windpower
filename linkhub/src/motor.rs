@@ -1,14 +1,19 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+
+use crate::journal::JournalHandle;
+use crate::records::{DiagnosticEvent, DiagnosticLevel, wall_time_ns};
 
 pub const NUS_SERVICE_UUID: &str = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 pub const NUS_RX_UUID: &str = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -269,12 +274,71 @@ impl Default for State {
     }
 }
 
+/// Journals motor state changes (`linkhub query <dir> diagnostics --source
+/// linkhub.motor`). Lease renewals that do not change speed or direction are
+/// not journaled.
+struct MotorEvents {
+    journal: Option<JournalHandle>,
+    sequence: AtomicU64,
+}
+
+impl MotorEvents {
+    async fn emit(&self, level: DiagnosticLevel, event: &str, message: String, fields: Value) {
+        let Value::Object(fields) = fields else {
+            unreachable!("motor event fields are objects");
+        };
+        match level {
+            DiagnosticLevel::Error | DiagnosticLevel::Critical => {
+                tracing::error!(event, ?fields, "{message}");
+            }
+            DiagnosticLevel::Warning => tracing::warn!(event, ?fields, "{message}"),
+            _ => tracing::info!(event, ?fields, "{message}"),
+        }
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let diagnostic = DiagnosticEvent {
+            schema_version: 1,
+            run_id: journal.run_id(),
+            source: "linkhub.motor".to_owned(),
+            source_instance: "linkhub.motor".to_owned(),
+            source_sequence: self.sequence.fetch_add(1, Ordering::Relaxed) + 1,
+            source_wall_time_ns: wall_time_ns(),
+            source_monotonic_ns: None,
+            sim_time_ns: None,
+            sim_time_quality: None,
+            level,
+            category: "motor".to_owned(),
+            event: event.to_owned(),
+            message,
+            correlation_id: None,
+            causation_id: None,
+            fields,
+            related_records: Vec::new(),
+        };
+        if let Err(error) = journal.append_diagnostic(diagnostic).await {
+            tracing::warn!(%error, "could not journal motor diagnostic");
+        }
+    }
+
+    async fn stop_requested(&self, reason: &str) {
+        self.emit(
+            DiagnosticLevel::Info,
+            "motor.stop_requested",
+            format!("Motor ramping to stop ({reason})"),
+            json!({ "reason": reason }),
+        )
+        .await;
+    }
+}
+
 struct Inner<B> {
     operation: AsyncMutex<()>,
     backend: AsyncMutex<B>,
     config: MotorConfig,
     state: Mutex<State>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
+    events: MotorEvents,
 }
 
 pub struct MotorController<B> {
@@ -311,7 +375,11 @@ pub trait MotorService: Send + Sync {
 }
 
 impl<B: MotorBackend> MotorController<B> {
-    pub fn with_backend(backend: B, config: MotorConfig) -> Result<Self, MotorError> {
+    pub fn with_backend(
+        backend: B,
+        config: MotorConfig,
+        journal: Option<JournalHandle>,
+    ) -> Result<Self, MotorError> {
         config.validate()?;
         Ok(Self {
             inner: Arc::new(Inner {
@@ -320,6 +388,10 @@ impl<B: MotorBackend> MotorController<B> {
                 config,
                 state: Mutex::new(State::default()),
                 supervisor: Mutex::new(None),
+                events: MotorEvents {
+                    journal,
+                    sequence: AtomicU64::new(0),
+                },
             }),
         })
     }
@@ -372,11 +444,11 @@ impl<B: MotorBackend> MotorController<B> {
                 .await
             {
                 Ok(device) => device,
-                Err(error) => return self.record_error(error),
+                Err(error) => return self.record_error(error).await,
             };
             if let Err(error) = backend.write(SAFE_STOP_COMMAND).await {
                 let _ = backend.disconnect().await;
-                return self.record_error(error);
+                return self.record_error(error).await;
             }
             device
         };
@@ -385,10 +457,19 @@ impl<B: MotorBackend> MotorController<B> {
             let mut state = lock(&self.inner.state);
             state.connected = true;
             state.device = Some(result.name.clone());
-            state.device_id = Some(result.id);
+            state.device_id = Some(result.id.clone());
             mark_stopped(&mut state);
             state.error = None;
         }
+        self.inner
+            .events
+            .emit(
+                DiagnosticLevel::Info,
+                "motor.connected",
+                format!("Bluetooth motor {} connected", result.name),
+                json!({ "device": result.name, "device_id": result.id }),
+            )
+            .await;
         self.start_supervisor();
         Ok(result.name)
     }
@@ -444,31 +525,62 @@ impl<B: MotorBackend> MotorController<B> {
         if lock(&self.inner.state).device_id.as_deref() != Some(device_id) {
             return Err(MotorError::DeviceChanged);
         }
-        let mut state = lock(&self.inner.state);
-        if !state.connected {
-            return Err(MotorError::Disconnected);
+        let changed = {
+            let mut state = lock(&self.inner.state);
+            if !state.connected {
+                return Err(MotorError::Disconnected);
+            }
+            if state.stop_epoch != epoch || state.stopping {
+                return Err(MotorError::Stopping);
+            }
+            if state
+                .expires_at
+                .is_some_and(|expiry| Instant::now() >= expiry)
+            {
+                Err(begin_stop(&mut state))
+            } else {
+                let changed = !state.running
+                    || state.profile.target != speed_percent
+                    || state.direction != direction;
+                state.running = true;
+                state.profile.retarget(speed_percent);
+                state.direction = direction;
+                state.expires_at = Some(Instant::now() + Duration::from_millis(timeout_ms));
+                state.error = None;
+                Ok(changed)
+            }
+        };
+        match changed {
+            Err(began) => {
+                if began {
+                    self.inner.events.stop_requested("command_expired").await;
+                }
+                Err(MotorError::Stopping)
+            }
+            Ok(true) => {
+                self.inner
+                    .events
+                    .emit(
+                        DiagnosticLevel::Info,
+                        "motor.command",
+                        format!("Motor commanded to {speed_percent}%"),
+                        json!({
+                            "device_id": device_id,
+                            "speed_percent": speed_percent,
+                            "direction": direction,
+                            "timeout_ms": timeout_ms,
+                        }),
+                    )
+                    .await;
+                Ok(())
+            }
+            Ok(false) => Ok(()),
         }
-        if state.stop_epoch != epoch || state.stopping {
-            return Err(MotorError::Stopping);
-        }
-        if state
-            .expires_at
-            .is_some_and(|expiry| Instant::now() >= expiry)
-        {
-            begin_stop(&mut state);
-            return Err(MotorError::Stopping);
-        }
-        state.running = true;
-        state.profile.retarget(speed_percent);
-        state.direction = direction;
-        state.expires_at = Some(Instant::now() + Duration::from_millis(timeout_ms));
-        state.error = None;
-        Ok(())
     }
 
     pub async fn stop(&self) -> Result<(), MotorError> {
         let _operation = self.inner.operation.lock().await;
-        self.smooth_stop().await
+        self.smooth_stop("request").await
     }
 
     pub async fn reconnect(&self) -> Result<String, MotorError> {
@@ -482,11 +594,14 @@ impl<B: MotorBackend> MotorController<B> {
         self.disconnect().await
     }
 
-    async fn smooth_stop(&self) -> Result<(), MotorError> {
+    async fn smooth_stop(&self, reason: &str) -> Result<(), MotorError> {
         if !lock(&self.inner.state).connected {
             return Err(MotorError::Disconnected);
         }
-        begin_stop(&mut lock(&self.inner.state));
+        let began = begin_stop(&mut lock(&self.inner.state));
+        if began {
+            self.inner.events.stop_requested(reason).await;
+        }
         while lock(&self.inner.state).running {
             tokio::time::sleep(PROFILE_INTERVAL).await;
             advance_motor(&self.inner, PROFILE_INTERVAL).await?;
@@ -495,8 +610,12 @@ impl<B: MotorBackend> MotorController<B> {
     }
 
     async fn disconnect(&self) -> Result<(), MotorError> {
-        if lock(&self.inner.state).connected {
-            self.smooth_stop().await?;
+        let (was_connected, device) = {
+            let state = lock(&self.inner.state);
+            (state.connected, state.device.clone())
+        };
+        if was_connected {
+            self.smooth_stop("disconnect").await?;
         }
         self.stop_supervisor();
         let result = self.inner.backend.lock().await.disconnect().await;
@@ -508,11 +627,26 @@ impl<B: MotorBackend> MotorController<B> {
                 state.error = Some(error.to_string());
             }
         }
+        if was_connected {
+            let (level, error) = match &result {
+                Ok(()) => (DiagnosticLevel::Info, None),
+                Err(error) => (DiagnosticLevel::Warning, Some(error.to_string())),
+            };
+            self.inner
+                .events
+                .emit(
+                    level,
+                    "motor.disconnected",
+                    "Bluetooth motor disconnected".to_owned(),
+                    json!({ "device": device, "error": error }),
+                )
+                .await;
+        }
         result
     }
 
-    fn record_error<T>(&self, error: MotorError) -> Result<T, MotorError> {
-        record_motor_error(&self.inner, &error);
+    async fn record_error<T>(&self, error: MotorError) -> Result<T, MotorError> {
+        record_motor_error(&self.inner, &error).await;
         Err(error)
     }
 
@@ -587,7 +721,9 @@ fn mark_stopped(state: &mut State) {
     state.stopping = false;
 }
 
-fn begin_stop(state: &mut State) {
+/// Returns whether this call started ramping a running motor down.
+fn begin_stop(state: &mut State) -> bool {
+    let began = state.running && !state.stopping;
     if !state.stopping {
         state.stop_epoch += 1;
         state.stopping = true;
@@ -597,33 +733,42 @@ fn begin_stop(state: &mut State) {
     if !state.running {
         state.stopping = false;
     }
+    began
 }
 
-fn record_motor_error<B>(inner: &Inner<B>, error: &MotorError) {
-    let mut state = lock(&inner.state);
-    state.connected = false;
-    state.expires_at = None;
-    state.error = Some(error.to_string());
-    tracing::error!(%error, "Bluetooth motor state is unconfirmed");
+async fn record_motor_error<B>(inner: &Inner<B>, error: &MotorError) {
+    {
+        let mut state = lock(&inner.state);
+        state.connected = false;
+        state.expires_at = None;
+        state.error = Some(error.to_string());
+    }
+    inner
+        .events
+        .emit(
+            DiagnosticLevel::Error,
+            "motor.error",
+            format!("Bluetooth motor state is unconfirmed: {error}"),
+            json!({ "error": error.to_string() }),
+        )
+        .await;
 }
 
 async fn advance_motor<B: MotorBackend>(
     inner: &Inner<B>,
     step: Duration,
 ) -> Result<(), MotorError> {
-    let (command, finished) = {
+    let (command, finished, expired) = {
         let mut state = lock(&inner.state);
         if !state.connected {
             return Err(MotorError::Disconnected);
         }
-        if state
+        let expired = state
             .expires_at
             .is_some_and(|expiry| Instant::now() >= expiry)
-        {
-            begin_stop(&mut state);
-        }
+            && begin_stop(&mut state);
         if !state.running {
-            (None, false)
+            (None, false, expired)
         } else {
             // Never catch up after a stalled task/link with a large command jump.
             let now = Instant::now();
@@ -643,9 +788,12 @@ async fn advance_motor<B: MotorBackend>(
                 None
             };
             state.speed_percent = speed;
-            (command, finished)
+            (command, finished, expired)
         }
     };
+    if expired {
+        inner.events.stop_requested("command_expired").await;
+    }
     let result = async {
         let mut backend = inner.backend.lock().await;
         if let Some(command) = command {
@@ -659,11 +807,20 @@ async fn advance_motor<B: MotorBackend>(
     }
     .await;
     if let Err(error) = result {
-        record_motor_error(inner, &error);
+        record_motor_error(inner, &error).await;
         return Err(error);
     }
     if finished {
         mark_stopped(&mut lock(&inner.state));
+        inner
+            .events
+            .emit(
+                DiagnosticLevel::Info,
+                "motor.stopped",
+                "Motor stopped".to_owned(),
+                json!({}),
+            )
+            .await;
     }
     Ok(())
 }
@@ -867,8 +1024,11 @@ pub use bluetooth::BtleplugBackend;
 pub type BleMotorController = MotorController<BtleplugBackend>;
 
 impl MotorController<BtleplugBackend> {
-    pub async fn bluetooth(config: MotorConfig) -> Result<Self, MotorError> {
-        Self::with_backend(BtleplugBackend::new().await?, config)
+    pub async fn bluetooth(
+        config: MotorConfig,
+        journal: JournalHandle,
+    ) -> Result<Self, MotorError> {
+        Self::with_backend(BtleplugBackend::new().await?, config, Some(journal))
     }
 }
 
@@ -941,7 +1101,7 @@ mod tests {
             ..MotorConfig::default()
         };
         (
-            MotorController::with_backend(backend, config).unwrap(),
+            MotorController::with_backend(backend, config, None).unwrap(),
             calls,
         )
     }
@@ -1221,7 +1381,7 @@ mod tests {
         let backend = MockBackend::default();
         let failures = backend.fail_writes.clone();
         let calls = backend.calls.clone();
-        let motor = MotorController::with_backend(backend, MotorConfig::default()).unwrap();
+        let motor = MotorController::with_backend(backend, MotorConfig::default(), None).unwrap();
         motor.connect().await.unwrap();
         motor
             .set_running("motor-1", 100, MotorDirection::Forward, 10_000)
@@ -1441,6 +1601,90 @@ mod tests {
         );
         assert_eq!(lock(&calls).len(), before);
         assert!(!motor.status().running);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn journals_state_changes_but_not_lease_renewals() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let (journal, task) = crate::journal::JournalHandle::start(
+            crate::journal::JournalConfig::for_directory(directory.path(), uuid::Uuid::new_v4()),
+        )
+        .await
+        .unwrap();
+        let backend = MockBackend::default();
+        let failures = backend.fail_writes.clone();
+        let motor =
+            MotorController::with_backend(backend, MotorConfig::default(), Some(journal.clone()))
+                .unwrap();
+        motor.connect().await.unwrap();
+        for speed in [20, 20, 20, 40] {
+            motor
+                .set_running("motor-1", speed, MotorDirection::Forward, 1_000)
+                .await
+                .unwrap();
+        }
+        elapse(4_000).await;
+        motor
+            .set_running("motor-1", 30, MotorDirection::Forward, 10_000)
+            .await
+            .unwrap();
+        motor.stop().await.unwrap();
+        motor
+            .set_running("motor-1", 30, MotorDirection::Forward, 10_000)
+            .await
+            .unwrap();
+        motor.close().await.unwrap();
+        motor.connect().await.unwrap();
+        *lock(&failures) = true;
+        motor
+            .set_running("motor-1", 30, MotorDirection::Forward, 10_000)
+            .await
+            .unwrap();
+        elapse(600).await;
+
+        let events: Vec<_> = journal
+            .records_after(0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| match record.payload {
+                crate::records::RecordPayload::Diagnostic(event) => Some(event),
+                _ => None,
+            })
+            .collect();
+        let names: Vec<_> = events.iter().map(|event| event.event.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "motor.connected",
+                "motor.command",
+                "motor.command",
+                "motor.stop_requested",
+                "motor.stopped",
+                "motor.command",
+                "motor.stop_requested",
+                "motor.stopped",
+                "motor.command",
+                "motor.stop_requested",
+                "motor.stopped",
+                "motor.disconnected",
+                "motor.connected",
+                "motor.command",
+                "motor.error",
+            ]
+        );
+        let reasons: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "motor.stop_requested")
+            .map(|event| event.fields["reason"].as_str().unwrap())
+            .collect();
+        assert_eq!(reasons, ["command_expired", "request", "disconnect"]);
+        assert_eq!(events[2].fields["speed_percent"], 40);
+        assert_eq!(events[2].fields["direction"], "forward");
+        assert_eq!(events[14].level, DiagnosticLevel::Error);
+        assert!(events.iter().all(|event| event.source == "linkhub.motor"));
+        journal.shutdown().await.unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]
