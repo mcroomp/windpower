@@ -279,6 +279,32 @@ aborts the sequence instead of silently waiting out its timeout. Do not pass
 `expected_generation` for single, one-shot reads -- they have no state to
 protect.
 
+### Experiments
+
+`linkhub/src/experiment.rs` owns at most one active experiment per service.
+`POST /v1/experiment/start` creates the experiment directory
+`<data-dir>/experiments/<UTC>_<name-slug>_<id8>/` and writes
+`experiment.txt` there with the entered name and description, the UTC start
+time, the experiment ID and the run ID. It then records the journal cursor and
+journals an `experiment.started` diagnostic marker. If the directory or text
+file cannot be created, start fails and no experiment begins. The returned
+experiment includes `directory`. `POST /v1/experiment/stop` journals
+`experiment.stopped`, then writes every journal record between the two
+markers to `mavlog.json` in the experiment directory. The file includes
+MAVLink rx/tx records and diagnostics. LinkHub writes a `.partial` file first
+and then renames it, so a crash cannot leave a truncated file under the final
+name. The file shape is
+`{schema_version: 1, experiment: {id, name, description, run_id, started_at_ns,
+stopped_at_ns, start_cursor, end_cursor}, records: [...], record_count}`, and
+each record uses the same JSON encoding as `GET /v1/mavlink/messages`.
+Experiment state lives in memory: restarting the service drops an active
+experiment without writing `mavlog.json`. The journal still holds the records.
+
+The server only bounds the time window. It does not enforce arm or motor
+gating, and it does not stop actuators. The UI's experiment controller
+does both before calling stop; see
+[LinkHub UI experiments](../linkhub-ui/README.md#experiments).
+
 ## Generated protocol boundary
 
 `linkhub-clientgen` (`linkhub/clientgen`) generates the client-facing types

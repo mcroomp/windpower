@@ -1,6 +1,7 @@
 import type { LinkHubApi } from "./api";
 import { CommandRunner } from "./commands";
 import { browserConfigProvider } from "./config";
+import type { ExperimentController } from "./experiment";
 import type { PassiveController } from "./passive";
 import type { TelemetryStore } from "./telemetry";
 
@@ -20,11 +21,13 @@ export class Terminal {
     api: LinkHubApi,
     telemetry: TelemetryStore,
     private readonly passive: PassiveController,
+    experiment: Pick<ExperimentController, "requireActive" | "refresh" | "start" | "stop">,
   ) {
     this.runner = new CommandRunner(
       api,
       telemetry,
       passive,
+      experiment,
       (message, kind) => this.write(message, kind),
       browserConfigProvider,
     );
@@ -41,7 +44,7 @@ export class Terminal {
     });
     input.addEventListener("keydown", (event) => this.keyDown(event));
     this.write("RAWES LinkHub UI");
-    this.write("Commands: status, config check|apply, run passive|collective [options], compass calibrate|accept|cancel, reboot, stop, help");
+    this.write("Commands: status, experiment start|stop|status, config check|apply, run passive|collective [options], compass calibrate|accept|cancel, reboot, stop, help");
     input.focus();
   }
 

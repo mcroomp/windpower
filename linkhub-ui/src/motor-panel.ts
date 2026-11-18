@@ -1,4 +1,5 @@
 import type { LinkHubApi } from "./api";
+import type { ExperimentController } from "./experiment";
 import type { MotorStatus } from "./types";
 
 const LEASE_MS = 2_000;
@@ -23,6 +24,8 @@ export class MotorPanel {
   private readonly onButton: HTMLButtonElement;
   private readonly offButton: HTMLButtonElement;
   private readonly state: HTMLElement;
+  private readonly experimentHint: HTMLElement;
+  private readonly disposeExperiment: () => void;
   private readonly hide = () => {
     if (document.hidden && this.ownedDevice) void this.stop();
   };
@@ -37,6 +40,7 @@ export class MotorPanel {
     root: HTMLElement,
     private readonly api: Pick<LinkHubApi, "motorStatus" | "motorDevices" | "connectMotor" | "runMotor" | "stopMotor">,
     private readonly write: (message: string, kind?: "info" | "error") => void,
+    private readonly experiment: Pick<ExperimentController, "running" | "requireActive" | "onChange">,
   ) {
     root.innerHTML = `
       <div class="motor-head"><strong>BLUETOOTH ROTOR MOTOR</strong>
@@ -54,6 +58,7 @@ export class MotorPanel {
           <output data-role="speed-value">10%</output></label>
         <button data-role="on" type="button">Turn on</button>
       </div>
+      <p data-role="experiment-hint" class="motor-experiment-hint">Start an experiment to enable the motor.</p>
       <small>Uses Bluetooth on the LinkHub server. Connecting leaves the motor off.
         A 2 s lease is renewed every 500 ms while this visible panel owns the motor.
         All speed changes use a server-side smooth profile (5 s full scale).
@@ -71,6 +76,15 @@ export class MotorPanel {
     this.onButton = element("on");
     this.offButton = element("off");
     this.state = element("state");
+    this.experimentHint = element("experiment-hint");
+    this.disposeExperiment = experiment.onChange(() => {
+      // Stopping the experiment owns the motor ramp-down; stop renewing the lease.
+      if (!experiment.running && this.ownedDevice) {
+        this.ownedDevice = null;
+        this.revision += 1;
+      }
+      this.render();
+    });
     this.scanButton.addEventListener("click", () => void this.scan());
     this.connectButton.addEventListener("click", () => void this.connect());
     this.device.addEventListener("change", () => this.render());
@@ -103,6 +117,7 @@ export class MotorPanel {
 
   dispose(): void {
     this.close();
+    this.disposeExperiment();
     document.removeEventListener("visibilitychange", this.hide);
     window.removeEventListener("pagehide", this.leave);
     window.removeEventListener("keydown", this.escape);
@@ -133,6 +148,7 @@ export class MotorPanel {
     const revision = this.revision;
     return this.run(async () => {
       if (revision !== this.revision) return;
+      await this.experiment.requireActive("Motor turn on");
       const status = await this.api.motorStatus();
       this.update(status);
       if (!this.opened || document.hidden) throw new Error("Keep the motor panel visible to turn on");
@@ -162,6 +178,7 @@ export class MotorPanel {
   private async sendRun(revision: number, initial = false): Promise<void> {
     const started = performance.now();
     if (revision !== this.revision || !this.ownedDevice) return;
+    if (!this.experiment.running) throw new Error("Experiment is not running; motor lease ended");
     if (!this.opened || document.hidden || (!initial && started >= this.leaseDeadline)) {
       throw new Error("Motor lease ended; turn on explicitly to restart");
     }
@@ -257,7 +274,8 @@ export class MotorPanel {
     this.scanButton.disabled = !available || busy || running;
     this.device.disabled = !available || busy || running;
     this.connectButton.disabled = !available || busy || running || !this.device.value;
-    this.onButton.disabled = !connected || busy || running || Boolean(this.error)
+    this.experimentHint.hidden = this.experiment.running;
+    this.onButton.disabled = !this.experiment.running || !connected || busy || running || Boolean(this.error)
       || this.device.value !== (available ? status.device_id : null) || Number(this.speed.value) === 0;
     this.offButton.disabled = !available;
     this.speed.disabled = !connected || busy || (running && !this.ownedDevice);

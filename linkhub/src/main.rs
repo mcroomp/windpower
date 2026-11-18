@@ -216,6 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     journal.clone(),
                     Some(link),
                     motor.clone(),
+                    Some(data_dir.join("experiments")),
                     static_dir,
                     no_cache,
                 ),

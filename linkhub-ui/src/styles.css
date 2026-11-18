@@ -213,6 +213,120 @@ h2 {
   background: rgba(151, 104, 31, 0.15);
 }
 
+.terminal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.experiment-button {
+  min-width: 170px;
+  padding: 9px 16px;
+  border: 2px solid;
+  border-radius: 8px;
+  font: 800 14px ui-monospace, "Cascadia Code", monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.experiment-button.start {
+  border-color: #3fbf8f;
+  color: #06120d;
+  background: #3fcf98;
+  box-shadow: 0 0 18px rgba(63, 207, 152, 0.35);
+}
+
+.experiment-button.stop {
+  border-color: #ff6b78;
+  color: #fff;
+  background: #c8283a;
+  box-shadow: 0 0 18px rgba(200, 40, 58, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+
+.experiment-button.stopping {
+  border-color: #aa8139;
+  color: #f0c36b;
+  background: rgba(151, 104, 31, 0.25);
+  cursor: wait;
+}
+
+.experiment-button:disabled {
+  opacity: 0.85;
+}
+
+.experiment-dialog {
+  width: min(520px, 92vw);
+  padding: 20px 22px;
+  border: 1px solid #40506b;
+  border-radius: 12px;
+  color: #e8edf5;
+  background: #0f1828;
+}
+
+.experiment-dialog::backdrop {
+  background: rgba(3, 6, 12, 0.7);
+}
+
+.experiment-dialog p {
+  color: #aebdd2;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.experiment-dialog label {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  color: #7591b8;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.experiment-dialog input,
+.experiment-dialog textarea {
+  padding: 8px 10px;
+  border: 1px solid #40506b;
+  border-radius: 6px;
+  color: #e8edf5;
+  background: #080d16;
+  font: 14px Inter, ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: normal;
+  text-transform: none;
+  resize: vertical;
+}
+
+.experiment-error {
+  color: #f18a94 !important;
+}
+
+.experiment-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.experiment-dialog-actions .experiment-button {
+  min-width: 110px;
+}
+
+.experiment-dialog-actions .experiment-button.cancel {
+  border-color: #40506b;
+  color: #c7d3e6;
+  background: transparent;
+}
+
+.motor-experiment-hint {
+  margin: 6px 0;
+  color: #f0c36b;
+  font-weight: 600;
+}
+
 #scene {
   flex: 1 1 0;
   width: 100%;

@@ -1,6 +1,7 @@
 import { LinkHubApi } from "./api";
 import { CommandRunner, type CommandOutputKind } from "./commands";
 import { nodeConfigProvider } from "./config-node";
+import { ExperimentController } from "./experiment";
 import { PassiveController, type PassivePhase } from "./passive";
 import { TelemetryStore } from "./telemetry";
 
@@ -54,10 +55,12 @@ async function main(): Promise<void> {
       }
     },
   );
-  const runner = new CommandRunner(api, telemetry, passive, write, nodeConfigProvider);
+  const experiment = new ExperimentController(api, telemetry, passive, write);
+  const runner = new CommandRunner(api, telemetry, passive, experiment, write, nodeConfigProvider);
   const needsTelemetry = command[0] === "status"
     || (command[0] === "run" && (command[1] === "passive" || command[1] === "collective"))
-    || (command[0] === "compass" && command[1] === "calibrate");
+    || (command[0] === "compass" && command[1] === "calibrate")
+    || (command[0] === "experiment" && command[1] === "stop");
 
   const stop = () => {
     const failed = (error: unknown) => {

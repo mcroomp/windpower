@@ -28,6 +28,24 @@ export type MotorStatus = { available: false } | {
   error: string | null;
 };
 
+export interface ExperimentInfo {
+  id: string;
+  name: string;
+  description: string;
+  run_id: string;
+  started_at_ns: number;
+  start_cursor: string;
+  directory: string;
+}
+
+export interface SavedExperiment {
+  experiment: ExperimentInfo;
+  stopped_at_ns: number;
+  end_cursor: string;
+  record_count: number;
+  path: string;
+}
+
 export interface LinkHubStatus {
   connected: boolean;
   ready: boolean;

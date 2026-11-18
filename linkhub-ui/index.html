@@ -79,7 +79,11 @@
             <p class="eyebrow">CONTROL</p>
             <h2>Terminal</h2>
           </div>
-          <div id="operation-state" class="badge">idle</div>
+          <div class="terminal-header-actions">
+            <div id="operation-state" class="badge">idle</div>
+            <button id="experiment-button" class="experiment-button start" type="button"
+              title="Arm and motor actions are disabled until an experiment is started">▶ Start Experiment</button>
+          </div>
         </header>
         <div id="terminal-output" role="log" aria-live="polite"></div>
         <form id="terminal-form">
@@ -95,6 +99,25 @@
         </form>
       </section>
     </main>
+    <dialog id="experiment-dialog" class="experiment-dialog" aria-labelledby="experiment-dialog-title">
+      <form id="experiment-form" method="dialog">
+        <h2 id="experiment-dialog-title">Start experiment</h2>
+        <p>Arming and the bench motor are enabled only while an experiment runs.
+          Stopping ramps the motor down, waits for the rotor to stop, applies safe-off,
+          and saves the MAVLink log as JSON.</p>
+        <label>Name
+          <input id="experiment-name" name="name" required maxlength="200" autocomplete="off"
+            placeholder="e.g. Passive spin-up 30%"></label>
+        <label>What is being tested
+          <textarea id="experiment-description" name="description" rows="5" maxlength="10000"
+            placeholder="Goal, configuration, expected result…"></textarea></label>
+        <p id="experiment-error" class="experiment-error" role="alert" hidden></p>
+        <div class="experiment-dialog-actions">
+          <button id="experiment-cancel" class="experiment-button cancel" type="button">Cancel</button>
+          <button id="experiment-confirm" class="experiment-button start" type="submit">Start</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

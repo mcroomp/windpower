@@ -21,12 +21,14 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 use uuid::Uuid;
 
 use crate::{
+    experiment::{ExperimentError, ExperimentStore},
     journal::{JournalError, JournalHandle, TimeWindow},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
     operations::MavlinkOperations,
     records::{
-        DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock, wall_time_ns,
+        DiagnosticEvent, DiagnosticLevel, JournalRecord, RecordPayload, SimClock, format_cursor,
+        wall_time_ns,
     },
     transfer::{CancelResult, ContentError, TransferInfo, TransferRegistry},
 };
@@ -37,6 +39,7 @@ pub struct AppState {
     link: Option<MavlinkLinkHandle>,
     operations: Option<MavlinkOperations>,
     motor: Option<MotorHandle>,
+    experiments: Option<Arc<ExperimentStore>>,
 }
 
 fn collapse_state_records(records: Vec<JournalRecord>) -> Vec<JournalRecord> {
@@ -75,6 +78,8 @@ enum ApiError {
     Operation(#[from] OperationError),
     #[error(transparent)]
     Motor(#[from] MotorError),
+    #[error(transparent)]
+    Experiment(#[from] ExperimentError),
     /// The caller's `expected_generation` no longer matches LinkHub's live
     /// generation: the service restarted, the serial link reconnected, or
     /// the vehicle rebooted since the caller captured its baseline. A
@@ -122,6 +127,18 @@ impl IntoResponse for ApiError {
                 (StatusCode::CONFLICT, "motor_device_changed")
             }
             Self::Motor(_) => (StatusCode::SERVICE_UNAVAILABLE, "motor_unavailable"),
+            Self::Experiment(
+                ExperimentError::MissingName
+                | ExperimentError::NameTooLong
+                | ExperimentError::DescriptionTooLong,
+            ) => (StatusCode::BAD_REQUEST, "invalid_experiment"),
+            Self::Experiment(ExperimentError::AlreadyRunning(_)) => {
+                (StatusCode::CONFLICT, "experiment_running")
+            }
+            Self::Experiment(ExperimentError::NotRunning) => {
+                (StatusCode::CONFLICT, "experiment_not_running")
+            }
+            Self::Experiment(_) => (StatusCode::INTERNAL_SERVER_ERROR, "experiment_save_failed"),
             Self::GenerationChanged { .. } => (StatusCode::CONFLICT, "generation_changed"),
         };
         let mut body = json!({
@@ -158,19 +175,23 @@ pub fn router_with_motor(
     link: Option<MavlinkLinkHandle>,
     motor: Option<MotorHandle>,
 ) -> Router {
-    router_with_motor_and_static(journal, link, motor, None, false)
+    router_with_motor_and_static(journal, link, motor, None, None, false)
 }
 
+/// `experiments_dir` enables `/v1/experiment`; saved logs are written there.
 pub fn router_with_motor_and_static(
     journal: JournalHandle,
     link: Option<MavlinkLinkHandle>,
     motor: Option<MotorHandle>,
+    experiments_dir: Option<PathBuf>,
     static_dir: Option<PathBuf>,
     no_cache: bool,
 ) -> Router {
     let operations = link
         .clone()
         .map(|link| MavlinkOperations::new(link, TransferRegistry::new(journal.clone())));
+    let experiments =
+        experiments_dir.map(|directory| Arc::new(ExperimentStore::new(directory, journal.clone())));
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
@@ -238,12 +259,19 @@ pub fn router_with_motor_and_static(
         .route("/v1/motor/connect", axum::routing::post(connect_motor))
         .route("/v1/motor/stop", axum::routing::post(stop_motor))
         .route("/v1/motor/reconnect", axum::routing::post(reconnect_motor))
+        .route("/v1/experiment", get(experiment_status))
+        .route(
+            "/v1/experiment/start",
+            axum::routing::post(start_experiment),
+        )
+        .route("/v1/experiment/stop", axum::routing::post(stop_experiment))
         .route("/v1/mavlink/status", get(mavlink_status))
         .with_state(Arc::new(AppState {
             journal,
             link,
             operations,
             motor,
+            experiments,
         }));
     let router = match static_dir {
         Some(directory) => {
@@ -821,7 +849,7 @@ async fn read_record_batch(
             cursor = cursor.max(record.sequence);
             next_clock = record.sim_clock;
             if filter.matches(&record) {
-                records.push(encode_record(&record));
+                records.push(record.to_api_value());
                 if records.len() == limit {
                     break;
                 }
@@ -850,44 +878,6 @@ async fn read_record_batch(
             }
         }
     }
-}
-
-fn encode_record(record: &JournalRecord) -> Value {
-    let (kind, data) = match &record.payload {
-        RecordPayload::Diagnostic(event) => (
-            "diagnostic.event",
-            serde_json::to_value(event).expect("DiagnosticEvent is serializable"),
-        ),
-        RecordPayload::MavlinkFrame(frame) => (
-            match frame.direction {
-                crate::records::Direction::Rx => "mavlink.rx",
-                crate::records::Direction::Tx => "mavlink.tx",
-            },
-            json!({
-                "link_id": frame.link_id,
-                "direction": frame.direction,
-                "protocol_version": frame.protocol_version,
-                "sequence": frame.sequence,
-                "system_id": frame.system_id,
-                "component_id": frame.component_id,
-                "message_id": frame.message_id,
-                "message_name": frame.message_name,
-                "fields": frame.fields,
-                "signed": frame.signed,
-                "frame_base64": BASE64.encode(&frame.frame),
-            }),
-        ),
-    };
-    json!({
-        "schema_version": record.schema_version,
-        "sequence": record.sequence,
-        "cursor": format_cursor(record.sequence),
-        "ingest_time_ns": record.ingest_time_ns,
-        "correlation_id": record.correlation_id,
-        "sim_clock": record.sim_clock,
-        "kind": kind,
-        "data": data,
-    })
 }
 
 fn encode_telemetry_record(record: &JournalRecord) -> Option<Value> {
@@ -1441,6 +1431,43 @@ async fn reconnect_motor(State(state): State<Arc<AppState>>) -> Result<Json<Valu
     Ok(Json(status))
 }
 
+async fn experiment_status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        json!({ "active": require_experiments(&state)?.active() }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct StartExperimentRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+
+async fn start_experiment(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<StartExperimentRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let active = require_experiments(&state)?
+        .start(&request.name, &request.description)
+        .await?;
+    Ok(Json(json!({ "active": active })))
+}
+
+async fn stop_experiment(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let saved = require_experiments(&state)?.stop().await?;
+    Ok(Json(
+        serde_json::to_value(saved).expect("saved experiment is serializable"),
+    ))
+}
+
+fn require_experiments(state: &AppState) -> Result<&ExperimentStore, ApiError> {
+    state
+        .experiments
+        .as_deref()
+        .ok_or_else(|| ApiError::NotFound("Experiment logging is not configured".to_owned()))
+}
+
 async fn set_message_rates(
     State(state): State<Arc<AppState>>,
     Json(rates): Json<serde_json::Map<String, Value>>,
@@ -1569,10 +1596,6 @@ async fn send_mavlink_frame(
             "after_cursor": format_cursor(sequence),
         })),
     ))
-}
-
-fn format_cursor(sequence: u64) -> String {
-    format!("v1:{sequence}")
 }
 
 fn parse_cursor(value: Option<&str>) -> Result<u64, ApiError> {
@@ -1964,6 +1987,7 @@ mod tests {
             journal.clone(),
             None,
             None,
+            None,
             Some(static_dir.clone()),
             true,
         );
@@ -2005,11 +2029,17 @@ mod tests {
         assert_eq!(script.headers()[CONTENT_TYPE], "text/javascript");
         assert_eq!(api.status(), StatusCode::OK);
 
-        let cached =
-            router_with_motor_and_static(journal.clone(), None, None, Some(static_dir), false)
-                .oneshot(Request::get("/").body(Body::empty()).expect("request"))
-                .await
-                .expect("response");
+        let cached = router_with_motor_and_static(
+            journal.clone(),
+            None,
+            None,
+            None,
+            Some(static_dir),
+            false,
+        )
+        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
         assert!(cached.headers().get(CACHE_CONTROL).is_none());
 
         journal.shutdown().await.expect("shutdown");

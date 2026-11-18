@@ -9,6 +9,7 @@ class FakeOption {
 class Element extends EventTarget {
   innerHTML = "";
   textContent = "";
+  hidden = false;
   private disabledValue = false;
   disabledChanges: boolean[] = [];
   get disabled(): boolean { return this.disabledValue; }
@@ -26,7 +27,26 @@ class Element extends EventTarget {
   }
 }
 
-function setup(initial: MotorStatus = connected()) {
+function fakeExperiment(running: boolean) {
+  const listeners = new Set<() => void>();
+  const experiment = {
+    running,
+    requireActive: vi.fn(async (action: string) => {
+      if (!experiment.running) throw new Error(`${action} refused: start an experiment first`);
+    }),
+    onChange: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    set(value: boolean) {
+      experiment.running = value;
+      listeners.forEach((listener) => listener());
+    },
+  };
+  return experiment;
+}
+
+function setup(initial: MotorStatus = connected(), experimentRunning = true) {
   const elements = new Map<string, Element>();
   const root = {
     innerHTML: "",
@@ -57,11 +77,12 @@ function setup(initial: MotorStatus = connected()) {
     stopMotor: vi.fn(async () => { status = connected(); return status; }),
   };
   const write = vi.fn();
-  const panel = new MotorPanel(document.createElement("section"), api, write);
+  const experiment = fakeExperiment(experimentRunning);
+  const panel = new MotorPanel(document.createElement("section"), api, write, experiment);
   const speed = elements.get("speed")!;
   speed.value = "10";
   panel.open();
-  return { panel, api, elements, doc, write, speed, setStatus: (value: MotorStatus) => { status = value; } };
+  return { panel, api, elements, doc, write, speed, experiment, setStatus: (value: MotorStatus) => { status = value; } };
 }
 
 function connected(): Extract<MotorStatus, { available: true }> {
@@ -241,6 +262,26 @@ describe("Bluetooth motor panel", () => {
     await panel.turnOn();
     expect(api.runMotor).not.toHaveBeenCalled();
     expect(write).toHaveBeenCalledWith("Motor: Motor is already running; stop it before taking control", "error");
+    panel.dispose();
+  });
+
+  it("refuses to turn on without an active experiment", async () => {
+    const { panel, api, elements, write } = setup(connected(), false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(elements.get("on")!.disabled).toBe(true);
+    expect(elements.get("experiment-hint")!.hidden).toBe(false);
+    await panel.turnOn();
+    expect(api.runMotor).not.toHaveBeenCalled();
+    expect(write).toHaveBeenCalledWith("Motor: Motor turn on refused: start an experiment first", "error");
+    panel.dispose();
+  });
+
+  it("stops renewing the lease once the experiment stops", async () => {
+    const { panel, api, experiment } = setup();
+    await panel.turnOn();
+    experiment.set(false);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(api.runMotor).toHaveBeenCalledTimes(1);
     panel.dispose();
   });
 

@@ -1,11 +1,13 @@
 import type {
   CommandResult,
+  ExperimentInfo,
   JsonObject,
   LinkHubStatus,
   MessageBatch,
   MotorDevice,
   MotorStatus,
   ParameterResult,
+  SavedExperiment,
   ServiceStatus,
 } from "./types";
 import {
@@ -132,6 +134,22 @@ export class LinkHubApi {
 
   stopMotor(): Promise<MotorStatus> {
     return this.request("POST", "/v1/motor/stop", {}, AbortSignal.timeout(15_000));
+  }
+
+  async experiment(): Promise<ExperimentInfo | null> {
+    return (await this.request<{ active: ExperimentInfo | null }>(
+      "GET", "/v1/experiment", undefined, AbortSignal.timeout(3_000),
+    )).active;
+  }
+
+  async startExperiment(name: string, description: string): Promise<ExperimentInfo> {
+    return (await this.request<{ active: ExperimentInfo }>(
+      "POST", "/v1/experiment/start", { name, description }, AbortSignal.timeout(10_000),
+    )).active;
+  }
+
+  stopExperiment(): Promise<SavedExperiment> {
+    return this.request("POST", "/v1/experiment/stop", {}, AbortSignal.timeout(120_000));
   }
 
   async currentCursor(signal?: AbortSignal): Promise<string> {
