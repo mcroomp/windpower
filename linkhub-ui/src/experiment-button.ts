@@ -19,6 +19,7 @@ export class ExperimentButton {
     private readonly dialog: HTMLDialogElement,
     private readonly experiment: ExperimentController,
     private readonly write: (message: string, kind?: "info" | "error") => void,
+    onStarted: () => void = () => undefined,
   ) {
     const form = this.element<HTMLFormElement>("#experiment-form");
     const name = this.element<HTMLInputElement>("#experiment-name");
@@ -44,6 +45,7 @@ export class ExperimentButton {
         name.value = "";
         description.value = "";
         dialog.close();
+        onStarted();
       }, (failure: unknown) => {
         error.textContent = failure instanceof Error ? failure.message : String(failure);
         error.hidden = false;

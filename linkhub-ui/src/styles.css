@@ -321,6 +321,51 @@ h2 {
   background: transparent;
 }
 
+.camera-button {
+  padding: 9px 12px;
+  border: 1px solid #40506b;
+  border-radius: 8px;
+  color: #c7d3e6;
+  background: #0f1828;
+  font: 700 13px Inter, ui-sans-serif, system-ui, sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.camera-qr {
+  width: 240px;
+  margin: 8px auto;
+  padding: 8px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.camera-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.camera-url {
+  display: block;
+  color: #7fb3ff;
+  font: 12px ui-monospace, "Cascadia Code", monospace;
+  text-align: center;
+  word-break: break-all;
+}
+
+.camera-url[hidden],
+.camera-qr[hidden] {
+  display: none;
+}
+
+.camera-videos {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: #aebdd2;
+  font: 12px ui-monospace, "Cascadia Code", monospace;
+}
+
 .motor-experiment-hint {
   margin: 6px 0;
   color: #f0c36b;

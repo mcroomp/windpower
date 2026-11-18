@@ -81,6 +81,8 @@
           </div>
           <div class="terminal-header-actions">
             <div id="operation-state" class="badge">idle</div>
+            <button id="camera-button" class="camera-button" type="button" hidden
+              title="Show the QR code that lets phones record video into this experiment">📷 Phone camera</button>
             <button id="experiment-button" class="experiment-button start" type="button"
               title="Arm and motor actions are disabled until an experiment is started">▶ Start Experiment</button>
           </div>
@@ -117,6 +119,19 @@
           <button id="experiment-confirm" class="experiment-button start" type="submit">Start</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="camera-dialog" class="experiment-dialog camera-dialog" aria-labelledby="camera-dialog-title">
+      <h2 id="camera-dialog-title">Record video with a phone</h2>
+      <p>Scan with each phone on the same network. Accept the certificate warning once,
+        then tap <b>Start recording</b>. Stopping the experiment ends every recording; videos
+        are saved in the experiment directory.</p>
+      <div id="camera-qr" class="camera-qr" hidden></div>
+      <a id="camera-url" class="camera-url" target="_blank" rel="noopener" hidden></a>
+      <p id="camera-reason" class="experiment-error" role="alert" hidden></p>
+      <ul id="camera-videos" class="camera-videos"></ul>
+      <div class="experiment-dialog-actions">
+        <button id="camera-close" class="experiment-button cancel" type="button">Close</button>
+      </div>
     </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -1,19 +1,20 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{
-        HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
         header::{CACHE_CONTROL, CONTENT_TYPE},
     },
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use mavlink_protocol::client::{OperationError, ParameterSetting, ParameterValue};
 use mavlink_protocol::codec::{dialect::MavCmd, json as dialect_json};
+use qrcode::QrCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -21,7 +22,7 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 use uuid::Uuid;
 
 use crate::{
-    experiment::{ExperimentError, ExperimentStore},
+    experiment::{CameraConfig, ExperimentConfig, ExperimentError, ExperimentStore},
     journal::{JournalError, JournalHandle, TimeWindow},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
@@ -33,6 +34,9 @@ use crate::{
     transfer::{CancelResult, ContentError, TransferInfo, TransferRegistry},
 };
 
+/// Phones upload a few seconds of video per chunk; this leaves ample headroom.
+const MAX_VIDEO_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     journal: JournalHandle,
@@ -40,6 +44,7 @@ pub struct AppState {
     operations: Option<MavlinkOperations>,
     motor: Option<MotorHandle>,
     experiments: Option<Arc<ExperimentStore>>,
+    camera: Option<CameraConfig>,
 }
 
 fn collapse_state_records(records: Vec<JournalRecord>) -> Vec<JournalRecord> {
@@ -138,6 +143,15 @@ impl IntoResponse for ApiError {
             Self::Experiment(ExperimentError::NotRunning) => {
                 (StatusCode::CONFLICT, "experiment_not_running")
             }
+            Self::Experiment(ExperimentError::InvalidVideo(_)) => {
+                (StatusCode::BAD_REQUEST, "invalid_video")
+            }
+            Self::Experiment(ExperimentError::VideoOutOfOrder(_)) => {
+                (StatusCode::CONFLICT, "video_out_of_order")
+            }
+            Self::Experiment(ExperimentError::VideoClosed(_)) => {
+                (StatusCode::CONFLICT, "experiment_closed")
+            }
             Self::Experiment(_) => (StatusCode::INTERNAL_SERVER_ERROR, "experiment_save_failed"),
             Self::GenerationChanged { .. } => (StatusCode::CONFLICT, "generation_changed"),
         };
@@ -178,20 +192,21 @@ pub fn router_with_motor(
     router_with_motor_and_static(journal, link, motor, None, None, false)
 }
 
-/// `experiments_dir` enables `/v1/experiment`; saved logs are written there.
+/// `experiments` enables `/v1/experiment`; experiment directories are created there.
 pub fn router_with_motor_and_static(
     journal: JournalHandle,
     link: Option<MavlinkLinkHandle>,
     motor: Option<MotorHandle>,
-    experiments_dir: Option<PathBuf>,
+    experiments: Option<ExperimentConfig>,
     static_dir: Option<PathBuf>,
     no_cache: bool,
 ) -> Router {
     let operations = link
         .clone()
         .map(|link| MavlinkOperations::new(link, TransferRegistry::new(journal.clone())));
+    let camera = experiments.as_ref().and_then(|config| config.camera);
     let experiments =
-        experiments_dir.map(|directory| Arc::new(ExperimentStore::new(directory, journal.clone())));
+        experiments.map(|config| Arc::new(ExperimentStore::new(config.directory, journal.clone())));
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
@@ -265,6 +280,13 @@ pub fn router_with_motor_and_static(
             axum::routing::post(start_experiment),
         )
         .route("/v1/experiment/stop", axum::routing::post(stop_experiment))
+        .route("/v1/experiment/camera", get(experiment_camera))
+        .route(
+            "/v1/experiment/{id}/video/{stream}",
+            axum::routing::post(upload_video_chunk)
+                .layer(DefaultBodyLimit::max(MAX_VIDEO_CHUNK_BYTES)),
+        )
+        .route("/camera", get(camera_page))
         .route("/v1/mavlink/status", get(mavlink_status))
         .with_state(Arc::new(AppState {
             journal,
@@ -272,6 +294,7 @@ pub fn router_with_motor_and_static(
             operations,
             motor,
             experiments,
+            camera,
         }));
     let router = match static_dir {
         Some(directory) => {
@@ -1468,6 +1491,71 @@ fn require_experiments(state: &AppState) -> Result<&ExperimentStore, ApiError> {
         .ok_or_else(|| ApiError::NotFound("Experiment logging is not configured".to_owned()))
 }
 
+/// The phone camera URL (with QR code) for the running experiment, plus the
+/// phone streams recorded so far.
+async fn experiment_camera(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let store = require_experiments(&state)?;
+    let active = store.active().ok_or(ExperimentError::NotRunning)?;
+    let url = match state.camera {
+        None => Err("HTTPS is off; start LinkHub with --https-port for phone cameras".to_owned()),
+        Some(camera) => crate::tls::lan_host(camera.listen).map(|host| {
+            format!(
+                "https://{}/camera?experiment={}",
+                SocketAddr::new(host, camera.https_port),
+                active.id
+            )
+        }),
+    };
+    let (url, reason) = match url {
+        Ok(url) => (Some(url), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    let qr_svg = url.as_deref().and_then(|url| {
+        QrCode::new(url.as_bytes()).ok().map(|code| {
+            code.render::<qrcode::render::svg::Color>()
+                .min_dimensions(240, 240)
+                .build()
+        })
+    });
+    Ok(Json(json!({
+        "experiment_id": active.id,
+        "url": url,
+        "reason": reason,
+        "qr_svg": qr_svg,
+        "videos": store.videos(active.id).await,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoChunkQuery {
+    seq: u64,
+    #[serde(default, rename = "final")]
+    last: bool,
+}
+
+async fn upload_video_chunk(
+    State(state): State<Arc<AppState>>,
+    Path((id, stream)): Path<(Uuid, String)>,
+    Query(query): Query<VideoChunkQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let video = require_experiments(&state)?
+        .append_video(id, &stream, query.seq, query.last, content_type, &body)
+        .await?;
+    Ok(Json(
+        serde_json::to_value(video).expect("video stream is serializable"),
+    ))
+}
+
+async fn camera_page() -> Html<&'static str> {
+    Html(include_str!("camera.html"))
+}
+
 async fn set_message_rates(
     State(state): State<Arc<AppState>>,
     Json(rates): Json<serde_json::Map<String, Value>>,
@@ -1639,6 +1727,99 @@ mod tests {
         mavlink::{MavlinkLinkConfig, autopilot_heartbeat_message, start_link},
         records::{DiagnosticLevel, Direction, MavlinkFrame, RecordPayload, wall_time_ns},
     };
+
+    async fn json_response(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
+        let response = app.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn experiment_camera_links_phones_and_accepts_video_chunks() {
+        let temp = TempDir::new().expect("temp directory");
+        let config = JournalConfig::for_directory(temp.path().join("journal"), Uuid::new_v4());
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        let app = router_with_motor_and_static(
+            journal.clone(),
+            None,
+            None,
+            Some(ExperimentConfig {
+                directory: temp.path().join("experiments"),
+                camera: Some(CameraConfig {
+                    listen: "192.168.1.20".parse().unwrap(),
+                    https_port: 9443,
+                }),
+            }),
+            None,
+            false,
+        );
+        let (status, _) = json_response(
+            &app,
+            Request::get("/v1/experiment/camera")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (_, started) = json_response(
+            &app,
+            Request::post("/v1/experiment/start")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"cam"}"#))
+                .unwrap(),
+        )
+        .await;
+        let id = started["active"]["id"].as_str().expect("id").to_owned();
+
+        let (status, camera) = json_response(
+            &app,
+            Request::get("/v1/experiment/camera")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            camera["url"],
+            format!("https://192.168.1.20:9443/camera?experiment={id}")
+        );
+        assert!(camera["qr_svg"].as_str().expect("svg").contains("<svg"));
+
+        let (status, video) = json_response(
+            &app,
+            Request::post(format!("/v1/experiment/{id}/video/phone1?seq=0&final=true"))
+                .header(CONTENT_TYPE, "video/webm;codecs=vp8")
+                .body(Body::from("frames"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(video["file"], "video-phone1.webm");
+        assert_eq!(video["finished"], true);
+        let (status, rejected) = json_response(
+            &app,
+            Request::post(format!("/v1/experiment/{id}/video/phone2?seq=3"))
+                .header(CONTENT_TYPE, "video/mp4")
+                .body(Body::from("x"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(rejected["error"], "video_out_of_order");
+
+        let page = app
+            .clone()
+            .oneshot(Request::get("/camera").body(Body::empty()).unwrap())
+            .await
+            .expect("page");
+        assert_eq!(page.status(), StatusCode::OK);
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
 
     #[test]
     fn command_and_parameter_requests_preserve_dialect_json() {

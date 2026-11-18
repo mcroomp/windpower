@@ -300,6 +300,30 @@ each record uses the same JSON encoding as `GET /v1/mavlink/messages`.
 Experiment state lives in memory: restarting the service drops an active
 experiment without writing `mavlog.json`. The journal still holds the records.
 
+#### Phone video
+
+Phone browsers expose the camera only to secure contexts, so
+`serve --https-port PORT` also serves the full router over HTTPS. The
+self-signed certificate lives in `<data-dir>/tls/` and is regenerated only
+when its host set (localhost plus the LAN address) changes, so a phone accepts
+the certificate warning once. `GET /v1/experiment/camera` returns the running
+experiment's phone URL
+`https://<lan-ip>:<https-port>/camera?experiment=<id>`, a QR code SVG
+(`qr_svg`), and the recordings received so far (`videos`). When `--listen` is
+loopback or HTTPS is off, it returns `url: null` with a `reason`.
+`--listen 0.0.0.0` resolves the LAN address from the default-route interface.
+
+`GET /camera` serves a self-contained page (`linkhub/src/camera.html`). It
+records with `MediaRecorder` in 2 s chunks and uploads them in order to
+`POST /v1/experiment/{id}/video/{stream}?seq=N[&final=true]`. Each phone uses
+a random stream ID and gets its own file, `video-<stream>.webm` or `.mp4`,
+which grows in the experiment directory as chunks arrive. Chunks must arrive
+in sequence from 0. A repeated chunk is acknowledged without being rewritten,
+so phones retry safely after a lost response. A gap returns 409
+`video_out_of_order`. The page polls `GET /v1/experiment` and stops recording
+when the experiment ends. LinkHub accepts that final chunk for 120 s after
+stop, then returns 409 `experiment_closed`.
+
 The server only bounds the time window. It does not enforce arm or motor
 gating, and it does not stop actuators. The UI's experiment controller
 does both before calling stop; see

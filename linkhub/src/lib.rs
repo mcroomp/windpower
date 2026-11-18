@@ -10,5 +10,6 @@ pub mod motor;
 pub mod operations;
 pub mod query;
 pub mod records;
+pub mod tls;
 pub mod transfer;
 pub mod udp;

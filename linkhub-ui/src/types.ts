@@ -46,6 +46,24 @@ export interface SavedExperiment {
   path: string;
 }
 
+export interface ExperimentVideo {
+  stream: string;
+  file: string;
+  bytes: number;
+  chunks: number;
+  updated_at_ns: number;
+  finished: boolean;
+}
+
+export interface ExperimentCamera {
+  experiment_id: string;
+  /** HTTPS camera-page URL for phones; null when unavailable (see `reason`). */
+  url: string | null;
+  reason: string | null;
+  qr_svg: string | null;
+  videos: ExperimentVideo[];
+}
+
 export interface LinkHubStatus {
   connected: boolean;
   ready: boolean;

@@ -35,6 +35,7 @@ if not defined BAUD set "BAUD=%LINKHUB_BAUD%"
 if not defined BAUD set "BAUD=auto"
 if not defined PORT set "PORT=%LINKHUB_PORT%"
 if not defined PORT set "PORT=8999"
+if not defined LINKHUB_HTTPS_PORT set "LINKHUB_HTTPS_PORT=9443"
 
 if not defined CONNECTION (
     echo Usage: %~nx0 [--build] ^<connection^> [baud] [port]
@@ -78,6 +79,7 @@ if not exist "%REPO%\linkhub-ui\dist\index.html" (
 )
 
 echo [INFO] Starting LinkHub on http://127.0.0.1:%PORT%/
+echo [INFO] LAN access: http port %PORT%, https port %LINKHUB_HTTPS_PORT% (phone cameras)
 echo [INFO] Connection: %CONNECTION%  Baud: %BAUD%
 echo [INFO] Press Ctrl+C to stop.
 set "BAUD_ARG="
@@ -85,7 +87,9 @@ if /i not "%BAUD%"=="auto" set BAUD_ARG=--baud "%BAUD%"
 call "%REPO%\linkhub\target\release\linkhub.exe" serve ^
     --connection "%CONNECTION%" ^
     %BAUD_ARG% ^
+    --listen 0.0.0.0 ^
     --port "%PORT%" ^
+    --https-port "%LINKHUB_HTTPS_PORT%" ^
     --data-dir "%REPO%\simulation\logs\linkhub" ^
     --static-dir "%REPO%\linkhub-ui\dist" ^
     --motor-name-prefix BLDC ^

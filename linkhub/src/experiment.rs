@@ -7,13 +7,20 @@
 //! markers (inclusive) into `mavlog.json` in that directory. The active
 //! experiment lives in memory; a LinkHub restart ends it without writing
 //! `mavlog.json`, but the run journal still holds the records.
+//!
+//! Phones upload camera recordings as ordered chunks that are appended to
+//! `video-<stream>.<ext>` in the experiment directory. Uploads stay accepted
+//! for [`VIDEO_GRACE`] after stop so phones can deliver their final chunk.
 
 use std::{
+    collections::BTreeMap,
+    net::IpAddr,
     path::{Path, PathBuf},
     sync::{
         Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -36,6 +43,67 @@ const MAX_SLUG_CHARS: usize = 48;
 const READ_BATCH_RECORDS: usize = 10_000;
 const DETAILS_FILE: &str = "experiment.txt";
 const MAVLOG_FILE: &str = "mavlog.json";
+const MAX_STREAM_ID_CHARS: usize = 32;
+pub const VIDEO_GRACE: Duration = Duration::from_secs(120);
+
+/// Where experiments are saved and how phones reach the camera page.
+#[derive(Clone, Debug)]
+pub struct ExperimentConfig {
+    pub directory: PathBuf,
+    pub camera: Option<CameraConfig>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CameraConfig {
+    pub listen: IpAddr,
+    pub https_port: u16,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct VideoStream {
+    pub stream: String,
+    pub file: String,
+    pub bytes: u64,
+    pub chunks: u64,
+    pub updated_at_ns: u64,
+    pub finished: bool,
+}
+
+struct VideoState {
+    info: VideoStream,
+    path: PathBuf,
+}
+
+struct VideoSession {
+    experiment_id: Uuid,
+    directory: PathBuf,
+    stopped_at: Option<Instant>,
+    streams: BTreeMap<String, VideoState>,
+}
+
+#[derive(Default)]
+struct VideoSessions {
+    current: Option<VideoSession>,
+    previous: Option<VideoSession>,
+}
+
+impl VideoSessions {
+    fn session(&mut self, experiment_id: Uuid) -> Option<&mut VideoSession> {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|session| session.experiment_id == experiment_id)
+        {
+            return self.current.as_mut();
+        }
+        self.previous.as_mut().filter(|session| {
+            session.experiment_id == experiment_id
+                && session
+                    .stopped_at
+                    .is_some_and(|stopped| stopped.elapsed() < VIDEO_GRACE)
+        })
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ActiveExperiment {
@@ -73,7 +141,13 @@ pub enum ExperimentError {
     NotRunning,
     #[error(transparent)]
     Journal(#[from] JournalError),
-    #[error("could not write experiment log {path}: {source}")]
+    #[error("{0}")]
+    InvalidVideo(String),
+    #[error("{0}")]
+    VideoOutOfOrder(String),
+    #[error("experiment {0} is not accepting video")]
+    VideoClosed(Uuid),
+    #[error("could not write experiment file {path}: {source}")]
     Write {
         path: PathBuf,
         source: std::io::Error,
@@ -87,6 +161,8 @@ pub struct ExperimentStore {
     /// Serializes start/stop so a slow save cannot race a new start.
     operation: tokio::sync::Mutex<()>,
     marker_sequence: AtomicU64,
+    /// Held across chunk writes so each stream's file grows in order.
+    videos: tokio::sync::Mutex<VideoSessions>,
 }
 
 impl ExperimentStore {
@@ -98,7 +174,120 @@ impl ExperimentStore {
             active: Mutex::new(None),
             operation: tokio::sync::Mutex::new(()),
             marker_sequence: AtomicU64::new(0),
+            videos: tokio::sync::Mutex::new(VideoSessions::default()),
         }
+    }
+
+    /// Video streams of the given experiment, active or recently stopped.
+    pub async fn videos(&self, experiment_id: Uuid) -> Vec<VideoStream> {
+        self.videos
+            .lock()
+            .await
+            .session(experiment_id)
+            .map(|session| {
+                session
+                    .streams
+                    .values()
+                    .map(|state| state.info.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Appends chunk `sequence` of a phone recording. Chunks must arrive in
+    /// order starting at 0; a repeated chunk is acknowledged without being
+    /// written again so phones can retry after a lost response.
+    pub async fn append_video(
+        &self,
+        experiment_id: Uuid,
+        stream: &str,
+        sequence: u64,
+        last: bool,
+        content_type: &str,
+        data: &[u8],
+    ) -> Result<VideoStream, ExperimentError> {
+        if stream.is_empty()
+            || stream.len() > MAX_STREAM_ID_CHARS
+            || !stream
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(ExperimentError::InvalidVideo(format!(
+                "stream id must be 1-{MAX_STREAM_ID_CHARS} letters, digits, '-' or '_'"
+            )));
+        }
+        let mut sessions = self.videos.lock().await;
+        let session = sessions
+            .session(experiment_id)
+            .ok_or(ExperimentError::VideoClosed(experiment_id))?;
+        if !session.streams.contains_key(stream) {
+            if sequence != 0 {
+                return Err(ExperimentError::VideoOutOfOrder(format!(
+                    "stream {stream} must start at chunk 0, got {sequence}"
+                )));
+            }
+            let extension = video_extension(content_type).ok_or_else(|| {
+                ExperimentError::InvalidVideo(format!(
+                    "unsupported video content type {content_type:?}"
+                ))
+            })?;
+            let file = format!("video-{stream}.{extension}");
+            let path = session.directory.join(&file);
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .await
+                .map_err(|source| ExperimentError::Write {
+                    path: path.clone(),
+                    source,
+                })?;
+            session.streams.insert(
+                stream.to_owned(),
+                VideoState {
+                    info: VideoStream {
+                        stream: stream.to_owned(),
+                        file,
+                        bytes: 0,
+                        chunks: 0,
+                        updated_at_ns: wall_time_ns(),
+                        finished: false,
+                    },
+                    path,
+                },
+            );
+        }
+        let state = session.streams.get_mut(stream).expect("stream inserted");
+        if sequence < state.info.chunks {
+            return Ok(state.info.clone());
+        }
+        if state.info.finished {
+            return Err(ExperimentError::VideoOutOfOrder(format!(
+                "stream {stream} is already finished"
+            )));
+        }
+        if sequence > state.info.chunks {
+            return Err(ExperimentError::VideoOutOfOrder(format!(
+                "stream {stream} expects chunk {}, got {sequence}",
+                state.info.chunks
+            )));
+        }
+        let write_error = |source| ExperimentError::Write {
+            path: state.path.clone(),
+            source,
+        };
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&state.path)
+            .await
+            .map_err(write_error)?;
+        file.write_all(data).await.map_err(write_error)?;
+        file.sync_data().await.map_err(write_error)?;
+        state.info.bytes += data.len() as u64;
+        state.info.chunks += 1;
+        state.info.updated_at_ns = wall_time_ns();
+        state.info.finished = last;
+        Ok(state.info.clone())
     }
 
     #[must_use]
@@ -167,6 +356,12 @@ impl ExperimentStore {
             directory,
             start_sequence,
         };
+        self.videos.lock().await.current = Some(VideoSession {
+            experiment_id: id,
+            directory: experiment.directory.clone(),
+            stopped_at: None,
+            streams: BTreeMap::new(),
+        });
         *self.lock_active() = Some(experiment.clone());
         Ok(experiment)
     }
@@ -207,6 +402,13 @@ impl ExperimentStore {
         let record_count = self
             .write_log(&path, &header, experiment.start_sequence, end_sequence)
             .await?;
+        {
+            let mut sessions = self.videos.lock().await;
+            if let Some(mut session) = sessions.current.take() {
+                session.stopped_at = Some(Instant::now());
+                sessions.previous = Some(session);
+            }
+        }
         *self.lock_active() = None;
         Ok(SavedExperiment {
             experiment,
@@ -315,6 +517,21 @@ impl ExperimentStore {
         self.active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn video_extension(content_type: &str) -> Option<&'static str> {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match essence.as_str() {
+        "video/webm" => Some("webm"),
+        "video/mp4" => Some("mp4"),
+        "video/x-matroska" => Some("mkv"),
+        _ => None,
     }
 }
 
@@ -520,6 +737,79 @@ mod tests {
         assert_eq!(records[0]["data"]["event"], "experiment.started");
         assert_eq!(records[1]["data"]["message_name"], "HEARTBEAT");
         assert_eq!(records[3]["data"]["event"], "experiment.stopped");
+
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn appends_ordered_video_chunks_until_after_stop() {
+        let temp = TempDir::new().expect("temp directory");
+        let config = JournalConfig::for_directory(temp.path().join("journal"), Uuid::new_v4());
+        let (journal, task) = JournalHandle::start(config).await.expect("journal");
+        let store = ExperimentStore::new(temp.path().join("experiments"), journal.clone());
+        let started = store.start("Video", "").await.expect("start");
+        let id = started.id;
+        let webm = "video/webm;codecs=vp8,opus";
+
+        assert!(matches!(
+            store.append_video(id, "../x", 0, false, webm, b"a").await,
+            Err(ExperimentError::InvalidVideo(_))
+        ));
+        assert!(matches!(
+            store
+                .append_video(id, "p1", 0, false, "text/plain", b"a")
+                .await,
+            Err(ExperimentError::InvalidVideo(_))
+        ));
+        assert!(matches!(
+            store.append_video(id, "p1", 1, false, webm, b"a").await,
+            Err(ExperimentError::VideoOutOfOrder(_))
+        ));
+        store
+            .append_video(id, "p1", 0, false, webm, b"ab")
+            .await
+            .expect("chunk 0");
+        let repeated = store
+            .append_video(id, "p1", 0, false, webm, b"ab")
+            .await
+            .expect("retry");
+        assert_eq!((repeated.chunks, repeated.bytes), (1, 2));
+        assert!(matches!(
+            store.append_video(id, "p1", 2, false, webm, b"c").await,
+            Err(ExperimentError::VideoOutOfOrder(_))
+        ));
+        store
+            .append_video(id, "p2", 0, false, "video/mp4", b"m")
+            .await
+            .expect("phone 2");
+
+        store.stop().await.expect("stop");
+        let last = store
+            .append_video(id, "p1", 1, true, webm, b"cd")
+            .await
+            .expect("final");
+        assert!(last.finished);
+        assert!(matches!(
+            store.append_video(id, "p1", 2, false, webm, b"e").await,
+            Err(ExperimentError::VideoOutOfOrder(_))
+        ));
+        assert!(matches!(
+            store
+                .append_video(Uuid::new_v4(), "p1", 0, false, webm, b"a")
+                .await,
+            Err(ExperimentError::VideoClosed(_))
+        ));
+        assert_eq!(
+            std::fs::read(started.directory.join("video-p1.webm")).expect("p1"),
+            b"abcd"
+        );
+        assert_eq!(
+            std::fs::read(started.directory.join("video-p2.mp4")).expect("p2"),
+            b"m"
+        );
+        let streams = store.videos(id).await;
+        assert_eq!(streams.len(), 2);
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");

@@ -152,7 +152,10 @@ export class ExperimentController {
       this.setStage("saving");
       const saved = await this.api.stopExperiment();
       this.setState(null, "idle");
-      this.write(`Experiment saved: ${saved.record_count} records -> ${saved.path}`);
+      this.write(
+        `Experiment saved: ${saved.record_count} records -> ${saved.path}. `
+        + "Phone recordings finish uploading into the same directory.",
+      );
       return saved;
     } catch (error) {
       const active = await this.api.experiment().catch(() => this.current);
