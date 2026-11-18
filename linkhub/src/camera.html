@@ -12,6 +12,9 @@
   input { flex: 1; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; }
   button { font: inherit; font-weight: 600; padding: 14px; border: 0; border-radius: 8px; color: #fff; background: #1f6feb; }
   button:disabled { opacity: 0.4; }
+  #disconnect { background: #8b2c2c; }
+  #done { display: flex; flex-direction: column; gap: 12px; padding: 24px 12px; text-align: center; }
+  [hidden] { display: none !important; }
   #state { font-weight: 600; white-space: pre-line; }
   #state.recording { color: #ff6b6b; }
   #status { white-space: pre-line; color: #bbb; }
@@ -20,14 +23,20 @@
 </style>
 </head>
 <body>
-<main>
+<main id="camera">
   <h1>LinkHub camera</h1>
   <label>Name <input id="label" maxlength="40" autocomplete="off"></label>
   <button id="enable" type="button">Enable camera</button>
   <video id="preview" autoplay muted playsinline></video>
   <div id="state">Camera off</div>
   <div id="status">Tap Enable camera. This phone then records automatically whenever a LinkHub experiment is running.</div>
+  <button id="disconnect" type="button" hidden>Disconnect</button>
 </main>
+<section id="done" hidden>
+  <h1>Disconnected</h1>
+  <div id="done-status">This phone is no longer a LinkHub camera. You can close this tab.</div>
+  <button id="reconnect" type="button">Reconnect</button>
+</section>
 <script>
 "use strict";
 const CHUNK_MS = 2000;
@@ -42,12 +51,16 @@ const enableButton = document.getElementById("enable");
 const preview = document.getElementById("preview");
 const stateLine = document.getElementById("state");
 const statusLine = document.getElementById("status");
+const disconnectButton = document.getElementById("disconnect");
+const DISCONNECTED_KEY = "linkhub-camera-disconnected";
 labelInput.value = localStorage.getItem("linkhub-camera-label") || `Phone ${deviceId.slice(0, 4)}`;
 labelInput.addEventListener("change", () => localStorage.setItem("linkhub-camera-label", labelInput.value.trim()));
 
 let mediaStream = null;
 let wakeLock = null;
 let heartbeatTimer = null;
+let heartbeatInFlight = Promise.resolve();
+let disconnecting = false;
 /** The live MediaRecorder and its recording, or null while waiting. */
 let recorder = null;
 let recording = null;
@@ -150,7 +163,7 @@ function stopRecording() {
   if (recorder && recorder.state !== "inactive") recorder.stop();
 }
 
-async function heartbeat() {
+async function sendHeartbeat() {
   try {
     const response = await fetch(`/v1/camera/${deviceId}/heartbeat`, {
       method: "POST",
@@ -160,14 +173,57 @@ async function heartbeat() {
     });
     if (!response.ok) throw new Error(`LinkHub returned ${response.status}`);
     const { active } = await response.json();
+    if (disconnecting) return;
     if (recording && (!active || active.id !== recording.experimentId)) {
       stopRecording();
     } else if (!recorder && mediaStream && active && !rejected.has(active.id)) {
       startRecording(active);
     }
   } catch (error) {
-    show(`LinkHub unreachable: ${error.message}`, true);
+    if (!disconnecting) show(`LinkHub unreachable: ${error.message}`, true);
   }
+}
+
+function heartbeat() {
+  if (disconnecting) return;
+  heartbeatInFlight = sendHeartbeat();
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Finishes any recording, releases the camera and unregisters this phone. */
+async function disconnect() {
+  disconnecting = true;
+  disconnectButton.disabled = true;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+  await heartbeatInFlight;
+  if (recorder && recorder.state !== "inactive") {
+    const stopped = new Promise((resolve) => recorder.addEventListener("stop", resolve, { once: true }));
+    stopRecording();
+    await stopped;
+  }
+  show("Finishing upload…");
+  const deadline = Date.now() + 30_000;
+  while ((queue.length || uploading) && Date.now() < deadline) await sleep(200);
+  const unsent = queue.length;
+  for (const track of mediaStream ? mediaStream.getTracks() : []) {
+    track.removeEventListener("ended", cameraLost);
+    track.stop();
+  }
+  mediaStream = null;
+  preview.srcObject = null;
+  if (wakeLock) void wakeLock.release().catch(() => undefined);
+  wakeLock = null;
+  await fetch(`/v1/camera/${deviceId}`, { method: "DELETE" }).catch(() => undefined);
+  sessionStorage.setItem(DISCONNECTED_KEY, "1");
+  if (unsent) {
+    document.getElementById("done-status").textContent =
+      `Disconnected, but ${unsent} video chunk(s) could not be uploaded. You can close this tab.`;
+  }
+  window.close();
+  document.getElementById("camera").hidden = true;
+  document.getElementById("done").hidden = false;
 }
 
 async function requestWakeLock() {
@@ -205,11 +261,13 @@ async function enableCamera() {
   for (const track of mediaStream.getTracks()) track.addEventListener("ended", cameraLost);
   preview.srcObject = mediaStream;
   enableButton.hidden = true;
+  disconnectButton.hidden = false;
+  sessionStorage.removeItem(DISCONNECTED_KEY);
   await requestWakeLock();
   show("Connected. Keep this page open; recording starts with each experiment.");
   renderState();
-  if (!heartbeatTimer) heartbeatTimer = setInterval(() => void heartbeat(), HEARTBEAT_MS);
-  void heartbeat();
+  if (!heartbeatTimer) heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
+  heartbeat();
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -220,9 +278,17 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 enableButton.addEventListener("click", () => void enableCamera());
+disconnectButton.addEventListener("click", () => void disconnect());
+document.getElementById("reconnect").addEventListener("click", () => {
+  sessionStorage.removeItem(DISCONNECTED_KEY);
+  location.reload();
+});
 if (!window.isSecureContext || !navigator.mediaDevices || !window.MediaRecorder) {
   enableButton.disabled = true;
   show("This browser cannot record here. Open the HTTPS link from the LinkHub QR code.", true);
+} else if (sessionStorage.getItem(DISCONNECTED_KEY)) {
+  document.getElementById("camera").hidden = true;
+  document.getElementById("done").hidden = false;
 } else {
   // Permission is asked once; after that, reloads reconnect without a tap.
   navigator.permissions?.query({ name: "camera" }).then((permission) => {

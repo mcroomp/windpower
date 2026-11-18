@@ -236,6 +236,15 @@ impl ExperimentStore {
         Ok(self.active())
     }
 
+    /// Removes a phone's registration; returns whether it was registered.
+    pub fn camera_disconnect(&self, stream: &str) -> bool {
+        self.cameras
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(stream)
+            .is_some()
+    }
+
     /// Phones that sent a heartbeat within [`CAMERA_TIMEOUT`].
     pub fn cameras(&self) -> Vec<CameraPhone> {
         let mut cameras = self

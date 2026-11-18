@@ -320,7 +320,11 @@ without a tap once permission is granted) and stays registered independently
 of experiments: every 1.5 s it posts
 `POST /v1/camera/{device}/heartbeat` with `{label, recording}` and receives
 `{active}`, the running experiment or `null`. LinkHub lists a phone as
-connected for 10 s after its last heartbeat. When `active` appears, the page
+connected for 10 s after its last heartbeat. **Disconnect** on the phone
+finishes and uploads any recording, releases the camera, and calls
+`DELETE /v1/camera/{device}` to remove the registration at once. The page
+then stays disconnected, even after a reload, until **Reconnect** is
+tapped. When `active` appears, the page
 starts a `MediaRecorder`; when it ends or changes, the page finalizes the
 recording and waits for the next experiment. Recordings upload in 2 s chunks,
 in order, to `POST /v1/experiment/{id}/video/{stream}?seq=N[&final=true]`.

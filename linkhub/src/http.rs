@@ -282,6 +282,10 @@ pub fn router_with_motor_and_static(
         .route("/v1/experiment/stop", axum::routing::post(stop_experiment))
         .route("/v1/camera", get(camera_status))
         .route(
+            "/v1/camera/{stream}",
+            axum::routing::delete(camera_disconnect),
+        )
+        .route(
             "/v1/camera/{stream}/heartbeat",
             axum::routing::post(camera_heartbeat),
         )
@@ -1555,6 +1559,14 @@ async fn camera_heartbeat(
     Ok(Json(json!({ "active": active })))
 }
 
+async fn camera_disconnect(
+    State(state): State<Arc<AppState>>,
+    Path(stream): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let removed = require_experiments(&state)?.camera_disconnect(&stream);
+    Ok(Json(json!({ "removed": removed })))
+}
+
 #[derive(Debug, Deserialize)]
 struct VideoChunkQuery {
     seq: u64,
@@ -1810,6 +1822,17 @@ mod tests {
         assert_eq!(idle["active"], Value::Null);
         let (_, camera) = camera_status().await;
         assert_eq!(camera["phones"][0]["label"], "Tripod");
+        let (_, disconnected) = json_response(
+            &app,
+            Request::delete("/v1/camera/phone1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(disconnected["removed"], true);
+        let (_, camera) = camera_status().await;
+        assert_eq!(camera["phones"], json!([]));
+        json_response(&app, heartbeat("null")).await;
 
         let (_, started) = json_response(
             &app,
