@@ -1,0 +1,8 @@
+{
+  "frame_size": [1080, 1920],
+  "start_frame": 600,
+  "regions": [
+    {"name": "hub", "rect": [550, 850, 65, 65]},
+    {"name": "blade_tape", "corners": [[351, 876], [374, 869], [369, 932], [345, 936]]}
+  ]
+}
