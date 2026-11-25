@@ -1,0 +1,3 @@
+@rem Copy to launch_config.cmd (ignored by Git) and replace these example hosts.
+@set "LOADCELL_DEVICE_URL=http://sensor-host.example:88"
+@set "LINKHUB_CONNECTION=tcp:flight-controller.example:5760"

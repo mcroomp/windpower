@@ -1,0 +1,6 @@
+#pragma once
+
+#define LOADCELL_WIFI_SSID "your-wifi-ssid"
+#define LOADCELL_WIFI_PASSWORD "your-wifi-password"
+#define LOADCELL_CSV_URL ""
+#define LOADCELL_OTA_PASSWORD ""

@@ -77,6 +77,69 @@ struct Chunk {
     records: Vec<JournalRecord>,
 }
 
+#[derive(Default)]
+struct ChunkIndex {
+    entries: Vec<ChunkEntry>,
+}
+
+struct ChunkEntry {
+    path: PathBuf,
+    last_sequence: u64,
+    min_ns: u64,
+    max_ns: u64,
+    max_ns_through: u64,
+}
+
+impl ChunkIndex {
+    async fn load(directory: &Path) -> Result<Self, JournalError> {
+        let mut index = Self::default();
+        for path in chunk_paths(directory).await? {
+            let Some((first, last)) = chunk_sequences(&path) else {
+                return Err(JournalError::UnsupportedChunk(path));
+            };
+            if first <= index.tail() || last < first {
+                return Err(JournalError::UnsupportedChunk(path));
+            }
+            let (min_ns, max_ns) = read_chunk_times(&path).await?;
+            index.push(path, last, min_ns, max_ns);
+        }
+        Ok(index)
+    }
+
+    fn tail(&self) -> u64 {
+        self.entries.last().map_or(0, |entry| entry.last_sequence)
+    }
+
+    fn push(&mut self, path: PathBuf, last_sequence: u64, min_ns: u64, max_ns: u64) {
+        // The running maximum stays sorted even when the wall clock steps back.
+        let max_ns_through = self
+            .entries
+            .last()
+            .map_or(max_ns, |entry| max_ns.max(entry.max_ns_through));
+        self.entries.push(ChunkEntry {
+            path,
+            last_sequence,
+            min_ns,
+            max_ns,
+            max_ns_through,
+        });
+    }
+
+    fn paths_after(&self, after: u64, window: TimeWindow) -> Vec<PathBuf> {
+        let start = self.entries.partition_point(|entry| {
+            entry.last_sequence <= after
+                || window
+                    .since_ns
+                    .is_some_and(|since| entry.max_ns_through < since)
+        });
+        self.entries[start..]
+            .iter()
+            .filter(|entry| window.overlaps(entry.min_ns, entry.max_ns))
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
     #[error("journal task is unavailable")]
@@ -110,6 +173,8 @@ enum Command {
         reply: oneshot::Sender<u64>,
     },
     Snapshot {
+        after: u64,
+        window: TimeWindow,
         reply: oneshot::Sender<JournalSnapshot>,
     },
     Flush {
@@ -123,6 +188,7 @@ enum Command {
 struct JournalSnapshot {
     tail: u64,
     sim_clock: SimClock,
+    flushed: Vec<PathBuf>,
     pending: Vec<JournalRecord>,
 }
 
@@ -134,7 +200,6 @@ pub struct JournalRead {
 #[derive(Clone)]
 pub struct JournalHandle {
     run_id: Uuid,
-    directory: Arc<PathBuf>,
     sender: mpsc::Sender<Command>,
     live: broadcast::Sender<Arc<JournalRecord>>,
     tail: Arc<AtomicU64>,
@@ -144,17 +209,17 @@ impl JournalHandle {
     pub async fn start(config: JournalConfig) -> Result<(Self, JoinHandle<()>), JournalError> {
         validate_config(&config);
         fs::create_dir_all(&config.directory).await?;
+        let index = ChunkIndex::load(&config.directory).await?;
         let (sender, receiver) = mpsc::channel(config.command_capacity);
         let (live, _) = broadcast::channel(config.live_capacity);
-        let tail = Arc::new(AtomicU64::new(0));
+        let tail = Arc::new(AtomicU64::new(index.tail()));
         let handle = Self {
             run_id: config.run_id,
-            directory: Arc::new(config.directory.clone()),
             sender,
             live: live.clone(),
             tail: Arc::clone(&tail),
         };
-        let task = tokio::spawn(run_journal(config, receiver, live, tail));
+        let task = tokio::spawn(run_journal(config, receiver, live, tail, index));
         Ok((handle, task))
     }
 
@@ -266,19 +331,10 @@ impl JournalHandle {
         max_records: usize,
     ) -> Result<JournalRead, JournalError> {
         assert!(max_records > 0, "max_records must be positive");
-        let snapshot = self.snapshot().await?;
-        let mut records = read_flushed_after(&self.directory, after, window, max_records).await?;
-        records.retain(|record| record.sequence <= snapshot.tail);
-        let scanned_through = records.last().map_or(after, |record| record.sequence);
-        let remaining = max_records.saturating_sub(records.len());
-        records.extend(
-            snapshot
-                .pending
-                .into_iter()
-                .filter(|record| record.sequence > scanned_through)
-                .take(remaining),
-        );
-        records.sort_unstable_by_key(|record| record.sequence);
+        let snapshot = self.snapshot(after, window).await?;
+        let mut records = read_flushed_after(snapshot.flushed, after, max_records).await?;
+        let remaining = max_records - records.len();
+        records.extend(snapshot.pending.into_iter().take(remaining));
         let tail_clock = records
             .last()
             .map_or(snapshot.sim_clock, |record| record.sim_clock);
@@ -289,14 +345,22 @@ impl JournalHandle {
     }
 
     pub async fn checkpoint(&self) -> Result<(u64, SimClock), JournalError> {
-        let snapshot = self.snapshot().await?;
+        let snapshot = self.snapshot(u64::MAX, TimeWindow::default()).await?;
         Ok((snapshot.tail, snapshot.sim_clock))
     }
 
-    async fn snapshot(&self) -> Result<JournalSnapshot, JournalError> {
+    async fn snapshot(
+        &self,
+        after: u64,
+        window: TimeWindow,
+    ) -> Result<JournalSnapshot, JournalError> {
         let (reply, response) = oneshot::channel();
         self.sender
-            .send(Command::Snapshot { reply })
+            .send(Command::Snapshot {
+                after,
+                window,
+                reply,
+            })
             .await
             .map_err(|_| JournalError::Unavailable)?;
         response.await.map_err(|_| JournalError::Unavailable)
@@ -330,6 +394,7 @@ async fn run_journal(
     mut receiver: mpsc::Receiver<Command>,
     live: broadcast::Sender<Arc<JournalRecord>>,
     tail: Arc<AtomicU64>,
+    mut index: ChunkIndex,
 ) {
     let mut pending = Vec::with_capacity(config.max_chunk_records);
     let mut pending_bytes = 0_usize;
@@ -344,7 +409,7 @@ async fn run_journal(
             biased;
             command = receiver.recv() => {
                 let Some(command) = command else {
-                    let _ = flush_pending(&config, &mut pending).await;
+                    let _ = flush_pending(&config, &mut pending, &mut index).await;
                     return;
                 };
                 match command {
@@ -406,7 +471,7 @@ async fn run_journal(
                         if pending.len() >= config.max_chunk_records
                             || pending_bytes >= config.max_chunk_bytes
                         {
-                            if let Err(error) = flush_pending(&config, &mut pending).await {
+                            if let Err(error) = flush_pending(&config, &mut pending, &mut index).await {
                                 tracing::error!(%error, "journal chunk flush failed");
                             }
                             pending_bytes = 0;
@@ -419,29 +484,31 @@ async fn run_journal(
                         };
                         let _ = reply.send(sim_clock.epoch);
                     }
-                    Command::Snapshot { reply } => {
+                    Command::Snapshot { after, window, reply } => {
+                        let pending_start = pending.partition_point(|record| record.sequence <= after);
                         let _ = reply.send(JournalSnapshot {
                             tail: tail.load(Ordering::Acquire),
                             sim_clock,
-                            pending: pending.clone(),
+                            flushed: index.paths_after(after, window),
+                            pending: pending[pending_start..].to_vec(),
                         });
                     }
                     Command::Flush { reply } => {
-                        let result = flush_pending(&config, &mut pending).await;
+                        let result = flush_pending(&config, &mut pending, &mut index).await;
                         if result.is_ok() {
                             pending_bytes = 0;
                         }
                         let _ = reply.send(result);
                     }
                     Command::Shutdown { reply } => {
-                        let result = flush_pending(&config, &mut pending).await;
+                        let result = flush_pending(&config, &mut pending, &mut index).await;
                         let _ = reply.send(result);
                         return;
                     }
                 }
             }
             _ = ticker.tick() => {
-                if let Err(error) = flush_pending(&config, &mut pending).await {
+                if let Err(error) = flush_pending(&config, &mut pending, &mut index).await {
                     tracing::error!(%error, "periodic journal chunk flush failed");
                 } else {
                     pending_bytes = 0;
@@ -454,6 +521,7 @@ async fn run_journal(
 async fn flush_pending(
     config: &JournalConfig,
     pending: &mut Vec<JournalRecord>,
+    index: &mut ChunkIndex,
 ) -> Result<(), JournalError> {
     if pending.is_empty() {
         return Ok(());
@@ -494,11 +562,14 @@ async fn flush_pending(
     bytes.extend_from_slice(&encoded);
     let result = async {
         fs::write(&temporary_path, bytes).await?;
-        fs::rename(temporary_path, final_path).await
+        fs::rename(temporary_path, &final_path).await
     }
     .await;
     match result {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            index.push(final_path, last_sequence, min_ns, max_ns);
+            Ok(())
+        }
         Err(error) => {
             pending.extend(chunk.records);
             Err(JournalError::Io(error))
@@ -506,12 +577,7 @@ async fn flush_pending(
     }
 }
 
-async fn read_flushed_after(
-    directory: &Path,
-    after: u64,
-    window: TimeWindow,
-    max_records: usize,
-) -> Result<Vec<JournalRecord>, JournalError> {
+async fn chunk_paths(directory: &Path) -> Result<Vec<PathBuf>, JournalError> {
     let mut entries = fs::read_dir(directory).await?;
     let mut paths = Vec::new();
     while let Some(entry) = entries.next_entry().await? {
@@ -521,18 +587,16 @@ async fn read_flushed_after(
         }
     }
     paths.sort_unstable();
+    Ok(paths)
+}
 
+async fn read_flushed_after(
+    paths: impl IntoIterator<Item = PathBuf>,
+    after: u64,
+    max_records: usize,
+) -> Result<Vec<JournalRecord>, JournalError> {
     let mut records = Vec::new();
     for path in paths {
-        if chunk_last_sequence(&path).is_some_and(|last_sequence| last_sequence <= after) {
-            continue;
-        }
-        if window != TimeWindow::default() {
-            let (min_ns, max_ns) = read_chunk_times(&path).await?;
-            if !window.overlaps(min_ns, max_ns) {
-                continue;
-            }
-        }
         let bytes = fs::read(&path).await?;
         if bytes.len() < CHUNK_HEADER_LEN || !bytes.starts_with(CHUNK_MAGIC) {
             return Err(JournalError::UnsupportedChunk(path));
@@ -576,8 +640,10 @@ pub async fn read_persisted(
     after: u64,
     through: Option<u64>,
 ) -> Result<Vec<JournalRecord>, JournalError> {
-    let mut records =
-        read_flushed_after(directory, after, TimeWindow::default(), usize::MAX).await?;
+    let paths = chunk_paths(directory).await?.into_iter().filter(|path| {
+        chunk_sequences(path).is_none_or(|(_, last_sequence)| last_sequence > after)
+    });
+    let mut records = read_flushed_after(paths, after, usize::MAX).await?;
     if let Some(through) = through {
         records.retain(|record| record.sequence <= through);
     }
@@ -616,8 +682,9 @@ fn chunk_path(directory: &Path, first_sequence: u64, last_sequence: u64) -> Path
     directory.join(format!("{first_sequence:020}-{last_sequence:020}.lhc"))
 }
 
-fn chunk_last_sequence(path: &Path) -> Option<u64> {
-    path.file_stem()?.to_str()?.split_once('-')?.1.parse().ok()
+fn chunk_sequences(path: &Path) -> Option<(u64, u64)> {
+    let (first, last) = path.file_stem()?.to_str()?.split_once('-')?;
+    Some((first.parse().ok()?, last.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -831,7 +898,7 @@ mod tests {
         invalid_chunk.push(0xff);
         fs::write(path, invalid_chunk).await.expect("old chunk");
 
-        let records = read_flushed_after(temp.path(), 10, TimeWindow::default(), usize::MAX)
+        let records = read_persisted(temp.path(), 10, None)
             .await
             .expect("old chunk must not be decoded");
 
@@ -839,45 +906,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chunk_time_header_skips_chunks_outside_window() {
+    async fn indexed_window_reads_do_not_open_old_chunks() {
         let temp = TempDir::new().expect("temp directory");
         let run_id = Uuid::new_v4();
-        let mut config = JournalConfig::for_directory(temp.path(), run_id);
-        config.max_chunk_records = 1;
-        let (journal, task) = JournalHandle::start(config).await.expect("journal");
-        journal
-            .append_diagnostic(diagnostic(run_id, 1))
-            .await
-            .expect("first");
-        journal.flush().await.expect("flush");
-        let (min_ns, max_ns) = read_chunk_times(&chunk_path(temp.path(), 1, 1))
-            .await
-            .expect("chunk header");
-        assert!(min_ns > 0 && min_ns == max_ns);
+        let config = JournalConfig::for_directory(temp.path(), run_id);
+        let mut index = ChunkIndex::default();
+        // Chunk 3 was recorded after a backward wall-clock step.
+        for (sequence, ingest_time_ns) in [(1, 10), (2, 30), (3, 20)] {
+            let mut record = JournalRecord::new(
+                sequence,
+                None,
+                SimClock::default(),
+                RecordPayload::MavlinkFrame(frame()),
+            );
+            record.ingest_time_ns = ingest_time_ns;
+            flush_pending(&config, &mut vec![record], &mut index)
+                .await
+                .expect("seed chunk");
+        }
 
-        // A chunk whose header is outside the window must not be decoded.
-        let mut undecodable = CHUNK_MAGIC.to_vec();
-        undecodable.extend_from_slice(&1_u64.to_le_bytes());
-        undecodable.extend_from_slice(&2_u64.to_le_bytes());
-        undecodable.push(0xc1);
-        fs::write(chunk_path(temp.path(), 2, 2), undecodable)
+        let (journal, task) = JournalHandle::start(config).await.expect("reopen journal");
+        assert_eq!(journal.tail(), 3);
+        let sequence = journal
+            .append(RecordPayload::MavlinkFrame(frame()), None)
             .await
-            .expect("out-of-window chunk");
+            .expect("append after indexed tail");
+        assert_eq!(sequence, 4);
+        journal.flush().await.expect("flush");
+
+        // Removing an already indexed, out-of-window chunk detects even a
+        // header read, not just an attempt to decode its payload.
+        fs::remove_file(chunk_path(temp.path(), 1, 1))
+            .await
+            .expect("remove old chunk");
+        fs::write(chunk_path(temp.path(), 5, 5), b"unindexed")
+            .await
+            .expect("place unindexed file to detect directory rescans");
 
         let window = TimeWindow {
-            since_ns: Some(min_ns),
+            since_ns: Some(20),
             until_ns: None,
         };
-        let records = read_flushed_after(temp.path(), 0, window, usize::MAX)
+        let read = journal
+            .read_window_bounded(0, window, 4)
             .await
             .expect("windowed read");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].sequence, 1);
+        assert_eq!(
+            read.records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
 
-        let unsupported = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
+        let read = journal
+            .read_window_bounded(
+                0,
+                TimeWindow {
+                    since_ns: Some(25),
+                    until_ns: Some(30),
+                },
+                4,
+            )
             .await
-            .expect_err("full read must decode, and reject, the corrupt chunk");
-        assert!(matches!(unsupported, JournalError::Decode(_)));
+            .expect("read across backward clock step");
+        assert_eq!(read.records.len(), 1);
+        assert_eq!(read.records[0].sequence, 2);
+
+        let error = journal
+            .records_after(0)
+            .await
+            .expect_err("an in-range missing chunk must still fail");
+        assert!(matches!(error, JournalError::Io(_)));
 
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");
@@ -889,7 +989,7 @@ mod tests {
         fs::write(chunk_path(temp.path(), 1, 1), b"LHCHNK01\x80")
             .await
             .expect("legacy chunk");
-        let error = read_flushed_after(temp.path(), 0, TimeWindow::default(), usize::MAX)
+        let error = read_persisted(temp.path(), 0, None)
             .await
             .expect_err("legacy chunk");
         assert!(matches!(error, JournalError::UnsupportedChunk(_)));
@@ -918,10 +1018,12 @@ mod tests {
                 .await
                 .expect("append");
             let records = journal.records_after(0).await.expect("replay");
-            assert_eq!(records.len(), source_sequence as usize);
             assert_eq!(
-                records.last().map(|record| record.sequence),
-                Some(source_sequence),
+                records
+                    .iter()
+                    .map(|record| record.sequence)
+                    .collect::<Vec<_>>(),
+                (1..=source_sequence).collect::<Vec<_>>(),
             );
         }
 

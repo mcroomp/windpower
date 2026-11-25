@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+include/local_config.h
+launch_config.cmd
+backups/

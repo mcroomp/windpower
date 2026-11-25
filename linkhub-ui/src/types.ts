@@ -15,12 +15,31 @@ export interface CsvReading {
   received_time_ns: number;
   sequence: number;
   source_sequence: number;
+  sample_time_ns: number | null;
+  time_quality: "estimated" | "clock_reset" | "out_of_order" | "unavailable";
+  clock_epoch: number;
   values: Record<string, string | number>;
+}
+
+export interface DiagnosticRecord {
+  cursor: string;
+  ingest_time_ns?: number;
+  data: {
+    source: string;
+    event: string;
+    fields: JsonObject;
+  };
+}
+
+export interface DiagnosticBatch {
+  records: DiagnosticRecord[];
+  next_cursor: string;
 }
 
 export interface CsvStatus {
   available: boolean;
   columns: string[];
+  rows_received: number;
   latest: CsvReading | null;
   recent: CsvReading[];
 }

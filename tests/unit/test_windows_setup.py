@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import os
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import textwrap
+from threading import Thread
 import tomllib
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -186,6 +189,112 @@ def run_script(
 def commands(bootstrap: tuple[Path, Path, Path, dict[str, str]]) -> list[str]:
     log = bootstrap[2]
     return log.read_text().splitlines() if log.exists() else []
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("configure_fails", [False, True])
+def test_esp_launcher_configures_csv_and_preserves_configured_connection(
+    bootstrap: tuple[Path, Path, Path, dict[str, str]], configure_fails: bool,
+):
+    project, bin_dir, _, env = bootstrap
+    shutil.copy2(REPO / "run_linkhub_esp.cmd", project / "run_linkhub_esp.cmd")
+    env["MOCK_CONFIGURE_FAILS"] = str(int(configure_fails))
+    env["LOADCELL_DEVICE_URL"] = "http://sensor-host.example:88"
+    env["LINKHUB_CONNECTION"] = "tcp:flight-controller.example:5760"
+    write_cmd(bin_dir / "powershell.cmd", r"""
+        @echo off
+        echo configure %*>>"%MOCK_LOG%"
+        exit /b %MOCK_CONFIGURE_FAILS%
+    """)
+    write_cmd(project / "run_linkhub_ui.cmd", r"""
+        @echo off
+        echo launcher %*>>"%MOCK_LOG%"
+        echo mapping %LINKHUB_CSV_MAP%>>"%MOCK_LOG%"
+        exit /b 17
+    """)
+    result = run_script(bootstrap, "run_linkhub_esp.cmd", "--configure-firewall", "--build")
+    calls = commands(bootstrap)
+    assert '-DeviceUrl "http://sensor-host.example:88" -HttpPort 8999' in calls[0]
+    if configure_fails:
+        assert result.returncode == 1
+        assert len(calls) == 1
+        assert "LinkHub was not started" in result.stdout
+    else:
+        assert result.returncode == 17
+        assert calls[1] == 'launcher --configure-firewall --build "tcp:flight-controller.example:5760" auto 8999'
+        assert calls[2] == f"mapping {project / 'linkhub' / 'csv-map.json'}"
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize(
+    ("already_configured", "readback_matches", "mode_applies"),
+    [(False, True, True), (True, True, True), (False, False, True), (True, True, False)],
+    ids=["new-destination", "unchanged-destination", "destination-mismatch", "mode-mismatch"],
+)
+def test_esp_csv_configuration_verifies_routed_destination(
+    already_configured: bool, readback_matches: bool, mode_applies: bool,
+):
+    requests: list[str] = []
+    destination = "http://127.0.0.1:9123/v1/csv" if already_configured else ""
+    page_reads = 0
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal destination, page_reads
+            requests.append(self.path)
+            url = urlsplit(self.path)
+            status = 200
+            if url.path == "/create_new_csv":
+                assert not already_configured, "Must not rotate/flush an unchanged destination."
+                destination = parse_qs(url.query)["url"][0]
+                body = b"Set URL"
+            elif url.path in ("/set_hx711", "/hx711"):
+                if url.path == "/set_hx711":
+                    assert parse_qs(url.query) == {"mode": ["4"]}
+                    status = 202
+                body = json.dumps({"requested_mode": 4 if mode_applies else 2}).encode()
+            else:
+                page_reads += 1
+                value = destination if page_reads == 1 or readback_matches else "http://old.example/csv"
+                body = f"<input id='CSVStorageURL' value='{value}'>".encode()
+            self.send_response(status)
+            content_type = "application/json" if url.path in ("/set_hx711", "/hx711") else "text/html"
+            self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+             str(REPO / "scripts" / "configure_esp_csv.ps1"),
+             "-DeviceUrl", f"http://127.0.0.1:{server.server_port}", "-HttpPort", "9123"],
+            capture_output=True, text=True, timeout=20,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert destination == "http://127.0.0.1:9123/v1/csv"
+    expected = ["/"] + ([] if already_configured else ["/create_new_csv"]) + ["/"]
+    if readback_matches:
+        expected += ["/set_hx711"]
+        if mode_applies:
+            expected += ["/hx711"]
+    assert [urlsplit(path).path for path in requests] == expected
+    if readback_matches and mode_applies:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"Verified ESP CSV destination: {destination}" in result.stdout
+        assert "Verified ESP capture mode: 4 inputs" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert ("capture mode" if readback_matches else "read-back did not match") in result.stderr
 
 
 @WINDOWS_ONLY
