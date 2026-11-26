@@ -4,8 +4,10 @@ import math
 
 import pytest
 
-from calibrate.watch import _watch_attitude
+from calibrate.hw import _rpm_triplet
+from calibrate.watch import _watch_attitude, _watch_esc
 from linkhub_client import MessageBatch, SimClock
+from linkhub_client.generated_protocol import EscTelemetry9To12
 from linkhub_client.messages import (
     Attitude,
     MavCmd,
@@ -81,6 +83,40 @@ def test_watch_attitude_handles_already_decoded_attitude(
 
     assert log.rows
     assert log.rows[0][1:4] == ["10.000", "-5.000", "20.000"]
+
+
+@pytest.mark.parametrize(("pole_pairs", "expected_erpm"), [(11, 6600), (7, 4200)])
+def test_watch_esc_uses_reported_mechanical_rpm(
+    monkeypatch: pytest.MonkeyPatch,
+    pole_pairs: int,
+    expected_erpm: int,
+):
+    class EscSession(_Session):
+        def read_messages(
+            self,
+            _after: str,
+            message_types: str | list[str] | tuple[str, ...] | set[str],
+            **_kwargs: object,
+        ) -> MessageBatch:
+            if "ESC_TELEMETRY_9_TO_12" in message_types:
+                message = EscTelemetry9To12(
+                    rpm=(600, 0, 0, 0),
+                    voltage=(1200, 0, 0, 0),
+                    current=(50, 0, 0, 0),
+                    temperature=(25, 0, 0, 0),
+                )
+                return MessageBatch((message,), "v1:1", _CLOCK)
+            return MessageBatch((), "v1:1", _CLOCK)
+
+    clock = iter([0.0, 0.1, 0.2, 16.0])
+    monkeypatch.setattr("calibrate.run.time.monotonic", clock.__next__)
+    monkeypatch.setattr("calibrate.hw._motor_pole_pairs", pole_pairs)
+    log = _Log()
+
+    _watch_esc(EscSession(), 10.0, log)
+
+    assert log.rows[0][1:4] == [expected_erpm, 600, "60"]
+    assert _rpm_triplet(None) == (None, None, None)
 
 
 def test_observation_loop_requests_yaw_pid_tuning_at_4_hz_by_default(

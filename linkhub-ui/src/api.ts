@@ -145,10 +145,15 @@ export class LinkHubApi {
     )).active;
   }
 
-  async startExperiment(name: string, description: string): Promise<ExperimentInfo> {
+  async startExperiment(name: string, description: string, telemetryProfile: string): Promise<ExperimentInfo> {
     return (await this.request<{ active: ExperimentInfo }>(
-      "POST", "/v1/experiment/start", { name, description }, AbortSignal.timeout(10_000),
+      "POST", "/v1/experiment/start",
+      { name, description, telemetry_profile: telemetryProfile }, AbortSignal.timeout(10_000),
     )).active;
+  }
+
+  markExperiment(label: string): Promise<{ label: string; cursor: string; elapsed_s: number }> {
+    return this.request("POST", "/v1/experiment/mark", { label }, AbortSignal.timeout(5_000));
   }
 
   stopExperiment(): Promise<SavedExperiment> {
@@ -174,6 +179,11 @@ export class LinkHubApi {
       "GET", "/v1/csv", undefined,
       signal ? AbortSignal.any([signal, timeout]) : timeout,
     );
+  }
+
+  onboardLogEvents(after: string): Promise<DiagnosticBatch> {
+    const query = new URLSearchParams({ after, source: "linkhub", event: "experiment.onboard_logs" });
+    return this.request("GET", `/v1/diagnostics/events?${query}`, undefined, AbortSignal.timeout(3_000));
   }
 
   async currentCursor(signal?: AbortSignal): Promise<string> {

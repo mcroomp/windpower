@@ -37,7 +37,7 @@ definition asks for tape-measure confirmation of the physical dimensions.
 |---|---|---|
 | Flight controller | Pixhawk 6C | [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md) |
 | Swash servos | DS113MG V6.0 class (simulated slew 545 deg/s, travel 100 deg) | `servo_slew_rate_deg_s`, `servo_travel_deg` in the rotor definition |
-| Yaw motor | EMAX GB4008, 66 RPM/V, 22 poles, 10:1 gear | `GB4008_KV`, `GB4008_POLES`, `GB4008_GEAR_RATIO` |
+| Yaw motor | EMAX GB4008, 66 RPM/V, 22 poles, assumed 10:1 gear | `GB4008_KV`, `GB4008_POLES`, `GB4008_GEAR_RATIO` |
 | Yaw ESC | REVVitRC 50A, AM32 firmware, bidirectional DShot | [rawes_common_defaults.parm](../tests/sitl/rawes_common_defaults.parm) DShot block |
 
 Vendor datasheet data (dimensions, weights, radio specs, power budgets) is not
@@ -74,8 +74,10 @@ bidirectional DShot and ESC RPM telemetry. The `SERVO_BLH_*`, `SERVO_DSHOT_*`,
 Wiring: AUX 1 signal and ground to the ESC signal and signal ground; power the
 ESC from the battery path, not the servo rail.
 
-RPM conversion: eRPM / (poles / 2) gives motor RPM; dividing again by the 10:1
-gear ratio gives rotor RPM. The pole count must match `SERVO_BLH_POLES`.
+ArduPilot converts eRPM using `SERVO_BLH_POLES` before reporting motor RPM in
+ESC telemetry. Dividing motor RPM by the assumed 10:1 gear ratio estimates
+rotor speed relative to the body, not an independent measurement of absolute
+rotor speed. The installed ratio needs mechanical confirmation.
 
 Output 9 must stay mapped at boot (see the safe-off invariant in
 [arming.md](arming.md)).

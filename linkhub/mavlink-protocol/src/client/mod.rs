@@ -26,8 +26,10 @@ use crate::{
 
 mod files;
 mod logs;
+mod param_pack;
 mod parameter_value;
 mod transfer;
+pub use param_pack::{PARAM_PACK_PATH, PackedParameter, decode_param_pack};
 pub use parameter_value::ParameterValue;
 pub use transfer::{TransferError, TransferObserver, TransferSummary};
 

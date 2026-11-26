@@ -317,6 +317,10 @@ impl ProtocolClient {
 
         let mut reader =
             FtpReader::new(session, size, *sequence, Timing::default(), Instant::now());
+        if path.starts_with('@') {
+            // ArduPilot's virtual files report an estimated size.
+            reader = reader.open_ended();
+        }
         let driven = self.drive_reader(&mut reader, handle, stall_timeout).await;
         *sequence = reader.next_sequence();
         summary.capture_file(&reader);

@@ -43,10 +43,15 @@ describe("yaw trim sweep", () => {
   function mockSafeOff() {
     const api = new LinkHubApi();
     vi.spyOn(console, "log").mockImplementation(() => {});
+    const motorStop = vi.spyOn(api, "stopMotor").mockResolvedValue({
+      available: true, connected: true, device: "test", device_id: "motor-1",
+      running: false, speed_percent: 0, target_speed_percent: 0, stopping: false,
+      direction: "forward", command_expires_in_ms: null, error: null,
+    });
     vi.spyOn(api, "status").mockResolvedValue({
       connected: true, ready: true, base_mode: "", custom_mode: 1,
       cursor: "v1:10", generation: "run-1",
-      connection: "tcp:127.0.0.1:5760", port: null, baud: null, clock_epoch: 0,
+      connection: "tcp:127.0.0.1:5760", port: null, baud: null, native_usb: false, clock_epoch: 0,
       target_system: 1, target_component: 1, system_status: { type: "MAV_STATE_STANDBY" },
       latest_time_boot_ms: 1, received_messages: 1, transmitted_messages: 0,
       received_bytes: 1, transmitted_bytes: 0, rx_bps: null, tx_bps: null,
@@ -68,12 +73,13 @@ describe("yaw trim sweep", () => {
         message: "SERVO_OUTPUT_RAW", fields: { servo9_raw: 1000 },
       }],
     });
-    return { api, set, messages };
+    return { api, set, messages, motorStop };
   }
 
   it("uses canonical cleanup, restores gains and verifies fresh output telemetry", async () => {
-    const { api, set, messages } = mockSafeOff();
+    const { api, set, messages, motorStop } = mockSafeOff();
     await safeOff(api, new Map([["ATC_RAT_YAW_P", 0.18]]));
+    expect(motorStop).toHaveBeenCalledOnce();
     expect(set).toHaveBeenCalledWith("RAWES_MODE", 0, true, undefined);
     expect(set).toHaveBeenCalledWith("H_YAW_TRIM", 0, true, undefined);
     expect(set).toHaveBeenCalledWith("ATC_RAT_YAW_P", 0.18, false);

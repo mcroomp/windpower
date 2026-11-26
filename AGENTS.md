@@ -173,6 +173,15 @@ with `linkhub query` before writing one-off parsing code. Use the native
 See `design/linkhub.md` for the full interface. Do not export duplicate
 transport logs.
 
+For timing, phase or spectra, use vehicle timestamps, not LinkHub receive
+time: `DEBUG_FLOAT_ARRAY.time_usec` (rawes.lua boot time),
+`ATTITUDE_QUATERNION.time_boot_ms` and `SERVO_OUTPUT_RAW.time_usec` share one
+clock. `PID_TUNING` has no timestamp, so treat it as receive-timed (statistics
+only). Expect dropouts; measure delivered rates rather than trusting requests.
+Experiments made since the start-of-experiment snapshot hold the vehicle's
+actual parameters in `parameters.json` and scripts in `scripts/`; prefer them
+over `.parm` defaults (see `design/linkhub.md#experiments`).
+
 ## Core Invariants (summary)
 
 - Frames: simulation physics runs NED world + FRD body.

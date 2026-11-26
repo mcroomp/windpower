@@ -604,7 +604,15 @@ def test_launcher_delegates_setup_and_preserves_connection_arguments(
         args.insert(0, "--build")
     result = run_script(bootstrap, "run_linkhub_ui.cmd", *args)
     assert result.returncode == 7
-    assert 'uv python install --upgrade --no-bin --no-registry "3.14"' in commands(bootstrap)
+    calls = commands(bootstrap)
+    if missing is None:
+        assert not any(line.startswith("uv ") for line in calls)
+        assert "npm run build:assets" in calls
+        assert "npm run build" not in calls
+        assert any(line.startswith("cargo build ") and line.endswith(" --release") for line in calls)
+    else:
+        assert 'uv python install --upgrade --no-bin --no-registry "3.14"' in calls
+        assert "npm run build" in calls
     assert "http://0.0.0.0:9123/ (all network interfaces)" in result.stdout
     assert "Connection: tcp:127.0.0.1:5760  Baud: auto" in result.stdout
     assert "MOCK_SERVER" in result.stdout
@@ -750,7 +758,7 @@ def test_launcher_does_not_start_after_setup_failure(
 ):
     installed_tools(bootstrap)
     server_artifacts(bootstrap)
-    bootstrap[3]["MOCK_FAIL"] = "sync"
+    bootstrap[3]["MOCK_FAIL"] = "cargo"
     result = run_script(bootstrap, "run_linkhub_ui.cmd", "--build", "auto")
     assert result.returncode == 1
     assert "Project setup failed. LinkHub was not started." in result.stdout

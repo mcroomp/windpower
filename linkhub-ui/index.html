@@ -25,7 +25,7 @@
               <button id="csv-toggle" type="button" aria-pressed="false" aria-controls="csv-panel" title="Recent received CSV rows" hidden>CSVs</button>
               <div id="connection-state" class="badge offline">connecting</div>
             </div>
-            <button id="link-throughput" type="button" aria-expanded="false" aria-controls="link-details" title="MAVLink frame throughput, averaged over 3 seconds; excludes UART and radio overhead. Click for a per-message breakdown.">RX — · TX —</button>
+            <button id="link-throughput" type="button" aria-expanded="false" aria-controls="link-details" title="MAVLink frame throughput (3-second average, excluding UART and radio overhead) and last reported battery voltage. Click for a per-message throughput breakdown.">RX — · TX — · Battery —</button>
             <div id="link-details" class="link-details" role="region" aria-label="Throughput by message type" hidden></div>
           </div>
         </header>
@@ -106,7 +106,8 @@
     <dialog id="experiment-dialog" class="experiment-dialog" aria-labelledby="experiment-dialog-title">
       <form id="experiment-form" method="dialog">
         <h2 id="experiment-dialog-title">Start experiment</h2>
-        <p>Arming and the bench motor are enabled only while an experiment runs.
+        <p>The experiment starts immediately. Arming and the bench motor remain
+          locked until the background checks pass.
           Stopping ramps the motor down, waits for the rotor to stop, applies safe-off,
           and saves the MAVLink log as JSON.</p>
         <label>Name

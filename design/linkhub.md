@@ -253,6 +253,8 @@ The browser renews a 2 s lease every 500 ms only for a motor it explicitly
 started. Closing its motor panel, hiding the tab, or a request failure revokes
 renewal and attempts a stop. A suspended browser must not revive an expired
 lease, and reopening the panel never starts or adopts a running motor.
+Renewal remains tied to the same active experiment and its completed snapshot.
+Camera verification is required to start the motor, not to renew its lease.
 UI operation is described in the [motor panel guide](../linkhub-ui/README.md#bluetooth-motor-panel).
 
 The controller journals its state changes as diagnostics with source
@@ -357,20 +359,62 @@ protect.
 `POST /v1/experiment/start` creates the experiment directory
 `<data-dir>/experiments/<UTC>_<name-slug>_<id8>/` and writes
 `experiment.txt` there with the entered name and description, the UTC start
-time, the experiment ID and the run ID. It then records the journal cursor and
-journals an `experiment.started` diagnostic marker. If the directory or text
-file cannot be created, start fails and no experiment begins. The returned
-experiment includes `directory`. `POST /v1/experiment/stop` journals
+time, the experiment ID, the run ID and the client's optional
+`telemetry_profile` (the UI sends its active profile). It then records the
+journal cursor and journals an `experiment.started` diagnostic marker. If the
+directory or text file cannot be created, start fails and no experiment
+begins. The returned experiment includes `directory`, `telemetry_profile` and
+`snapshot`.
+
+Start then captures the vehicle configuration in the background:
+`AUTOPILOT_VERSION`, the full parameter table via MAVFTP
+`@PARAM/param.pck?withdefaults=1` (saved raw as `param.pck` and decoded to
+`parameters.json`, with `default` only where it differs from the value), and
+every `*.lua` file in `/APM/scripts` (saved under `scripts/`, CRC-verified).
+Script names must be plain filenames, without drive prefixes or path separators;
+existing snapshot script files are never overwritten. Violations fail the snapshot.
+`snapshot.json` records the firmware, parameter count, each script's size and
+SHA-256, any error, and `message_intervals`: the vehicle's own
+`MESSAGE_INTERVAL` on this link for the analysis streams (attitude, attitude
+target, servo output, PID tuning, RPM, ESC telemetry, vibration, battery). A
+rejected interval query is recorded per stream and does not fail the
+snapshot. The experiment's `snapshot` reports `state`
+`capturing`, `complete` or `failed`; the outcome is journaled as
+`experiment.snapshot` before the state changes, so it appears in
+`mavlog.json`. Without a MAVLink link the snapshot fails. Parameter writes
+during the experiment remain visible as `PARAM_SET`/`PARAM_VALUE` records.
+A snapshot still running at stop finishes writing its files afterwards. The
+snapshot also lists the onboard (DataFlash) logs present at the start.
+
+`POST /v1/experiment/mark` with `{label}` journals an `experiment.mark`
+diagnostic (`fields.label`) and returns the label, cursor and elapsed time.
+Marks split the experiment into named segments for
+`analysis/analyze_motor_sessions.py` (`segments`) and
+`analysis/yaw_digital_twin.py` (`--rough-mark` etc.).
+
+`POST /v1/experiment/stop` journals
 `experiment.stopped`, then writes every journal record between the two
 markers to `mavlog.json` in the experiment directory. The file includes
 MAVLink rx/tx records and diagnostics. LinkHub writes a `.partial` file first
 and then renames it, so a crash cannot leave a truncated file under the final
 name. The file shape is
 `{schema_version: 1, experiment: {id, name, description, run_id, started_at_ns,
-stopped_at_ns, start_cursor, end_cursor}, records: [...], record_count}`, and
+stopped_at_ns, start_cursor, end_cursor, snapshot, telemetry_profile},
+records: [...], record_count}`, where `snapshot` is its status at stop, and
 each record uses the same JSON encoding as `GET /v1/mavlink/messages`.
 Experiment state lives in memory: restarting the service drops an active
 experiment without writing `mavlog.json`. The journal still holds the records.
+
+After stop, LinkHub downloads every onboard log that is new or has a different
+size than at the start as `onboard-<id>.BIN`, through the ordinary transfer
+registry (listed and cancellable at `/v1/mavlink/transfers`).
+`onboard_logs.json` reports `downloading`, then `complete`, `failed` or
+`skipped` with each log's size or error. Download start (when there are logs
+to fetch), per-file byte progress at roughly 10% intervals, and the final
+outcome are journaled as `experiment.onboard_logs`
+after the experiment window. ArduPilot serves logs
+only while disarmed, and a large log over a telemetry radio can take a long
+time; cancel the transfer if it is not needed.
 
 #### Phone video
 
@@ -414,6 +458,23 @@ chunks arrive. Chunks must arrive in sequence from 0. A repeated chunk is
 acknowledged without being rewritten, so phones retry safely after a lost
 response. A gap returns 409 `video_out_of_order`. LinkHub accepts the final
 chunk for 120 s after stop, then returns 409 `experiment_closed`.
+
+The final chunk also finalizes the recording using **FFmpeg**, which must be
+installed on LinkHub's `PATH`. This is a lossless remux (`-c copy`): WebM and
+Matroska receive duration metadata and front-loaded Cues; MP4 receives a
+finalized, front-loaded `moov` index (`+faststart`). Completed files are
+seekable; files still being recorded are not guaranteed seekable. Finalization
+has a 120 s timeout and writes a sibling temporary file before replacing the
+original. `finished` becomes true only after successful replacement, and
+`bytes` then reports the finalized file size. Failure returns HTTP 500
+`video_finalize_failed` with the FFmpeg error, preserves the uploaded original,
+and leaves `finished` false. Retrying the final chunk retries finalization
+without appending its bytes again.
+
+Video status advances only after each chunk is written and `sync_data`
+succeeds. The UI uses that status, rather than a phone's heartbeat claim, to
+verify recording before enabling arm/motor actions; see
+[LinkHub UI experiments](../linkhub-ui/README.md#experiments).
 
 The server only bounds the time window. It does not enforce arm or motor
 gating, and it does not stop actuators. The UI's experiment controller
@@ -591,8 +652,12 @@ packed parameter uploads. In Copter-4.7.1,
 and [uploads explicitly preserve all Int32 bits](https://github.com/ArduPilot/ardupilot/blob/Copter-4.7.1/libraries/AP_Filesystem/AP_Filesystem_Param.cpp#L607)
 when the uploaded and destination types both match Int32. This is a distinct
 ArduPilot-specific packed-file protocol, not `PARAM_EXT_*` or bytewise classic
-parameter encoding. The typed parameter transaction API currently uses classic
-messages; it does not yet implement packed-file parameter reads/writes.
+parameter encoding. The typed parameter transaction API uses classic
+messages; the only packed-file use is the read-only experiment snapshot
+(`mavlink_protocol::client::decode_param_pack`). ArduPilot reports the virtual
+file's size as an estimate (`count × 12` bytes), so MAVFTP reads of `@` paths
+end at the first short chunk, or where a burst returns end-of-file before any
+data, and skip the CRC check.
 
 The dialect cannot represent an enumeration value outside it. A frame
 that passes its CRC but does not decode as a typed message (for example an

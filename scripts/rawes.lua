@@ -324,7 +324,7 @@ local YFF_MAX  = 0.7     -- trim clamp upper bound [throttle fraction] (RAWES_YF
 local YFF_TAU  = 0.3     -- trim low-pass time constant [s]            (RAWES_YFF_TAU)
 -- RAWES_YAW_SLP: yaw-motor slope [RPM/µs].  0 → use bench default below.
 -- YFF_A = slope × SERVO9_SPAN_US × 2π/60 = d(psi_dot)/d(throttle) [rad/s per unit]
-local SERVO9_SPAN_US   = 1000.0  -- SERVO9_MAX - SERVO9_MIN
+local SERVO9_SPAN_US   = 1000.0  -- fixed slope-conversion span
 local YFF_A            = 0.504 * SERVO9_SPAN_US * (2.0 * math.pi / 60.0)  -- default slope 0.504 RPM/µs
 local YAW_MOTOR_FUNC   = 36      -- ArduPilot servo function for Motor4 (SERVO9)
 local TEL_HZ           = 2.0     -- diagnostic DEBUG_FLOAT_ARRAY emission rate [Hz]  (RAWES_TEL_HZ)

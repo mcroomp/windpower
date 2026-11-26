@@ -56,7 +56,7 @@ from .hw import (
     _send_set_servo,
     _set_safe_off_state,
     _esc_telem_msg_for_channel,
-    _esc_erpm,
+    _esc_motor_rpm,
     _rpm_triplet,
 )
 from .messages import read_one
@@ -1304,7 +1304,7 @@ def _run_observation(
         "mrpm_hist": [],  # (t_rel, mech_rpm) for the 5 s rolling average on screen
         "vbat": None,
         "curr": None,
-        "erpm": None,
+        "motor_rpm": None,
         "yff_t": None,
         "yff_u": None,
         "yff_gz": None,
@@ -1406,7 +1406,7 @@ def _run_observation(
             state["yaw"] = math.degrees(msg.yaw)
             state["yaw_rate"] = msg.yawspeed  # rad/s (mav_att_yaw_rate_rads)
             # Emit one CSV row per ATTITUDE message (typically 10-50 Hz)
-            _erpm, _mech, _rotor = _rpm_triplet(state["erpm"])
+            _erpm, _mech, _rotor = _rpm_triplet(state["motor_rpm"])
             _qw, _qx, _qy, _qz, _qerr_deg, _qerr_yaw_deg = _quat_error(
                 state["att_q"], state["att_target_q"]
             )
@@ -1542,10 +1542,10 @@ def _run_observation(
             if state["curr"] is None and getattr(msg, "current_battery") >= 0:
                 state["curr"] = getattr(msg, "current_battery") / 100.0
         elif isinstance(msg, EscTelemetry):
-            erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
-            if erpm is not None:
-                state["erpm"] = erpm
-                _, _m, _ = _rpm_triplet(erpm)
+            motor_rpm = _esc_motor_rpm(msg, MOTOR_ESC_CHANNEL)
+            if motor_rpm is not None:
+                state["motor_rpm"] = motor_rpm
+                _, _m, _ = _rpm_triplet(motor_rpm)
                 if _m is not None:
                     state["mrpm_hist"].append((t_rel, _m))
                     cutoff = t_rel - mot_window_s
@@ -1598,7 +1598,7 @@ def _run_observation(
             mot_avg_s = (
                 f"{sum(v for _, v in state['smot_hist']) / len(state['smot_hist']):.0f}"
             )
-        _e, _m, _rotor = _rpm_triplet(state["erpm"])
+        _e, _m, _rotor = _rpm_triplet(state["motor_rpm"])
         mrpm_avg_s = None
         if state["mrpm_hist"]:
             mrpm_avg_s = (
@@ -1675,7 +1675,7 @@ def _run_observation(
         def _update_passive_live_view(st: object, t_rel: float) -> bool:
             actual_q = state["att_q"] or (1.0, 0.0, 0.0, 0.0)
             _, _, _, _, qerr_deg, _ = _quat_error(state["att_q"], state["att_target_q"])
-            _, _, rotor_rpm = _rpm_triplet(state["erpm"])
+            _, _, rotor_rpm = _rpm_triplet(state["motor_rpm"])
             return live_view.update(
                 PassiveViewData(
                     t=t_rel,

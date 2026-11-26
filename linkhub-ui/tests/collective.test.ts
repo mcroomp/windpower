@@ -28,7 +28,7 @@ function setup() {
   const api = new LinkHubApi();
   vi.spyOn(api, "stopMotor").mockResolvedValue(stoppedMotor);
   const status: LinkHubStatus = {
-    connected: true, ready: true, connection: "test", port: null, baud: null,
+    connected: true, ready: true, connection: "test", port: null, baud: null, native_usb: false,
     clock_epoch: 0, target_system: 1, target_component: 1, base_mode: "",
     custom_mode: 1, system_status: mavEnum(MavState.STANDBY),
     latest_time_boot_ms: 0, received_messages: 0, transmitted_messages: 0,

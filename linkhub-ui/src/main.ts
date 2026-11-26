@@ -4,7 +4,7 @@ import { eulerFromAttitudeQuaternion } from "./attitude";
 import { diagValue, DIAG_ARRAY_NAME, isDiagRecord } from "./diag-array";
 import {
   formatKbps,
-  formatLinkThroughput,
+  formatLinkHeader,
   messageThroughputRows,
 } from "./link-throughput";
 import type { LinkHubStatus } from "./types";
@@ -194,7 +194,9 @@ function scheduleOverlay(): void {
   }
 }
 function renderLinkThroughput(status: LinkHubStatus | null): void {
-  linkThroughput.textContent = formatLinkThroughput(status);
+  linkThroughput.textContent = formatLinkHeader(
+    status, telemetry.get("BATTERY_STATUS")?.fields, telemetry.get("SYS_STATUS")?.fields,
+  );
   const rows = messageThroughputRows(status);
   const table = document.createElement("table");
   const head = table.createTHead().insertRow();

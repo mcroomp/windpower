@@ -3,23 +3,21 @@ test_yaw_regulation_lua.py — Closed-loop Lua yaw trim observer simtest.
 
 Plant
 -----
-torque_model.step() — the real GB4008 motor + ESC governor dynamics used by
-mediator_torque.  No shortcuts: the motor speed responds via the ESC governor
-(~40 ms tau), and the hub yaw rate is derived from motor speed vs rotor speed
-through the 10:1 gear.
+torque_model.step() — the assumed GB4008 motor + ESC governor model used by
+mediator_torque.  Motor speed responds via the modeled ESC governor, and hub
+yaw rate is derived from motor speed and rotor speed through the assumed gear.
+These dynamics have not been identified from hardware.
 
 RAWES_YAW_SLP calibration
 ---------------------
 rawes.lua reads RAWES_YAW_SLP [RPM/µs] and converts it to the observer slope YFF_A.
 The test sets RAWES_YAW_SLP to the value derived from torque_model constants
-(the result a bench calibration of d(shaft_RPM)/d(PWM_µs) would produce for
-this motor + gear combination).  The test then verifies:
+(the model's body-yaw RPM/PWM slope, including its gear ratio). The test verifies:
 
   1. YFF_A inside Lua equals the plant's static d(psi_dot)/d(throttle).
   2. The closed-loop observer drives |psi_dot| below MAX_DEG_S within SETTLE_S.
 
-This makes the test honest: if in real life RAWES_YAW_SLP is set from an actual
-bench measurement of the motor, the observer will work the same way.
+This tests the observer against the assumed model, not hardware response.
 """
 from __future__ import annotations
 
@@ -84,7 +82,7 @@ _IC_THRUST = (-0.150 - _col_min) / (_col_max - _col_min)
 def test_yaw_regulation_lua():
     """
     rawes.lua yaw trim observer converges psi_dot to ≤ MAX_DEG_S
-    when RAWES_YAW_SLP is set to the slope derived from the real plant.
+    when RAWES_YAW_SLP matches the assumed simulated plant.
     """
     sim = RawesLua(mode=MODE_PASSIVE, RAWES_YAW_SLP=_YAW_SLP)
     sim.armed   = True

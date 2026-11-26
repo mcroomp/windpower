@@ -30,16 +30,18 @@ class Element extends EventTarget {
 function fakeExperiment(running: boolean) {
   const listeners = new Set<() => void>();
   const experiment = {
-    running,
+    controlsReady: running,
+    motorLeaseExperimentId: running ? "experiment-1" : null as string | null,
     requireActive: vi.fn(async (action: string) => {
-      if (!experiment.running) throw new Error(`${action} refused: start an experiment first`);
+      if (!experiment.controlsReady) throw new Error(`${action} refused: start an experiment first`);
     }),
     onChange: (listener: () => void) => {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    set(value: boolean) {
-      experiment.running = value;
+    set(experimentId: string | null, videoReady = true) {
+      experiment.motorLeaseExperimentId = experimentId;
+      experiment.controlsReady = experimentId !== null && videoReady;
       listeners.forEach((listener) => listener());
     },
   };
@@ -342,11 +344,24 @@ describe("Bluetooth motor panel", () => {
     panel.dispose();
   });
 
-  it("stops renewing the lease once the experiment stops", async () => {
+  it("keeps renewing through a video check failure but refuses a fresh start", async () => {
     const { panel, api, experiment } = setup();
     await panel.turnOn();
-    experiment.set(false);
-    await vi.advanceTimersByTimeAsync(1500);
+    experiment.set("experiment-1", false);
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(api.runMotor).toHaveBeenCalledTimes(6);
+    expect(api.stopMotor).not.toHaveBeenCalled();
+    await panel.stop();
+    await panel.turnOn();
+    expect(api.runMotor).toHaveBeenCalledTimes(6);
+    panel.dispose();
+  });
+
+  it.each([null, "experiment-2"])("stops renewing if the active experiment changes to %s", async (id) => {
+    const { panel, api, experiment } = setup();
+    await panel.turnOn();
+    experiment.set(id);
+    await vi.advanceTimersByTimeAsync(2_500);
     expect(api.runMotor).toHaveBeenCalledTimes(1);
     panel.dispose();
   });

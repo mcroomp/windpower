@@ -14,6 +14,47 @@ by [linkhub.md](linkhub.md). The repository ownership map lives at
 investigations are preserved in [HARDWARE_STARTUP.md](../HARDWARE_STARTUP.md);
 they are diagnostic context, not current operating instructions.
 
+## Offline yaw analysis of motor-session exports
+
+Analyze saved LinkHub experiments without connecting to hardware:
+
+```powershell
+uv run python -m analysis.analyze_motor_sessions simulation\logs\linkhub\experiments
+```
+
+The input can also be one experiment directory or its `mavlog.json`, a
+motor-session export, or an export directory containing `index.json`. The utility
+writes `yaw_analysis.json` beside the input (`--output` overrides this) and prints
+one summary per session. Experiment record counts and journal cursor continuity
+are checked before reporting results.
+`--rate-band-deg-s` sets the tracking-error band (default 5 degrees/s).
+
+Reports include yaw PID tracking error, P/I/D/FF effort, trim/applied-output
+statistics, SERVO9 PWM smoothness, and first/last-quarter comparisons within
+each sufficiently long armed mode/clock block. Fixed 10-second windows report
+the same armed signals alongside motor RPM; recorded Bluetooth motor command
+events provide context but do not prove the actual motor speed. Short or sparse
+windows and motor-speed changes are not steady-state comparisons. Rates from `PID_TUNING` are
+radians/s internally and reported as degrees/s; normalized throttle is reported
+in percentage points. Analysis weights 100 ms receive-time bins equally; RMS
+uses within-bin mean squares so fast opposite errors cannot cancel. Smoothness
+uses bin means;
+slew/variation metrics never bridge missing bins or mode/arming/clock changes.
+Raw peaks remain available. No servo calibration or observer gain is assumed.
+The reported trim-plus-PID sum is only a partial sum of telemetry fields, not
+an actuator command: derivative feedforward, feedforward scaling, mixer
+offsets/gates and actuator mapping are not reconstructed. A recent Lua
+diagnostic frame does not prove its persisted values were updated recently.
+
+Only the ArduPilot vehicle identity's heartbeats determine armed state; bridge
+heartbeats cannot disarm the analysis. Unknown/stale heartbeat state, missing
+diagnostic mask bits, stale trim, and short captures are reported rather than
+replaced with zero. Experiments without a vehicle heartbeat have unavailable
+control metrics rather than being mistaken for a disarmed vehicle. Early/late comparisons describe observed behavior, not a
+causal proof of trim effectiveness: RPM, load, targets and PID settings can
+change. See the [trim observer owner](flight_stack.md#52-yaw-actuator-boundary-and-trim-observer)
+for the control law.
+
 ## Connection
 
 ```bash
@@ -252,6 +293,12 @@ duration is 10 s.
 | `text` | `STATUSTEXT` | `t_s`, `severity` (MAVLink name, e.g. `MAV_SEVERITY_INFO`), `text` |
 | `attitude` | `ATTITUDE` | `t_s`, roll/pitch/yaw + body rates |
 | `power` | `BATTERY_STATUS`, `SYS_STATUS` | `t_s`, `vbat_v`, `current_a`, `power_w` |
+
+ArduPilot's ESC telemetry reports motor mechanical RPM after its pole-count
+conversion. `erpm` is calculated from that reported value and the configured
+pole count (or the default if unavailable); `rotor_rpm` is an estimate using
+the assumed gear ratio, not an independent rotor-speed measurement. See
+[hardware.md](hardware.md#yaw-motor-and-dshot-telemetry).
 
 `watch servos` records outputs 1–8 only. For output 9 or full journal evidence,
 use `status` or the LinkHub journal.

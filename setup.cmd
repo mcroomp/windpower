@@ -6,6 +6,10 @@ set "REPO=%REPO:~0,-1%"
 set "VS_INSTALLER=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
 set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;%ProgramFiles%\WinGet\Links;%ProgramFiles%\nodejs;%USERPROFILE%\.cargo\bin;%VS_INSTALLER%;%PATH%"
 
+set "LINKHUB_ONLY=0"
+if /i "%~1"=="--linkhub-only" set "LINKHUB_ONLY=1"
+if "%LINKHUB_ONLY%"=="1" goto linkhub_build
+
 call :ensure_tool uv astral-sh.uv
 if errorlevel 1 exit /b 1
 call :ensure_node
@@ -50,6 +54,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:linkhub_build
+if "%LINKHUB_ONLY%"=="1" (
+    call :ensure_node
+    if errorlevel 1 exit /b 1
+)
 call :ensure_msvc
 if errorlevel 1 exit /b 1
 call :ensure_tool cargo Rustlang.Rustup
@@ -68,7 +77,11 @@ if errorlevel 1 (
     exit /b 1
 )
 echo [INFO] Building LinkHub UI ...
-call npm run build
+if "%LINKHUB_ONLY%"=="1" (
+    call npm run build:assets
+) else (
+    call npm run build
+)
 if errorlevel 1 (
     popd
     echo ERROR: LinkHub UI build failed.
@@ -83,10 +96,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-call uv run --no-sync --project "%REPO%" python --version
-if errorlevel 1 (
-    echo ERROR: The managed Python environment could not be verified.
-    exit /b 1
+if "%LINKHUB_ONLY%"=="0" (
+    call uv run --no-sync --project "%REPO%" python --version
+    if errorlevel 1 (
+        echo ERROR: The managed Python environment could not be verified.
+        exit /b 1
+    )
 )
 echo [INFO] Done.
 endlocal

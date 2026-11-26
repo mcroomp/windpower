@@ -182,7 +182,7 @@ export class DemoBackend {
     }
     return {
       ...this.state, connected: true, ready: true, connection: "recorded-sitl-replay",
-      port: null, baud: null, clock_epoch: 1, target_system: 1, target_component: 1,
+      port: null, baud: null, native_usb: false, clock_epoch: 1, target_system: 1, target_component: 1,
       latest_time_boot_ms: Math.round(this.now() * 1000),
       received_messages: this.sequence, transmitted_messages: 0,
       received_bytes: this.sequence * 64, transmitted_bytes: 0,

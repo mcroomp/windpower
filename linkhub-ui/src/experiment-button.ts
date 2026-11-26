@@ -3,6 +3,7 @@ import { formatElapsed, type ExperimentController, type ExperimentStage } from "
 const REFRESH_MS = 2_000;
 
 const STAGE_LABELS: Record<Exclude<ExperimentStage, "idle" | "running">, string> = {
+  starting: "Starting experiment…",
   "stopping-motor": "Stopping motor…",
   "spin-down": "Rotor spin-down…",
   disarming: "Safe-off…",
@@ -54,7 +55,10 @@ export class ExperimentButton {
 
     this.unsubscribe = experiment.onChange(() => this.render());
     this.tick = setInterval(() => this.render(), 1_000);
-    this.poll = setInterval(() => void this.refresh(), REFRESH_MS);
+    this.poll = setInterval(() => {
+      void this.refresh();
+      void this.experiment.refreshOnboardLogs();
+    }, REFRESH_MS);
     this.render();
     void this.refresh();
   }
