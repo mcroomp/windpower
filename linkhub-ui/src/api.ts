@@ -2,6 +2,7 @@ import type {
   CommandResult,
   CameraStatus,
   CsvStatus,
+  DiagnosticBatch,
   ExperimentInfo,
   JsonObject,
   LinkHubStatus,
@@ -156,6 +157,15 @@ export class LinkHubApi {
 
   cameraStatus(): Promise<CameraStatus> {
     return this.request("GET", "/v1/camera", undefined, AbortSignal.timeout(3_000));
+  }
+
+  csvSamples(after: string, source: string, limit = 1_000, signal?: AbortSignal): Promise<DiagnosticBatch> {
+    const query = new URLSearchParams({ after, source, event: "csv.sample", limit: String(limit), last_ms: "301000" });
+    const timeout = AbortSignal.timeout(3_000);
+    return this.request(
+      "GET", `/v1/diagnostics/events?${query}`, undefined,
+      signal ? AbortSignal.any([signal, timeout]) : timeout,
+    );
   }
 
   csvStatus(signal?: AbortSignal): Promise<CsvStatus> {

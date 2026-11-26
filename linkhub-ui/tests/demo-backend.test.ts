@@ -33,7 +33,7 @@ function fixture() {
 describe("recorded SITL demo", () => {
   it("reports no CSV feed instead of inventing replay measurements", async () => {
     expect(await fixture().api.csvStatus()).toEqual({
-      available: false, columns: [], latest: null, recent: [],
+      available: false, columns: [], rows_received: 0, latest: null, recent: [],
     });
   });
 

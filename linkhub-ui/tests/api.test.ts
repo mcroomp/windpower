@@ -46,8 +46,22 @@ describe("formatMavResult", () => {
 });
 
 describe("typed wire contract", () => {
+  it("queries CSV journal samples with a source filter, cursor, page size, and cancellation", async () => {
+    const batch = { records: [], next_cursor: "v1:42" };
+    const fetchMock = stubFetch(batch);
+    const controller = new AbortController();
+    expect(await new LinkHubApi().csvSamples("v1:8", "bench lift", 1000, controller.signal)).toEqual(batch);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/diagnostics/events?after=v1%3A8&source=bench+lift&event=csv.sample&limit=1000&last_ms=301000",
+      expect.objectContaining({ method: "GET", signal: expect.any(AbortSignal) }),
+    );
+    const signal = fetchMock.mock.lastCall?.[1].signal as AbortSignal;
+    controller.abort();
+    expect(signal.aborted).toBe(true);
+  });
+
   it("reads CSV rows independently and propagates caller cancellation", async () => {
-    const status = { available: false, columns: [], latest: null, recent: [] };
+    const status = { available: false, columns: [], rows_received: 0, latest: null, recent: [] };
     const fetchMock = stubFetch(status);
     const controller = new AbortController();
     expect(await new LinkHubApi().csvStatus(controller.signal)).toEqual(status);

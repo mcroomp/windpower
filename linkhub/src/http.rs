@@ -354,7 +354,7 @@ async fn csv_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     match &state.csv {
         Some(csv) => Json(csv.status().await),
         None => Json(json!({
-            "available": false, "columns": [], "latest": null, "recent": [],
+            "available": false, "columns": [], "rows_received": 0, "latest": null, "recent": [],
         })),
     }
 }
@@ -461,6 +461,7 @@ async fn mavlink_status(State(state): State<Arc<AppState>>) -> Result<Json<Value
 #[derive(Debug, Default, Deserialize)]
 struct RecordQuery {
     after: Option<String>,
+    last_ms: Option<u64>,
     classes: Option<String>,
     source: Option<String>,
     event: Option<String>,
@@ -614,6 +615,7 @@ impl RecordFilter {
     fn from_message_query(query: &MessageQuery) -> Result<Self, ApiError> {
         let mut filter = Self::from_query(&RecordQuery {
             after: None,
+            last_ms: None,
             classes: Some("mavlink".to_owned()),
             source: None,
             event: None,
@@ -930,16 +932,32 @@ async fn read_record_batch(
     let deadline = Instant::now() + Duration::from_millis(query.wait_ms);
 
     loop {
+        let tail_before_read = state.journal.tail();
+        let since_ns = query
+            .last_ms
+            .map(|ms| wall_time_ns().saturating_sub(ms.saturating_mul(1_000_000)));
         let read = state
             .journal
-            .read_after_bounded(cursor, MAX_JOURNAL_SCAN_RECORDS)
+            .read_window_bounded(
+                cursor,
+                TimeWindow {
+                    since_ns,
+                    until_ns: None,
+                },
+                MAX_JOURNAL_SCAN_RECORDS,
+            )
             .await?;
+        if since_ns.is_some() && read.records.is_empty() {
+            cursor = cursor.max(tail_before_read);
+        }
         let mut next_clock = read.tail_clock;
         let mut records = Vec::new();
         for record in read.records {
             cursor = cursor.max(record.sequence);
             next_clock = record.sim_clock;
-            if filter.matches(&record) {
+            if since_ns.is_none_or(|since| record.ingest_time_ns >= since)
+                && filter.matches(&record)
+            {
                 records.push(record.to_api_value());
                 if records.len() == limit {
                     break;
@@ -1864,20 +1882,18 @@ mod tests {
         assert_eq!(initial["available"], true);
         assert_eq!(initial["latest"], Value::Null);
         assert_eq!(initial["recent"], json!([]));
+        assert_eq!(initial["rows_received"], 0);
 
         let (status, header) = json_response(
             &app,
-            csv_post(
-                "test.csv",
-                "_rownum,_time,rpm,flap_angle,pitch_angle,lift,drag\r\n",
-            ),
+            csv_post("test.csv", "_rownum,_time,_time_unix_us,input,raw,gain\r\n"),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(header["accepted"], 0);
         assert_eq!(journal.tail(), 0);
 
-        let rows = "1,12:34:56.001,200,85,-2,1.25,-0.5\r\n2,12:34:56.101,201,86,-1,1.5,-0.4\n";
+        let rows = "1,12:34:56.001,1735734896001000,A1,-8388608,64\r\n2,12:34:56.101,1735734896101000,B2,8388607,32\n";
         let (status, accepted) = json_response(&app, csv_post("test.csv", rows)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(accepted["accepted"], 2);
@@ -1894,16 +1910,32 @@ mod tests {
         assert!(latest["latest"]["received_time_ns"].as_u64().unwrap() > 0);
         assert_eq!(latest["latest"]["values"]["rownum"], 2);
         assert_eq!(latest["latest"]["values"]["device_time"], "12:34:56.101");
-        assert_eq!(latest["latest"]["values"]["lift"], 1.5);
-        assert_eq!(latest["latest"]["values"]["drag"], -0.4);
+        assert_eq!(latest["latest"]["values"]["input"], "B2");
+        assert_eq!(latest["latest"]["values"]["raw"], 8388607.0);
+        assert_eq!(latest["latest"]["values"]["gain"], 32);
         assert_eq!(latest["recent"].as_array().unwrap().len(), 2);
+        assert_eq!(latest["rows_received"], 2);
+        let first = &latest["recent"][0];
+        let last = &latest["recent"][1];
+        let received = last["received_time_ns"].as_u64().unwrap();
+        assert_eq!(first["received_time_ns"], last["received_time_ns"]);
+        assert_eq!(last["sample_time_ns"], received);
+        assert_eq!(
+            first["sample_time_ns"].as_u64().unwrap(),
+            received - 100_000_000
+        );
+        assert_eq!(last["time_quality"], "estimated");
+        assert_eq!(last["clock_epoch"], 1);
 
         let (_, next_file) = json_response(
             &app,
-            csv_post("next.csv", "1,12:35:00.001,0,85,0,2.5,0.2\n"),
+            csv_post("next.csv", "1,12:35:00.001,1735734900001000,A1,25,64\n"),
         )
         .await;
         assert_eq!(next_file["accepted"], 1);
+        let (_, latest) =
+            json_response(&app, Request::get("/v1/csv").body(Body::empty()).unwrap()).await;
+        assert_eq!(latest["rows_received"], 3);
         journal.shutdown().await.expect("shutdown");
         task.await.expect("journal task");
         let saved = crate::journal::read_persisted(temp.path(), 0, None)
@@ -1917,7 +1949,74 @@ mod tests {
         assert_eq!(event.event, "csv.sample");
         assert_eq!(event.source_sequence, 1);
         assert_eq!(event.fields["filename"], "test.csv");
-        assert_eq!(event.fields["values"]["lift"], 1.25);
+        assert_eq!(event.fields["values"]["input"], "A1");
+        assert_eq!(event.fields["values"]["raw"], -8388608.0);
+        assert_eq!(event.fields["sample_time_ns"], received - 100_000_000);
+        assert_eq!(event.fields["time_quality"], "estimated");
+    }
+
+    #[tokio::test]
+    async fn csv_batch_anchors_final_row_when_device_counter_restarts() {
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let app = csv_app(journal.clone());
+        let (status, _) = json_response(
+            &app,
+            csv_post("transition.csv",
+                "19000,12:00:00.100,1735732800100000,A1,1,64\n1,12:00:00.200,1735732800200000,B1,2,64\n2,12:00:00.300,1735732800300000,A2,3,32\n"),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, state) =
+            json_response(&app, Request::get("/v1/csv").body(Body::empty()).unwrap()).await;
+        assert_eq!(state["rows_received"], 3);
+        let received = state["latest"]["received_time_ns"].as_u64().unwrap();
+        assert_eq!(state["latest"]["sample_time_ns"], received);
+        assert_eq!(state["latest"]["clock_epoch"], 2);
+        assert_eq!(state["recent"][0]["sample_time_ns"], received - 200_000_000);
+        assert_eq!(state["recent"][1]["sample_time_ns"], received - 100_000_000);
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
+    }
+
+    #[tokio::test]
+    async fn csv_count_exceeds_recent_cache_and_excludes_invalid_rows() {
+        let temp = TempDir::new().expect("temp directory");
+        let (journal, task) =
+            JournalHandle::start(JournalConfig::for_directory(temp.path(), Uuid::new_v4()))
+                .await
+                .expect("journal");
+        let app = csv_app(journal.clone());
+        let rows = (1..=8)
+            .map(|n| format!("{n},12:00:00,1735732800000000,A1,1,64\n"))
+            .collect::<String>();
+        let (status, _) = json_response(&app, csv_post("test.csv", rows.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, duplicates) = json_response(&app, csv_post("test.csv", rows)).await;
+        assert_eq!(duplicates["duplicates"], 8);
+        let (status, _) = json_response(
+            &app,
+            csv_post("test.csv", "9,12:00:00,1735732800000000,A1,NaN,64\n"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, state) =
+            json_response(&app, Request::get("/v1/csv").body(Body::empty()).unwrap()).await;
+        assert_eq!(state["rows_received"], 8);
+        assert_eq!(state["recent"].as_array().unwrap().len(), 5);
+        assert_eq!(state["latest"]["values"]["rownum"], 8);
+
+        let restarted = csv_app(journal.clone());
+        let (_, state) = json_response(
+            &restarted,
+            Request::get("/v1/csv").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(state["rows_received"], 0);
+        journal.shutdown().await.expect("shutdown");
+        task.await.expect("journal task");
     }
 
     #[tokio::test]
@@ -1930,9 +2029,10 @@ mod tests {
         let app = csv_app(journal.clone());
         for body in [
             "",
-            "1,12:00:00,0,0,0,1.0,2.0\n2,12:00:01,0,0,0,NaN,2.0\n",
-            "1,12:00:00,0,0,0,1.0\n",
-            "-1,12:00:00,0,0,0,1.0,2.0\n",
+            "1,12:00:00,0,A1,1,64\n2,12:00:01,0,A1,NaN,64\n",
+            "1,12:00:00,0,A1,1\n",
+            "-1,12:00:00,0,A1,1,64\n",
+            "1,12:00:00,0,A1,1,64\n2,25:00:00,0,A1,1,64\n",
         ] {
             let (status, error) = json_response(&app, csv_post("test.csv", body)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -1940,7 +2040,7 @@ mod tests {
             assert_eq!(journal.tail(), 0);
         }
         for request in [
-            csv_post("..%2Ftest.csv", "1,12:00:00,0,0,0,1,2"),
+            csv_post("..%2Ftest.csv", "1,12:00:00,0,A1,1,64"),
             csv_post("test.csv", vec![0xff]),
             Request::post("/v1/csv?filename=test.csv")
                 .header(CONTENT_TYPE, "application/json")
@@ -1948,7 +2048,7 @@ mod tests {
                 .unwrap(),
             Request::post("/v1/csv")
                 .header(CONTENT_TYPE, "text/csv")
-                .body(Body::from("1,12:00:00,0,0,0,1,2"))
+                .body(Body::from("1,12:00:00,0,A1,1,64"))
                 .unwrap(),
         ] {
             let (status, _) = json_response(&app, request).await;
@@ -1978,11 +2078,11 @@ mod tests {
         assert_eq!(
             status,
             json!({
-                "available": false, "columns": [], "latest": null, "recent": [],
+                "available": false, "columns": [], "rows_received": 0, "latest": null, "recent": [],
             })
         );
         let (status, error) =
-            json_response(&app, csv_post("test.csv", "1,12:00:00,0,0,0,1,2")).await;
+            json_response(&app, csv_post("test.csv", "1,12:00:00,0,A1,1,64")).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(error["error"], "not_ready");
         journal.shutdown().await.expect("shutdown");
@@ -2059,7 +2159,11 @@ mod tests {
         let config = JournalConfig::for_directory(temp.path().join("journal"), Uuid::new_v4());
         let (journal, task) = JournalHandle::start(config).await.expect("journal");
         let computer_name = hostname::get().unwrap().into_string().unwrap();
-        let short_name = computer_name.split('.').next().unwrap().to_ascii_lowercase();
+        let short_name = computer_name
+            .split('.')
+            .next()
+            .unwrap()
+            .to_ascii_lowercase();
         let named_url = format!("https://{short_name}.local:9443/camera");
         for (listen, expected) in [
             ("0.0.0.0", named_url.as_str()),
@@ -2505,8 +2609,9 @@ mod tests {
             .await
             .expect("response");
         let read = app
+            .clone()
             .oneshot(
-                Request::get("/v1/diagnostics/events")
+                Request::get("/v1/diagnostics/events?last_ms=300000")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -2527,6 +2632,24 @@ mod tests {
         let batch: Value = serde_json::from_slice(&batch_body).expect("diagnostic batch");
         assert_eq!(batch["records"][0]["kind"], "diagnostic.event");
         assert_eq!(batch["records"][0]["data"]["source"], "groundstation");
+        assert_eq!(batch["next_cursor"], "v1:1");
+
+        journal.flush().await.expect("flush");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let expired = app
+            .oneshot(
+                Request::get("/v1/diagnostics/events?last_ms=0")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(expired.status(), StatusCode::OK);
+        let bytes = to_bytes(expired.into_body(), usize::MAX)
+            .await
+            .expect("expired batch body");
+        let batch: Value = serde_json::from_slice(&bytes).expect("expired batch JSON");
+        assert_eq!(batch["records"], json!([]));
         assert_eq!(batch["next_cursor"], "v1:1");
 
         journal.shutdown().await.expect("shutdown");

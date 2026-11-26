@@ -285,6 +285,29 @@ See [motor lease semantics](../design/linkhub.md#bluetooth-bench-motor).
 
 ### Generic CSV ingestion
 
+On Windows, [run_linkhub_esp.cmd](../run_linkhub_esp.cmd) launches the ESP CSV
+receiver alongside a configured MAVLink connection. First copy
+`loadcell/launch_config.cmd.example` to the ignored `loadcell/launch_config.cmd`
+and edit its addresses, or set `LOADCELL_DEVICE_URL` and `LINKHUB_CONNECTION`
+in the launching environment:
+
+```powershell
+.\run_linkhub_esp.cmd --configure-firewall
+```
+
+It detects this PC's IPv4 address on the route to the ESP32, sets and verifies
+the ESP32 CSV destination, selects and verifies four-input capture
+(A1, A2, B1, B2), and starts the existing UI launcher on HTTP port
+8999 with [csv-map.json](csv-map.json) enabled. `--configure-firewall` requests
+administrator approval for the existing Private LAN firewall rule; omit it
+once that rule is configured. `--build` rebuilds through the normal setup.
+An already-correct destination is not rotated or flushed, so pending samples
+do not prevent startup while the receiver is offline. Changing to a different
+destination still requires the old receiver to accept pending data.
+The CSV destination and four-input mode remain configured after exit, including
+if LinkHub startup fails; uploads resume when the launcher runs again.
+Servo motion and the sample interval are not changed.
+
 Start LinkHub with a runtime mapping, adding these arguments to your usual
 `serve` command:
 
@@ -292,8 +315,9 @@ Start LinkHub with a runtime mapping, adding these arguments to your usual
 --listen 0.0.0.0 --csv-map .\linkhub\csv-map.json
 ```
 
-The supplied [example mapping](csv-map.json) describes an ESP32's ordered
-columns, but the receiver contains no sensor-specific schema:
+The supplied [example mapping](csv-map.json) describes the
+[load-cell firmware's two/four-input raw readings, input labels, gains, and timestamps](../loadcell/README.md#configuration-and-csv).
+The receiver contains no sensor-specific calibration or schema:
 
 ```json
 {
@@ -314,6 +338,11 @@ need not be the first column. Change this JSON and restart LinkHub to change
 source, names, types, or columns without rebuilding Rust. Invalid mappings
 prevent startup. Standard CSV quoting, escaped quotes, and CRLF are supported.
 One mapping configures the endpoint per service run.
+The optional `time_column` names a mapped string column in
+`HH:MM:SS[.fraction]` format (up to nine fractional digits). The ESP32 example
+uses `"time_column": "_time"`; malformed clock values reject the batch.
+See [CSV timing semantics](../design/linkhub.md#configured-csv-feeds) for
+per-batch acquisition-time estimation and clock-discontinuity handling.
 
 On the ESP32 servo interface (port **88**), set **CSVStorageURL** to
 `http://<LinkHub-LAN-IP>:8999/v1/csv`. The firmware appends `?filename=...`
@@ -331,13 +360,18 @@ curl.exe "http://127.0.0.1:8999/v1/csv"
 ```
 
 `GET /v1/csv` returns `available`, ordered output-field names in `columns`,
-`latest`, and `recent` (at most five newly accepted rows, oldest first).
+`rows_received` (newly accepted rows since service startup), `latest`, and
+`recent` (at most five newly accepted rows, oldest first). The count continues
+across filenames, excludes headers, rejected rows, and duplicate retries, and
+resets to zero on service restart.
 Before the first sample, `latest` is `null` and `recent` is empty, never
 fabricated zero readings. An accepted reading includes
 `source`, `filename`, `received_time_ns` (host ingestion time), `sequence` (journal
 sequence), `source_sequence` (device row counter), and a `values` object with
-the configured output fields. Values retain device units and calibration;
-LinkHub does not infer Newtons or reinterpret the device's time-of-day string.
+the configured output fields. `sample_time_ns` is the estimated acquisition
+time, or null when unavailable; `time_quality` and `clock_epoch` identify its
+quality and discontinuities. Values retain device units and calibration;
+LinkHub does not infer Newtons or change the raw device time string.
 The host timestamp permits clients to detect stale readings.
 
 POSTs are limited to 64 KiB. A matching header may appear alone or with rows;

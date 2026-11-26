@@ -10,12 +10,42 @@ MAVLink encoding limits still apply at the vehicle boundary; see
 ## CSVs pane
 
 When LinkHub receives CSV rows, the **CSVs** button appears and its pane opens.
-It shows the last five newly accepted rows, their filenames and host receive
-times, with columns driven by the runtime mapping rather than sensor-specific
-code. Use the button to collapse/reopen it. Polling is independent of MAVLink,
+It shows the latest raw **A1, A2, B1, B2** values from the current file's recent
+readings, its filename and host
+receive time, and a live count of newly accepted CSV rows since LinkHub started.
+Headers, duplicate retries, and rejected rows do not increase the count; it
+continues across CSV files and resets on service restart. Other mapped CSV fields
+are not displayed. Use the button to
+collapse/reopen it. The values and count refresh once per second.
+Polling is independent of MAVLink,
 so no vehicle heartbeat is needed. Old values retain their receive time; network
 errors are displayed explicitly, not presented as fresh readings.
 The offline demo has no CSV feed and does not fabricate samples.
+
+The same graph overlays **raw A1, A2, B1, B2 ADC counts**, each in a distinct
+color, with matching dashed **trailing 1-second arithmetic means**.
+It splits the firmware's one-reading-per-row `input`/`raw` CSV mapping into
+independent traces; alternating inputs are not treated as zeros or as gaps
+in another input's curve. There is no force conversion or gain normalization.
+The legend wraps to fit narrower panes. The inclusive window is
+`[sample time − 1 s, sample time]`;
+irregular spacing is supported without assuming a sample rate. The x-axis is
+elapsed estimated acquisition time, reconstructed by LinkHub from the relative
+device clock and periodic batch receipts, not a synchronized ESP wall clock.
+Host receipt time remains separate in the header.
+
+The chart shows a rolling five minutes of samples for the current source, even
+when uploads pause. It reads recent `csv.sample` diagnostics, not the five-row
+status preview, with an extra second for smoothing at the left edge. The full
+journal and cumulative row count are unchanged. Cursor pages, including empty advancing
+pages, are consumed up to each poll's snapshot tail (at most 32 pages per poll).
+Every fetched batch redraws immediately, without replay or animation; the next
+poll resumes any backlog. The chart retains at most 10,000 samples. Files and
+clock epochs have separate curves and averaging windows; out-of-order samples
+are sorted within their segment. Old samples without acquisition metadata are
+explicitly marked **timing unavailable** and excluded from plots and averages,
+never silently assigned host receipt times. Restart/source changes clear history.
+Journal errors retain already plotted data with an explicit error.
 
 Enable the receiver with `LINKHUB_CSV_MAP` or `--csv-map`; see
 [CSV ingestion and the ESP32 example](../linkhub/README.md#generic-csv-ingestion).

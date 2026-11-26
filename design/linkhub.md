@@ -96,11 +96,13 @@ header to skip files without decoding them. Files with any other magic are
 rejected rather than skipped. LinkHub does not fsync or repair partial tail
 files. A clean shutdown flushes the active chunk.
 
-For a replay, the actor first fixes one tail sequence and snapshots the active
-chunk; the reader then merges that snapshot with completed chunks through the
-fixed tail. This ordering prevents a periodic flush from moving records between
-the disk and RAM views while a replay is being assembled. Public reads are
-finite batches; LinkHub keeps no per-client subscription or queue.
+The actor builds an in-memory index from chunk filenames and headers when it
+opens the journal and adds each new chunk only after the file has been renamed
+into place. Live reads seek by sequence and time without rescanning the
+directory or reopening old headers. For a replay, the actor snapshots both
+the matching indexed paths and the active records in one step, so a periodic
+flush cannot introduce duplicates or gaps. Public reads are finite batches;
+LinkHub keeps no per-client subscription or queue.
 
 ## Diagnostics
 
@@ -153,7 +155,8 @@ to distinguish unknown state from confirmed disarmed state.
 
 `--csv-map` loads a JSON source/column mapping at startup for the generic
 `/v1/csv` HTTP receiver. The mapping, not Rust code, owns incoming column order,
-output field names, value types, and the unsigned sequence column. The checked
+output field names, value types, the unsigned sequence column, and an optional
+`time_column` containing a device time-of-day string. The checked
 example describes ESP32 strain measurements, but the receiver is sensor-agnostic.
 Invalid mappings fail startup; malformed batches are validated before any rows
 are accepted. Header-only uploads acknowledge file creation without fabricating
@@ -164,7 +167,30 @@ and the configured source. The existing journal owns ordering, persistence,
 retry deduplication (source, filename, device sequence), cursor reads, and
 experiment inclusion. There is no separate CSV transport archive. A per-run
 five-row cache exposes recent and latest mapped values and host receive time without
-claiming a device clock, units, or freshness. HTTP ingestion works independently
+claiming a device clock, units, or freshness. Its `rows_received` counter tracks
+newly journaled samples across filenames during the service run, excluding
+headers, rejected rows, and duplicate retries; restart resets it.
+Rows are journaled immediately on batch arrival, never replayed at device pace.
+For periodic feeds with `time_column`, `sample_time_ns` estimates host-aligned
+acquisition time by anchoring the final row in each periodic batch to its
+receipt time and preserving the other rows' relative device-clock spacing.
+Each batch gets a fresh anchor; the device's absolute clock and date are not
+treated as synchronized. `received_time_ns` stays the separate batch receipt
+time. The raw mapped time string is retained unchanged.
+
+Midnight is unwrapped using the nearest time-of-day difference (within 12 hours).
+Backward clock jumps or a restarting row counter with forward-moving device time
+begin a new `clock_epoch` and flag `time_quality=clock_reset`. Counter restarts
+can occur inside a batch when the ESP changes CSV files; the final row, not the
+largest counter, remains the batch's receipt anchor.
+Older sequence rows are flagged `out_of_order` without advancing clock state.
+If their epoch cannot be determined after a reset, or a device timestamp would
+place a sample after batch receipt, acquisition time is `null`, not fabricated.
+Feeds without `time_column` expose null acquisition time with quality
+`unavailable`. Duplicate retries never advance the clock state. These timing
+fields are present on both CSV readings and journal event fields; estimates
+are not proof of synchronization with MAVLink.
+HTTP ingestion works independently
 of MAVLink readiness. It never commands or reconfigures the sending device.
 See [CSV usage and mapping format](../linkhub/README.md#generic-csv-ingestion).
 

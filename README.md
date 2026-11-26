@@ -147,6 +147,7 @@ load unrelated documents.
 | [linkhub/README.md](linkhub/README.md) | Build, run, CLI, HTTP usage and journal queries |
 | [mavlink-protocol README](linkhub/mavlink-protocol/README.md) | Stable MAVLink protocol crate, pinned definitions and generation workflow |
 | [linkhub-ui/README.md](linkhub-ui/README.md) | Browser UI setup and behavior |
+| [loadcell/README.md](loadcell/README.md) | Standalone ESP32/HX711 sensor firmware, build, wiring, configuration, and CSV transport |
 | [linkhub_client/README.md](linkhub_client/README.md) | Typed Python HTTP client |
 | [envelope/CLAUDE.md](envelope/CLAUDE.md) | Agent notes for the flight-envelope package |
 | [presentations/presentation_sitl_aero.md](presentations/presentation_sitl_aero.md) | Slide deck on the SITL and aero architecture |
