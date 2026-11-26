@@ -1,20 +1,19 @@
 import type { LinkHubApi } from "./api";
+import { recordingProblem, RECORDING_STALLED_MS } from "./camera-recording";
 import type { CameraPhone, CameraStatus, CameraVideo } from "./types";
 
 const POLL_MS = 3_000;
-/** A recording without a new chunk for this long is shown as stalled. */
-const STALLED_MS = 10_000;
 
 function describeVideo(video: CameraVideo, nowMs: number): string {
   const size = `${(video.bytes / 1e6).toFixed(1)} MB in ${video.chunks} chunks`;
   if (video.finished) return `${video.file}: ${size}, finished`;
   const idle = nowMs - video.updated_at_ns / 1e6;
-  return `${video.file}: ${size}, ${idle > STALLED_MS ? `no data for ${Math.round(idle / 1_000)} s` : "recording"}`;
+  return `${video.file}: ${size}, ${idle > RECORDING_STALLED_MS ? `no data for ${Math.round(idle / 1_000)} s` : "recording"}`;
 }
 
-function describePhone(phone: CameraPhone, experimentId: string | null): string {
-  if (phone.recording && phone.recording === experimentId) return `${phone.label}: recording`;
-  return `${phone.label}: ${experimentId ? "starting" : "ready"}`;
+function describePhone(phone: CameraPhone, camera: CameraStatus): string {
+  if (!camera.experiment_id) return `${phone.label}: ready`;
+  return recordingProblem(phone, camera) ?? `${phone.label}: recording verified`;
 }
 
 function listItems(lines: string[], empty: string): HTMLLIElement[] {
@@ -68,15 +67,21 @@ export class CameraPanel {
       camera = await this.api.cameraStatus();
     } catch (error) {
       this.button.textContent = "📷 Cameras ?";
+      this.button.classList.toggle("recording", false);
       this.reason.hidden = false;
       this.reason.textContent = `Camera status unavailable: ${error instanceof Error ? error.message : String(error)}`;
       return;
     }
-    const recording = camera.phones.filter((phone) => phone.recording && phone.recording === camera.experiment_id);
-    this.button.textContent = `📷 ${camera.phones.length} camera${camera.phones.length === 1 ? "" : "s"}`;
-    this.button.classList.toggle("recording", recording.length > 0);
+    const recording = camera.experiment_id
+      ? camera.phones.filter((phone) => recordingProblem(phone, camera) === null)
+      : [];
+    const verified = camera.experiment_id && camera.phones.length > 0
+      ? ` · ${recording.length}/${camera.phones.length} verified`
+      : "";
+    this.button.textContent = `📷 ${camera.phones.length} camera${camera.phones.length === 1 ? "" : "s"}${verified}`;
+    this.button.classList.toggle("recording", recording.length > 0 && recording.length === camera.phones.length);
     this.button.title = camera.phones.length
-      ? camera.phones.map((phone) => describePhone(phone, camera.experiment_id)).join("\n")
+      ? camera.phones.map((phone) => describePhone(phone, camera)).join("\n")
       : "No phone camera connected; click to show the QR code";
     if (!this.dialog.open) return;
 
@@ -94,7 +99,7 @@ export class CameraPanel {
     this.reason.hidden = !camera.reason;
     this.reason.textContent = camera.reason ?? "";
     this.phones.replaceChildren(...listItems(
-      camera.phones.map((phone) => describePhone(phone, camera.experiment_id)),
+      camera.phones.map((phone) => describePhone(phone, camera)),
       "No phone connected.",
     ));
     const now = Date.now();

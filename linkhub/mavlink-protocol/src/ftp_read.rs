@@ -108,6 +108,8 @@ pub struct FtpReader {
     srtt: Option<Duration>,
     last_activity: Instant,
     stats: TransferStats,
+    /// The opened size is only an estimate; see [`FtpReader::open_ended`].
+    open_ended: bool,
 }
 
 impl FtpReader {
@@ -135,6 +137,56 @@ impl FtpReader {
             srtt: None,
             last_activity: now,
             stats: TransferStats::default(),
+            open_ended: false,
+        }
+    }
+
+    /// Treats the opened size as an estimate. ArduPilot's virtual `@` files
+    /// (such as `@PARAM/param.pck`) report a size that is not their length, so
+    /// the file instead ends at the first short chunk, or where a burst
+    /// returns end-of-file before any data; data past the estimate extends it.
+    #[must_use]
+    pub fn open_ended(mut self) -> Self {
+        self.open_ended = true;
+        self.resize(self.chunk_count.max(1));
+        self.phase = Phase::Select;
+        self
+    }
+
+    fn resize(&mut self, chunks: u32) {
+        self.chunk_count = chunks;
+        self.size = chunks * CHUNK;
+        self.data.resize(self.size as usize, 0);
+        self.have.resize(chunks as usize, false);
+    }
+
+    /// Fixes the end of an open-ended file at `size` bytes.
+    fn end_at(&mut self, size: u32) -> Result<(), FtpReadError> {
+        let chunks = size.div_ceil(CHUNK);
+        if self.highest.is_some_and(|highest| highest >= chunks) {
+            return Err(FtpReadError::BadReply("data beyond the end of the file"));
+        }
+        self.open_ended = false;
+        self.chunk_count = chunks;
+        self.size = size;
+        self.data.truncate(size as usize);
+        self.have.truncate(chunks as usize);
+        Ok(())
+    }
+
+    /// Completes the read once every chunk has arrived; an open-ended file
+    /// instead grows by one chunk so the next burst probes for more data.
+    fn finish_if_contiguous(&mut self) {
+        if self.contiguous < self.chunk_count {
+            return;
+        }
+        if self.open_ended {
+            self.resize(self.chunk_count + 1);
+            if matches!(self.phase, Phase::Complete) {
+                self.phase = Phase::Select;
+            }
+        } else {
+            self.phase = Phase::Complete;
         }
     }
 
@@ -252,13 +304,16 @@ impl FtpReader {
     }
 
     fn select(&mut self) {
-        if self.contiguous >= self.chunk_count {
+        if self.contiguous >= self.chunk_count && !self.open_ended {
             self.phase = Phase::Complete;
         } else if self.has_hole() {
             self.phase = Phase::Repair {
                 outstanding: Vec::new(),
             };
         } else {
+            if self.contiguous >= self.chunk_count {
+                self.resize(self.contiguous + 1);
+            }
             let sequence = self.alloc_seq();
             let request = Packet::request(
                 sequence,
@@ -331,10 +386,35 @@ impl FtpReader {
             Opcode::Nak => {
                 self.stats.naks += 1;
                 let code = reply.data.first().copied().unwrap_or(0);
-                if code == NakCode::EndOfFile as u8 && matches!(self.phase, Phase::Burst { .. }) {
+                let current_burst = match &self.phase {
+                    Phase::Burst { request, .. } => {
+                        let distance = reply.sequence.wrapping_sub(request.sequence);
+                        (1..=BURST_PACKETS as u16 + 1).contains(&distance)
+                    }
+                    _ => false,
+                };
+                if code == NakCode::EndOfFile as u8
+                    && current_burst
+                    && let Phase::Burst { request, got, .. } = &self.phase
+                {
                     // A file that is a whole number of chunks ends with EOF.
+                    // A burst that hits EOF before any data marks the end of
+                    // an open-ended file at its start; ArduPilot's NAK offset
+                    // is not reliable at chunk boundaries.
+                    let empty_from = (*got == 0).then_some(request.offset);
                     self.last_activity = now;
+                    if self.open_ended
+                        && let Some(end) = empty_from
+                    {
+                        self.end_at(end)?;
+                    }
                     self.phase = Phase::Select;
+                    Ok(())
+                } else if code == NakCode::EndOfFile as u8
+                    && reply.request_opcode == Opcode::BurstReadFile as u8
+                {
+                    // ArduPilot follows a burst's short final chunk with EOF;
+                    // it can arrive after that chunk already ended the burst.
                     Ok(())
                 } else {
                     Err(FtpReadError::Nak {
@@ -353,10 +433,17 @@ impl FtpReader {
         }
         let chunk = reply.offset / CHUNK;
         if chunk >= self.chunk_count {
-            return Err(FtpReadError::BadReply("data beyond the end of the file"));
+            if !self.open_ended {
+                return Err(FtpReadError::BadReply("data beyond the end of the file"));
+            }
+            self.resize(chunk + 1);
         }
         let start = (chunk * CHUNK) as usize;
-        let expected = (self.size as usize - start).min(DATA_LEN);
+        let mut expected = (self.size as usize - start).min(DATA_LEN);
+        if self.open_ended && !reply.data.is_empty() && reply.data.len() < expected {
+            self.end_at(start as u32 + reply.data.len() as u32)?;
+            expected = reply.data.len();
+        }
         if reply.data.len() != expected {
             return Err(FtpReadError::BadReply("chunk has an unexpected length"));
         }
@@ -397,9 +484,7 @@ impl FtpReader {
             }
             Phase::Select | Phase::Complete => {}
         }
-        if self.contiguous >= self.chunk_count {
-            self.phase = Phase::Complete;
-        }
+        self.finish_if_contiguous();
         Ok(())
     }
 

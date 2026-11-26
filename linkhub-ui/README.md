@@ -138,8 +138,10 @@ For SITL:
 .\run_linkhub_ui.cmd tcp:127.0.0.1:5760
 ```
 
-Add `--build` to run the complete project setup before launching
-(Bluetooth support is always included):
+Add `--build` to rebuild the browser assets and release LinkHub binary before
+launching (Bluetooth support is always included). This prepares the build
+dependencies but skips Python setup, Ruff, Pyright, and the standalone
+TypeScript check:
 
 ```powershell
 .\run_linkhub_ui.cmd --build auto
@@ -232,7 +234,33 @@ details in `experiment.txt` there. While locked, the terminal refuses `arm`, `ru
 `ARM_DISARM` arm requests, and the motor panel's **Turn on** is disabled.
 `stop`, `disarm`, `run collective`, and calibration commands stay available.
 
+Start closes the dialog and shows **Stop** with the elapsed time as soon as
+LinkHub creates the experiment. The terminal reports the parameter/script
+snapshot and video checks separately as they update in the background. Arm and
+motor controls still require a complete snapshot and, for every connected phone,
+at least two uploaded chunks and a non-empty experiment video file. Video checks
+that remain pending after 15 s are flagged as failed. A phone heartbeat
+claiming to record is not enough: LinkHub must have saved the video data.
+Experiments without connected phones remain allowed and are reported as such.
+The snapshot status follows LinkHub's [capture result](../design/linkhub.md#experiments)
+and reports the saved parameter count and script names, or the failure reason.
+Failed checks do not end the experiment; Stop still performs the normal
+shutdown and saves the journal. In the terminal or CLI, `experiment status`
+reports the snapshot and `video_check` together.
+The controller rechecks cameras on status refresh and before arm/motor actions.
+Missing phones, finished recordings, or video with no new chunk for 10 s
+block new arm and motor starts until verification recovers. They do not
+interrupt lease renewals for a motor already running in the same experiment.
+Phones seen
+during an experiment remain required for that controller's lifetime, even if
+they disconnect. Reloading discovers the phones currently registered on the
+server. This check proves incoming data was saved, not that the image is
+correctly aimed or that the whole file is playable.
+
 While an experiment runs, the button shows **■ Stop** and the elapsed time.
+Use `experiment mark LABEL` (for example `experiment mark collective high`)
+at each change of test condition; each mark starts a named segment that the
+analysis tools summarise separately.
 Stop runs these steps in order:
 
 1. ramps the Bluetooth motor down and waits for the ramp to finish;
@@ -241,7 +269,11 @@ Stop runs these steps in order:
 3. applies canonical safe-off, which disarms the vehicle;
 4. saves the experiment's journal window as `mavlog.json` in the experiment
    directory. With `run_linkhub_ui.cmd`, experiment directories land in
-   `simulation/logs/linkhub/experiments/`.
+   `simulation/logs/linkhub/experiments/`. LinkHub then downloads the
+   experiment's new onboard logs into the same directory as
+   `onboard-<id>.BIN` (see [Experiments](../design/linkhub.md#experiments)).
+   The same browser terminal shows the log check, download start, periodic
+   per-file progress, and the result (including no new logs or an error).
 
 An experiment started with no motor or vehicle connected can stop and save
 without sending hardware commands. Initial MAVLink status has no mode flags
@@ -262,6 +294,8 @@ warning and tap **Enable camera** once, then leave the page open. From then
 on, every phone records each experiment automatically into its own video file
 in the experiment directory, starting on **Start** and finishing on **Stop**.
 Tap **Disconnect** on the phone to finish any recording and remove it.
+The camera header shows how many connected phones have verified recordings;
+it only lights up when all connected phones are verified.
 Phones need the same network. They also need LinkHub on the LAN with HTTPS
 enabled; `run_linkhub_ui.cmd` does this on port 9443. See
 [phone video](../design/linkhub.md#phone-video).
@@ -609,7 +643,13 @@ kept until the connection generation changes, then the connection/baud-based sel
 runs again.
 
 The Wi-Fi profile has `minbaud=1500000`; slower serial links get the Radio
-profile. High-rate display streams share capacity with file/log transfers.
+profile. A flight controller's native USB (LinkHub status `native_usb`,
+identified by its board USB vendor ID) reports a nominal 115200 baud but is
+not radio-limited, so it gets the highest-rate profile like a network link.
+USB-serial adapters (FTDI, Silicon Labs and similar, as used by SiK radios)
+and unrecognized boards keep the baud-based choice; select Wi-Fi manually for
+an unrecognized board's USB.
+High-rate display streams share capacity with file/log transfers.
 `PID_TUNING` is sent by
 the autopilot only for axes in `GCS_PID_MASK` (hardware defaults set it to 4,
 yaw). Rates persist on the vehicle, so every profile sets `PID_TUNING`
@@ -777,6 +817,9 @@ Proposed, not implemented:
 
 The browser formats the throughput values reported by LinkHub; it does not
 estimate rates from filtered telemetry or HTTP payload size.
+Next to RX/TX it displays the last reported battery voltage from
+`BATTERY_STATUS` (or `SYS_STATUS` if available), and `—` when unavailable or
+disconnected.
 
 ## Safety and boundaries
 

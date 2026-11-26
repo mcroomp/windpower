@@ -48,6 +48,7 @@ export const TELEMETRY_PROFILE_OPTIONS: readonly {
 export function selectTelemetryProfile(
   connection: string | null | undefined,
   baud: number | null | undefined,
+  nativeUsb = false,
 ): TelemetryProfile {
   const byConnection = TELEMETRY_PROFILE_OPTIONS.find(({ name }) => {
     const profile = TELEMETRY_PROFILES[name];
@@ -63,7 +64,9 @@ export function selectTelemetryProfile(
       return minbaud === null ? [] : [{ name, minbaud }];
     })
     .sort((left, right) => left.minbaud - right.minbaud);
-  const selected = baud === null || baud === undefined
+  // A flight controller's own USB reports a nominal baud; like a network
+  // link, it is not limited by a radio.
+  const selected = baud === null || baud === undefined || nativeUsb
     ? profiles.at(-1)
     : profiles.filter((profile) => profile.minbaud <= baud).at(-1) ?? profiles[0];
   if (!selected) {

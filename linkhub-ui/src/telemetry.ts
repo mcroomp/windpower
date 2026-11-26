@@ -249,7 +249,7 @@ export class TelemetryStore {
       return;
     }
     if (this.manualProfileGeneration !== status.generation) {
-      this.currentProfile = selectTelemetryProfile(status.connection, status.baud);
+      this.currentProfile = selectTelemetryProfile(status.connection, status.baud, status.native_usb);
     }
     const profile = TELEMETRY_PROFILES[this.currentProfile];
     await this.api.setMessageRates(profile.rates);

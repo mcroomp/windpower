@@ -64,6 +64,9 @@ pub struct LinkStatus {
     pub port: Option<String>,
     /// Baud rate currently in use, if connected over serial.
     pub baud: Option<u32>,
+    /// The serial port is the flight controller's own USB (see
+    /// [`crate::discovery::PortReport::is_native_autopilot_usb`]); its baud is nominal.
+    pub native_usb: bool,
     pub clock_epoch: u64,
     pub target_system: u8,
     pub target_component: u8,
@@ -112,6 +115,7 @@ impl Default for LinkStatus {
             connection: String::new(),
             port: None,
             baud: None,
+            native_usb: false,
             clock_epoch: 0,
             target_system: 0,
             target_component: 0,
@@ -566,6 +570,7 @@ async fn run_link(
                         status.connection = format!("ble:{}", found.device_name);
                         status.port = None;
                         status.baud = None;
+                        status.native_usb = false;
                     });
                     let (reader, writer) = tokio::io::split(found.stream);
                     Ok((
@@ -684,14 +689,21 @@ async fn resolve_transport(
                 status.connection = "auto:scanning".to_owned();
                 status.port = None;
                 status.baud = None;
+                status.native_usb = false;
             });
             tracing::debug!("scanning serial ports for MAVLink");
             match crate::discovery::discover_serial_transport(discovery).await {
                 Ok(found) => {
+                    let native_usb = found
+                        .report
+                        .ports
+                        .iter()
+                        .any(|port| port.port == found.port && port.is_native_autopilot_usb());
                     status_tx.send_modify(|status| {
                         status.connection = format!("serial:{}:{}", found.port, found.baud);
                         status.port = Some(found.port.clone());
                         status.baud = Some(found.baud);
+                        status.native_usb = native_usb;
                         status.last_scan = Some(found.report.clone());
                     });
                     // A rediscovery after repeated failures is always worth
@@ -739,6 +751,7 @@ async fn resolve_transport(
                 status.connection = format!("ble:{}", config.device_name);
                 status.port = None;
                 status.baud = None;
+                status.native_usb = false;
             });
             match crate::ble::connect(config).await {
                 Ok(found) => Some(ResolvedTransport::Ble(found)),
@@ -918,6 +931,7 @@ fn record_failure(
         status.ready = false;
         status.port = None;
         status.baud = None;
+        status.native_usb = false;
         status.error = Some(error.to_string());
         status.last_error_stage = Some(stage.to_owned());
         status.last_error_ns = Some(wall_time_ns());

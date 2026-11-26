@@ -3,6 +3,23 @@ import type { JsonObject, LinkHubStatus } from "./types";
 
 const FLAG_SEPARATOR = " | ";
 
+function validMillivolts(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value < 65_535;
+}
+
+export function reportedBatteryVolts(battery?: JsonObject, system?: JsonObject): number | null {
+  let millivolts = 0;
+  for (const cells of [battery?.voltages, battery?.voltages_ext]) {
+    if (!Array.isArray(cells)) continue;
+    for (const cell of cells) {
+      if (validMillivolts(cell)) millivolts += cell;
+    }
+  }
+  if (millivolts > 0) return millivolts / 1_000;
+  const fallback = system?.voltage_battery;
+  return validMillivolts(fallback) ? fallback / 1_000 : null;
+}
+
 /** Wraps a dialect name in LinkHub's enumeration wire shape. */
 export function mavEnum<TName extends string>(name: TName): MavEnum<TName> {
   return { type: name };

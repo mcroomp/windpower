@@ -258,9 +258,10 @@ Routes come from `linkhub\src\http.rs`.
 | `/v1/motor/connect` | `POST` | Connect an exact `device_id`, safely stopping any previous connection; leaves the motor off. |
 | `/v1/motor/stop` | `POST` | Optional Bluetooth motor stop command. |
 | `/v1/motor/reconnect` | `POST` | Reconnect the selected motor, or the first matching device if none has been selected; leaves it off. |
-| `/v1/experiment` | `GET` | The active experiment, or `{"active": null}`. |
-| `/v1/experiment/start` | `POST` | Start an experiment: `{"name": "...", "description": "..."}`. Returns 409 `experiment_running` if one is active. |
-| `/v1/experiment/stop` | `POST` | End the active experiment and save its journal window as `mavlog.json` in the experiment directory. Returns the path and record count; 409 `experiment_not_running` otherwise. |
+| `/v1/experiment` | `GET` | The active experiment, including its `snapshot` status, or `{"active": null}`. |
+| `/v1/experiment/start` | `POST` | Start an experiment: `{"name": "...", "description": "..."}`, then capture parameters, Lua scripts and firmware into its directory in the background (see [Experiments](../design/linkhub.md#experiments)). Returns 409 `experiment_running` if one is active. |
+| `/v1/experiment/stop` | `POST` | End the active experiment and save its journal window as `mavlog.json` in the experiment directory, then download new onboard logs there in the background. Returns the path and record count; 409 `experiment_not_running` otherwise. |
+| `/v1/experiment/mark` | `POST` | Journal a labelled segment boundary: `{"label": "..."}`. Returns 400 `invalid_mark` for an empty or over-long label; 409 `experiment_not_running` otherwise. |
 | `/v1/camera` | `GET` | Phone camera URL and QR code SVG, connected phones, and recordings received for the active experiment. |
 | `/v1/camera/{device}/heartbeat` | `POST` | Phone camera registration: `{"label": "...", "recording": <experiment id or null>}`. Returns `{"active": ...}`. |
 | `/v1/camera/{device}` | `DELETE` | Remove a phone camera registration. Returns `{"removed": bool}`. |
@@ -458,7 +459,8 @@ DELETE /v1/mavlink/transfers/{id}           202 cancel requested | 200 finished 
   wait), and DataFlash downloads run alongside MAVFTP.
 - MAVFTP uses `BurstReadFile` (the autopilot streams up to 2000 chunks per
   request) and repairs holes with a few pipelined reads, then always sends
-  `TerminateSession`. DataFlash downloads re-request only the first missing
+  `TerminateSession`. Virtual `@` files (such as `@PARAM/param.pck`) report
+  an estimated size, so their reads end at the data's actual end. DataFlash downloads re-request only the first missing
   range. Each transfer also journals `linkhub.transfer` diagnostics
   (`transfer.started`, `.complete`, `.failed`, `.cancelled`) with the final
   stats, so `linkhub query diagnostics` shows how a run went.
@@ -474,7 +476,9 @@ DELETE /v1/mavlink/transfers/{id}           202 cancel requested | 200 finished 
 The status object includes:
 
 - connectivity and target state: `connected`, `ready`, `phase`, `connection`,
-  `port`, `baud`, `clock_epoch`, `target_system`, `target_component`,
+  `port`, `baud`, `native_usb` (the serial port is the flight controller's own
+  USB, identified by an ArduPilot-board USB vendor ID; its baud is nominal),
+  `clock_epoch`, `target_system`, `target_component`,
   `base_mode` (bitmask string), `custom_mode` (integer), `system_status`
   (enumeration object), `latest_time_boot_ms`;
 - counters: `received_messages`, `transmitted_messages`, `received_bytes`,

@@ -55,6 +55,11 @@ it("selects the largest profile supported by the detected baud", () => {
   expect(selectTelemetryProfile("auto", 38400)).toBe("radio");
 });
 
+it("treats a flight controller's native USB as full-rate whatever its nominal baud", () => {
+  expect(selectTelemetryProfile("serial:COM7:115200", 115_200, true)).toBe("wifi");
+  expect(selectTelemetryProfile("serial:COM5:115200", 115_200, false)).toBe("radio");
+});
+
 it("selects the BLE profile for a DroneBridge BLE connection", () => {
   expect(selectTelemetryProfile("ble:DroneBridge", null)).toBe("ble");
   expect(TELEMETRY_PROFILES.ble.rates.ATTITUDE_QUATERNION).toBe(50);
@@ -80,7 +85,7 @@ it("uses reduced rates for radio telemetry", () => {
 function status(generation: string, ready = true, baud: number | null = 1_500_000): LinkHubStatus {
   return {
     connected: ready, ready, generation, cursor: "v1:0", connection: "serial:test",
-    port: ready ? "COM1" : null, baud: ready ? baud : null,
+    port: ready ? "COM1" : null, baud: ready ? baud : null, native_usb: false,
     clock_epoch: 1, target_system: 1, target_component: 1, base_mode: "",
     custom_mode: 0, system_status: mavEnum(MavState.STANDBY), latest_time_boot_ms: 0,
     received_messages: 0, transmitted_messages: 0,

@@ -21,7 +21,7 @@ export class Terminal {
     api: LinkHubApi,
     telemetry: TelemetryStore,
     private readonly passive: PassiveController,
-    experiment: Pick<ExperimentController, "requireActive" | "refresh" | "start" | "stop">,
+    experiment: Pick<ExperimentController, "requireActive" | "refresh" | "start" | "stop" | "mark" | "videoCheck">,
   ) {
     this.runner = new CommandRunner(
       api,

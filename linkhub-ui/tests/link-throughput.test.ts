@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MavState } from "../src/generated/protocol";
 import {
   formatKbps,
+  formatLinkHeader,
   formatLinkThroughput,
   messageThroughputRows,
 } from "../src/link-throughput";
@@ -10,7 +11,7 @@ import type { LinkHubStatus } from "../src/types";
 
 const status: LinkHubStatus = {
   connected: true, ready: true, generation: "first", cursor: "v1:0", connection: "test",
-  port: null, baud: null,
+  port: null, baud: null, native_usb: false,
   clock_epoch: 1, target_system: 1, target_component: 1, base_mode: "",
   custom_mode: 0, system_status: mavEnum(MavState.STANDBY), latest_time_boot_ms: 0,
   received_messages: 0, transmitted_messages: 0,
@@ -52,6 +53,29 @@ describe("LinkHub-owned throughput display", () => {
       .toBe("RX 18.4 kbps \u00b7 TX 1.2 kbps");
     expect(formatLinkThroughput({ ...status, rx_bps: 2_500_000, tx_bps: 168 }))
       .toBe("RX 2.5 Mbps \u00b7 TX 168 bps");
+  });
+
+  describe("battery voltage next to throughput", () => {
+    it("shows the reported cell total in volts alongside RX and TX", () => {
+      expect(formatLinkHeader(
+        { ...status, rx_bps: 18_400, tx_bps: 1_200 },
+        { voltages: [4130, 4120, 65535], voltages_ext: [4100, 0] },
+        { voltage_battery: 9999 },
+      )).toBe("RX 18.4 kbps · TX 1.2 kbps · Battery 12.35 V");
+    });
+
+    it("accepts a reported pack total and falls back to system battery voltage", () => {
+      expect(formatLinkHeader(status, { voltages: [24700, 65535] })).toContain("Battery 24.70 V");
+      expect(formatLinkHeader(status, { voltages: [65535] }, { voltage_battery: 24680 }))
+        .toContain("Battery 24.68 V");
+    });
+
+    it("shows no numeric voltage for unknown readings or a disconnected link", () => {
+      expect(formatLinkHeader(status, { voltages: [0, 65535] }, { voltage_battery: 65535 }))
+        .toContain("Battery —");
+      expect(formatLinkHeader({ ...status, connected: false }, { voltages: [24700] }))
+        .toBe("RX — · TX — · Battery —");
+    });
   });
 
   it("distinguishes idle rates from unavailable samples", () => {

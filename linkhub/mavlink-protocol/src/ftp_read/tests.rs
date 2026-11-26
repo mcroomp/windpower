@@ -120,9 +120,23 @@ impl Autopilot {
 /// Runs the reader against the autopilot on a virtual clock; the link takes
 /// `rtt` per exchange and nothing happens in real time.
 fn run(autopilot: &mut Autopilot, timing: Timing) -> Result<FtpReader, FtpReadError> {
+    run_reported(autopilot, timing, None)
+}
+
+/// Like [`run`], but an open-ended reader is told `reported` bytes, as
+/// ArduPilot does for virtual files whose length it cannot know in advance.
+fn run_reported(
+    autopilot: &mut Autopilot,
+    timing: Timing,
+    reported: Option<u32>,
+) -> Result<FtpReader, FtpReadError> {
     let start = Instant::now();
     let mut now = start;
-    let mut reader = FtpReader::new(SESSION, autopilot.file.len() as u32, 100, timing, now);
+    let size = reported.unwrap_or(autopilot.file.len() as u32);
+    let mut reader = FtpReader::new(SESSION, size, 100, timing, now);
+    if reported.is_some() {
+        reader = reader.open_ended();
+    }
     let mut inbox: VecDeque<Packet> = VecDeque::new();
     for _ in 0..2_000_000 {
         for request in reader.poll(now) {
@@ -190,6 +204,52 @@ fn a_whole_number_of_chunks_ends_with_an_eof_nak() {
     let mut autopilot = Autopilot::new(DATA_LEN * 7, 0);
     let reader = run(&mut autopilot, Timing::default()).unwrap();
     assert_eq!(reader.into_data(), autopilot.file);
+}
+
+#[test]
+fn an_open_ended_file_ends_at_its_data_whatever_size_was_reported() {
+    for (length, reported, per_mille) in [
+        (5_000, 12_000, 0),
+        (5_000, 1_000, 0),
+        (DATA_LEN * 7, 12_000, 0),
+        (DATA_LEN * 7, 100, 0),
+        (40_000, 120_000, 40),
+        (40_000, 3_000, 40),
+    ] {
+        let mut autopilot = Autopilot::new(length, per_mille);
+        let reader = run_reported(&mut autopilot, Timing::default(), Some(reported))
+            .unwrap_or_else(|error| panic!("{length} reported as {reported}: {error}"));
+        assert_eq!(reader.size() as usize, length);
+        assert_eq!(
+            reader.into_data(),
+            autopilot.file,
+            "{length} reported as {reported}"
+        );
+    }
+}
+
+#[test]
+fn an_eof_from_an_earlier_burst_does_not_end_the_file() {
+    let now = Instant::now();
+    let mut reader = FtpReader::new(SESSION, 1_000, 100, Timing::default(), now).open_ended();
+    let burst = reader.poll(now).pop().expect("burst request");
+    let stale = Packet {
+        sequence: burst.sequence.wrapping_sub(5),
+        session: SESSION,
+        opcode: Opcode::Nak,
+        size: 1,
+        request_opcode: Opcode::BurstReadFile as u8,
+        burst_complete: 0,
+        offset: 0,
+        data: vec![NakCode::EndOfFile as u8],
+    };
+    reader.on_reply(now, &stale).unwrap();
+    assert!(!reader.is_complete());
+    assert_eq!(
+        reader.size(),
+        1_195,
+        "estimate is rounded up to whole chunks"
+    );
 }
 
 #[test]

@@ -13,7 +13,7 @@ import { diagValue, DIAG_ARRAY_NAME } from "./diag-array";
 import type { ExperimentController } from "./experiment";
 import { MavCmd, MavParamType, MavResult } from "./generated/protocol";
 import { formatCopterMode } from "./modes";
-import { enumIs, isArmed, parseFlags } from "./mav";
+import { enumIs, isArmed, parseFlags, reportedBatteryVolts } from "./mav";
 import { parseRunCollective, parseRunPassive, type PassiveController } from "./passive";
 import { decodeH3Swashplate } from "./swashplate";
 import type { TelemetryStore } from "./telemetry";
@@ -49,7 +49,7 @@ export class CommandRunner {
     private readonly api: LinkHubApi,
     private readonly telemetry: TelemetryStore,
     private readonly passive: PassiveController,
-    private readonly experiment: Pick<ExperimentController, "requireActive" | "refresh" | "start" | "stop">,
+    private readonly experiment: Pick<ExperimentController, "requireActive" | "refresh" | "start" | "stop" | "mark" | "videoCheck">,
     private readonly write: CommandWriter,
     private readonly configProvider: ConfigProvider,
   ) {
@@ -294,13 +294,10 @@ export class CommandRunner {
     this.write(`  RX/TX     ${status.received_messages} / ${status.transmitted_messages}`);
 
     const battery = this.telemetry.get("BATTERY_STATUS");
-    if (battery) {
-      const voltages = Array.isArray(battery.fields.voltages)
-        ? battery.fields.voltages.filter((value) => Number(value) !== 65535).map(Number)
-        : [];
-      const volts = voltages.reduce((sum, value) => sum + value, 0) / 1_000;
-      const current = Number(battery.fields.current_battery ?? -1) / 100;
-      this.write(`  battery   ${volts.toFixed(2)} V  ${current >= 0 ? `${current.toFixed(2)} A` : ""}`);
+    const volts = reportedBatteryVolts(battery?.fields, this.telemetry.get("SYS_STATUS")?.fields);
+    if (battery || volts !== null) {
+      const current = Number(battery?.fields.current_battery ?? -1) / 100;
+      this.write(`  battery   ${volts === null ? "—" : `${volts.toFixed(2)} V`}  ${current >= 0 ? `${current.toFixed(2)} A` : ""}`);
     }
 
     const ekf = this.telemetry.get("EKF_STATUS_REPORT");
@@ -464,7 +461,9 @@ export class CommandRunner {
   private async experimentCommand(args: string[]): Promise<void> {
     if (args[0] === "status" && args.length === 1) {
       const active = await this.experiment.refresh();
-      this.write(active ? JSON.stringify(active, null, 2) : "No experiment running");
+      this.write(active
+        ? JSON.stringify({ ...active, video_check: this.experiment.videoCheck }, null, 2)
+        : "No experiment running");
       return;
     }
     if (args[0] === "stop" && args.length === 1) {
@@ -475,7 +474,13 @@ export class CommandRunner {
       await this.experiment.start(args[1] as string, args[3] ?? "");
       return;
     }
-    throw new Error("Usage: experiment status | experiment start NAME [--description TEXT] | experiment stop");
+    if (args[0] === "mark" && args.length >= 2) {
+      await this.experiment.mark(args.slice(1).join(" "));
+      return;
+    }
+    throw new Error(
+      "Usage: experiment status | experiment start NAME [--description TEXT] | experiment mark LABEL | experiment stop",
+    );
   }
 
   private help(): void {
@@ -490,6 +495,7 @@ export class CommandRunner {
     this.write("experiment start NAME [--description TEXT]");
     this.write("                         required before arming or running the motor");
     this.write("experiment stop          stop motor, wait for spin-down, safe-off, save log");
+    this.write("experiment mark LABEL    journal a named segment boundary, e.g. mark collective high");
     this.write("experiment status");
     this.write("arm [--force]            arm and confirm heartbeat state");
     this.write("disarm                   apply canonical safe-off");

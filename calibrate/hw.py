@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
+from typing import overload
 
 from linkhub_client.client import LinkHubError
 from linkhub_client.messages import (
@@ -28,7 +29,7 @@ from .constants import GB4008_POLE_PAIRS, GB4008_KT, GB4008_GEAR_RATIO, SERVO_S1
 from .messages import read_one
 
 # ---------------------------------------------------------------------------
-# Mutable global: eRPM -> RPM divisor (pole-pairs)
+# Mutable global: pole-pairs used to derive eRPM from reported motor RPM
 # Seeded from the GB4008 default; overridden by _refresh_pole_pairs().
 # ---------------------------------------------------------------------------
 _motor_pole_pairs = GB4008_POLE_PAIRS
@@ -46,8 +47,8 @@ def _esc_telem_msg_for_channel(channel: int) -> tuple[str, int]:
     raise ValueError(f"no ESC_TELEMETRY message for output channel {channel}")
 
 
-def _esc_erpm(msg: EscTelemetry | Message | RawMessage, channel: int) -> float | None:
-    """eRPM for 1-based output `channel` from an ESC_TELEMETRY_* msg, else None."""
+def _esc_motor_rpm(msg: EscTelemetry | Message | RawMessage, channel: int) -> float | None:
+    """Motor RPM for 1-based output `channel` from an ESC_TELEMETRY_* msg."""
     if isinstance(msg, EscTelemetry):
         base = msg.first_channel
         idx = channel - base
@@ -65,20 +66,25 @@ def _esc_erpm(msg: EscTelemetry | Message | RawMessage, channel: int) -> float |
     return rpm[idx]
 
 
-def _rpm_triplet(erpm: float | None) -> tuple:
-    """eRPM -> (erpm, mech_rpm, rotor_rpm).  (None, None, None) if erpm is None.
-    Uses the live SERVO_BLH_POLES-derived pole-pair count (_motor_pole_pairs)."""
-    if erpm is None:
+@overload
+def _rpm_triplet(mech_rpm: float) -> tuple[float, float, float]: ...
+
+
+@overload
+def _rpm_triplet(mech_rpm: None) -> tuple[None, None, None]: ...
+
+
+def _rpm_triplet(mech_rpm: float | None) -> tuple[float | None, float | None, float | None]:
+    """Reported motor RPM -> (derived eRPM, motor RPM, estimated rotor RPM)."""
+    if mech_rpm is None:
         return None, None, None
-    mech_rpm = erpm / _motor_pole_pairs
+    erpm = mech_rpm * _motor_pole_pairs
     rotor_rpm = mech_rpm / GB4008_GEAR_RATIO
     return erpm, mech_rpm, rotor_rpm
 
 
 def _refresh_pole_pairs(session: LinkHubClient) -> None:
-    """Set the eRPM->RPM divisor from the FC's SERVO_BLH_POLES (poles/2), so the
-    RPM readout follows the param instead of a hardcode.  Falls back to the
-    GB4008 default if the param is unreadable."""
+    """Set the multiplier for derived eRPM from the FC's SERVO_BLH_POLES."""
     global _motor_pole_pairs
     poles = session.get_param("SERVO_BLH_POLES")
     if poles is not None and poles >= 2:
@@ -450,15 +456,14 @@ def _monitor_esc(session: LinkHubClient, duration: float = 10.0) -> None:
             last_print = now
 
             try:
-                rpm_e    = msg.rpm[idx]
+                motor_rpm = msg.rpm[idx]
                 volt     = msg.voltage[idx] / 100.0
                 curr     = msg.current[idx] / 100.0
                 temp     = msg.temperature[idx]
             except (IndexError, TypeError):
                 continue
 
-            mech_rpm  = rpm_e / _motor_pole_pairs
-            rotor_rpm = mech_rpm / GB4008_GEAR_RATIO
+            rpm_e, mech_rpm, rotor_rpm = _rpm_triplet(motor_rpm)
             torque    = curr * GB4008_KT / GB4008_GEAR_RATIO
             elapsed   = duration - (deadline - now)
             print(f"  {elapsed:<6.1f} {rpm_e:<8} {mech_rpm:<10.0f} {rotor_rpm:<11.1f}"

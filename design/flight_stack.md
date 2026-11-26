@@ -306,6 +306,14 @@ the firmware (a custom message would need a custom firmware build).
 - LinkHub collapses `DEBUG_FLOAT_ARRAY` per `array_id` for `collapse=true`
   reads. The array has `time_usec` rather than `time_boot_ms`, so its journal
   records carry the last observed simulation time (`LastObserved`).
+- `time_usec` is the script's vehicle boot time for the emitting tick
+  (millisecond resolution, `now_ms * 1000`), on the same clock as
+  `ATTITUDE_QUATERNION.time_boot_ms` and `SERVO_OUTPUT_RAW.time_usec`. Emission
+  is rate-gated on 10 ms ticks, so `RAWES_TEL_HZ=20` gives about 19 Hz
+  (51–56 ms spacing). A larger gap means a lost sample: `send_chan` drops a
+  message when the channel is full, and links drop bursts. Use `time_usec`,
+  not LinkHub receive time, for timing and phase; receive spacing of the same
+  samples ranges from about 1 ms to over 0.5 s.
 - Readers: `analysis/enrich_sitl_telemetry.py` (SITL telemetry columns),
   `calibrate/run.py`, the SITL torque/steady tests, and the LinkHub UI
   (`YFF_U`). This array is output only; ground-to-Lua inputs are the
@@ -647,9 +655,11 @@ param:set("H_YAW_TRIM", trim)
 
 This estimates the throttle for zero yaw rate from applied output and gyro
 feedback; it is not a direct rotor-RPM feedforward calculation or a guarantee
-of convergence. `YFF_A = RAWES_YAW_SLP × SERVO9_SPAN_US × 2π/60` (default ≈ 52.8 rad/s per
-throttle unit; RAWES_YAW_SLP=0 uses the script fallback 0.504 RPM/µs). The AP yaw P/I-term handles
-fast transients and residual drift; the observer is intended to carry DC trim.
+of convergence. `YFF_A = RAWES_YAW_SLP × 1000 µs × 2π/60` (default ≈ 52.8 rad/s per
+throttle unit; RAWES_YAW_SLP=0 uses the script fallback 0.504 RPM/µs). The
+1000 µs conversion span is fixed in the script even when the output readback
+uses different `SERVO9_MIN/MAX` limits. The AP yaw P/I-term handles fast
+transients and residual drift; the observer is intended to carry DC trim.
 A non-negative `ENTER_PASSIVE` seed pins trim instead of adapting, while
 readback diagnostics continue. Disconnected-actuator caveats and cleanup
 requirements belong to [arming.md](arming.md#passive-bench-startup).

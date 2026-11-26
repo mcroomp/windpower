@@ -32,6 +32,20 @@ function sharedRunner(experimentActive = true) {
 }
 
 describe("shared command runner", () => {
+  it("includes video verification alongside the snapshot in experiment status", async () => {
+    const { experiment, output, runner } = sharedRunner();
+    experiment.refresh.mockResolvedValue({
+      id: "experiment-1", run_id: "run-1", name: "Spin", description: "", started_at_ns: 0,
+      start_cursor: "v1:1", directory: "experiments/one", telemetry_profile: "wifi",
+      snapshot: { state: "capturing", parameter_count: 0, scripts: [], error: null, completed_at_ns: null },
+    });
+    await runner.execute("experiment status");
+    expect(JSON.parse(output.at(-1)!)).toMatchObject({
+      snapshot: { state: "capturing" },
+      video_check: { state: "ready", detail: "No cameras connected" },
+    });
+  });
+
   it("tokenizes quoted browser terminal commands for both runtimes", () => {
     expect(tokenizeCommand('run passive --trim "thr=0.4" --duration 5')).toEqual([
       "run",
@@ -44,6 +58,13 @@ describe("shared command runner", () => {
   });
 
   describe("core LinkHub commands", () => {
+    it("joins the words of an experiment mark into one label", async () => {
+      const { runner, experiment } = sharedRunner();
+      await runner.executeTokens(["experiment", "mark", "collective", "high"]);
+      expect(experiment.mark).toHaveBeenCalledExactlyOnceWith("collective high");
+      await expect(runner.executeTokens(["experiment", "mark"])).rejects.toThrow("experiment mark LABEL");
+    });
+
     it("reads filtered journal batches as JSON", async () => {
       const { api, runner, output } = sharedRunner();
       const query = vi.spyOn(api, "queryMessages").mockResolvedValue({

@@ -14,7 +14,7 @@ from linkhub_client.client import LinkHubClient
 from .constants import MOTOR_ESC_CHANNEL, _WATCH_STREAMS
 from .hw import (
     _esc_telem_msg_for_channel,
-    _esc_erpm,
+    _esc_motor_rpm,
     _rpm_triplet,
 )
 from .run import _RunLog, _observation_loop
@@ -114,27 +114,27 @@ def _watch_servos(session: LinkHubClient, duration: float | None, log: _RunLog):
     )
 
 
-def _watch_esc(session: LinkHubClient, duration: float | None, log: _RunLog):
+def _watch_esc(session: _ObservationSession, duration: float | None, log: _ObservationLog) -> None:
     # GB4008 bidir DShot telemetry (AUX 1 = SERVO9 -> ESC_TELEMETRY_9_TO_12[0]).
     cols = ["t_s", "erpm", "mech_rpm", "rotor_rpm", "voltage_v", "current_a", "temp_c"]
     esc_name, esc_id = _esc_telem_msg_for_channel(MOTOR_ESC_CHANNEL)
     idx = (MOTOR_ESC_CHANNEL - 1) % 4
-    state: dict[str, float | None] = {"erpm": None, "volt": None, "curr": None, "temp": None}
+    state: dict[str, float | None] = {"motor_rpm": None, "volt": None, "curr": None, "temp": None}
 
     def handle(st: object, msg: object, t_rel: float) -> list[object] | None:
         if not isinstance(msg, EscTelemetry) or msg.message_name != esc_name:
             return None
-        erpm = _esc_erpm(msg, MOTOR_ESC_CHANNEL)
+        motor_rpm = _esc_motor_rpm(msg, MOTOR_ESC_CHANNEL)
         volt = msg.voltage[idx] / 100.0 if idx < len(msg.voltage) else None
         curr = msg.current[idx] / 100.0 if idx < len(msg.current) else None
         temp = msg.temperature[idx] if idx < len(msg.temperature) else None
-        state["erpm"], state["volt"], state["curr"], state["temp"] = (
-            erpm,
+        state["motor_rpm"], state["volt"], state["curr"], state["temp"] = (
+            motor_rpm,
             volt,
             curr,
             temp,
         )
-        _e, mech, rotor = _rpm_triplet(erpm)
+        _e, mech, rotor = _rpm_triplet(motor_rpm)
         return [
             f"{t_rel:.4f}",
             _fmt(_e),
@@ -146,7 +146,7 @@ def _watch_esc(session: LinkHubClient, duration: float | None, log: _RunLog):
         ]
 
     def render(st: object, t_rel: float) -> list[object]:
-        _e, mech, rotor = _rpm_triplet(state["erpm"])
+        _e, mech, rotor = _rpm_triplet(state["motor_rpm"])
         return [
             f"{t_rel:.1f}",
             f"{_e:.0f}" if _e is not None else None,

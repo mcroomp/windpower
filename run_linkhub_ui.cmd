@@ -72,7 +72,11 @@ if not exist "%REPO%\linkhub-ui\dist\index.html" goto setup
 goto verify_build
 
 :setup
-call "%REPO%\setup.cmd"
+if "%BUILD%"=="1" (
+    call "%REPO%\setup.cmd" --linkhub-only
+) else (
+    call "%REPO%\setup.cmd"
+)
 if errorlevel 1 (
     echo ERROR: Project setup failed. LinkHub was not started.
     exit /b 1

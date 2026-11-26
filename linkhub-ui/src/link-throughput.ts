@@ -1,4 +1,5 @@
-import type { LinkHubStatus } from "./types";
+import { reportedBatteryVolts } from "./mav";
+import type { JsonObject, LinkHubStatus } from "./types";
 
 function formatRate(bps: number | null): string {
   if (bps === null || !Number.isFinite(bps) || bps < 0) {
@@ -18,6 +19,15 @@ export function formatLinkThroughput(status: LinkHubStatus | null): string {
     return "RX \u2014 \u00b7 TX \u2014";
   }
   return `RX ${formatRate(status.rx_bps)} \u00b7 TX ${formatRate(status.tx_bps)}`;
+}
+
+export function formatLinkHeader(
+  status: LinkHubStatus | null,
+  battery?: JsonObject,
+  system?: JsonObject,
+): string {
+  const volts = status?.connected ? reportedBatteryVolts(battery, system) : null;
+  return `${formatLinkThroughput(status)} · Battery ${volts === null ? "—" : `${volts.toFixed(2)} V`}`;
 }
 
 export interface MessageThroughputRow {

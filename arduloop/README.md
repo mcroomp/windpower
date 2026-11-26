@@ -11,6 +11,8 @@ and rate-control stack. It has two layers:
 Both layers use ArduPilot-style parameter names. This models the control math
 only, not mode entry, arming/spool state, or failsafes — validate those in
 SITL. Python tuning results are not hardware acceptance.
+The static notch coefficients use ArduPilot's attenuation and bandwidth
+equations; dynamic notch retuning and its frequency-slew limits are not modeled.
 
 Current RAWES Lua steady/passive/takeoff behavior uses the direct-thrust Guided
 angle path (`set_target_angle_and_rate_and_throttle(...)`). This package also

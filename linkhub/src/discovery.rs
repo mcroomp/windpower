@@ -135,7 +135,26 @@ pub struct PortReport {
     pub product: Option<String>,
 }
 
+/// USB vendor IDs that flight-controller firmware itself enumerates with
+/// (ArduPilot pid.codes, CubePilot, Holybro, 3DR/PX4). Radios and other
+/// adapters use bridge chips (FTDI, Silicon Labs, WCH, Prolific) with their
+/// own vendor IDs, so a match means the link is the board's native USB.
+const NATIVE_AUTOPILOT_USB_VENDORS: [&str; 4] = ["1209", "2DAE", "3162", "26AC"];
+/// STMicroelectronics' virtual COM port, used by boards without their own ID.
+const STM_VIRTUAL_COM_PORT: &str = "0483:5740";
+
 impl PortReport {
+    /// Whether this is a flight controller's own USB port, whose baud is
+    /// nominal and whose throughput is not limited by a radio.
+    #[must_use]
+    pub fn is_native_autopilot_usb(&self) -> bool {
+        self.vid_pid.as_deref().is_some_and(|vid_pid| {
+            vid_pid == STM_VIRTUAL_COM_PORT
+                || NATIVE_AUTOPILOT_USB_VENDORS
+                    .iter()
+                    .any(|vendor| vid_pid.get(..4) == Some(vendor))
+        })
+    }
     fn from_info(info: &SerialPortInfo) -> Self {
         let mut report = Self {
             port: info.port_name.clone(),
@@ -503,6 +522,29 @@ pub fn parse_bauds(value: &str) -> Result<Vec<u32>, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn recognizes_flight_controller_usb_but_not_radio_bridges() {
+        let port = |vid_pid: Option<&str>| PortReport {
+            port: "COM7".to_owned(),
+            kind: "usb",
+            vid_pid: vid_pid.map(str::to_owned),
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        };
+        for native in ["3162:0053", "1209:5741", "2DAE:1016", "0483:5740"] {
+            assert!(port(Some(native)).is_native_autopilot_usb(), "{native}");
+        }
+        // FTDI and Silicon Labs bridges (SiK/RFD radios), and unknown ports.
+        for bridge in [
+            Some("0403:6015"),
+            Some("10C4:EA60"),
+            Some("0483:5741"),
+            None,
+        ] {
+            assert!(!port(bridge).is_native_autopilot_usb(), "{bridge:?}");
+        }
+    }
     #[test]
     fn parses_baud_lists_and_rejects_empty_input() {
         assert_eq!(

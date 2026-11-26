@@ -29,7 +29,9 @@ use uuid::Uuid;
 
 use crate::{
     csv_ingest::{CsvBatchResult, CsvError, CsvMapping, CsvStore, MAX_CSV_BYTES},
-    experiment::{CameraConfig, ExperimentConfig, ExperimentError, ExperimentStore},
+    experiment::{
+        CameraConfig, ExperimentConfig, ExperimentError, ExperimentStore, ExperimentVehicle,
+    },
     journal::{JournalError, JournalHandle, TimeWindow},
     mavlink::{LinkError, LinkStatus, MavlinkLinkHandle},
     motor::{MotorDirection, MotorError, MotorHandle},
@@ -145,8 +147,12 @@ impl IntoResponse for ApiError {
             Self::Experiment(
                 ExperimentError::MissingName
                 | ExperimentError::NameTooLong
-                | ExperimentError::DescriptionTooLong,
+                | ExperimentError::DescriptionTooLong
+                | ExperimentError::ProfileTooLong,
             ) => (StatusCode::BAD_REQUEST, "invalid_experiment"),
+            Self::Experiment(ExperimentError::MissingLabel | ExperimentError::LabelTooLong) => {
+                (StatusCode::BAD_REQUEST, "invalid_mark")
+            }
             Self::Experiment(ExperimentError::AlreadyRunning(_)) => {
                 (StatusCode::CONFLICT, "experiment_running")
             }
@@ -161,6 +167,9 @@ impl IntoResponse for ApiError {
             }
             Self::Experiment(ExperimentError::VideoClosed(_)) => {
                 (StatusCode::CONFLICT, "experiment_closed")
+            }
+            Self::Experiment(ExperimentError::VideoFinalize { .. }) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "video_finalize_failed")
             }
             Self::Experiment(_) => (StatusCode::INTERNAL_SERVER_ERROR, "experiment_save_failed"),
             Self::Csv(CsvError::Invalid(_)) => (StatusCode::BAD_REQUEST, "invalid_csv"),
@@ -220,8 +229,16 @@ pub fn router_with_motor_and_static(
         .clone()
         .map(|link| MavlinkOperations::new(link, TransferRegistry::new(journal.clone())));
     let camera = experiments.as_ref().and_then(|config| config.camera);
-    let experiments =
-        experiments.map(|config| Arc::new(ExperimentStore::new(config.directory, journal.clone())));
+    let experiments = experiments.map(|config| {
+        let snapshot_source = operations
+            .clone()
+            .map(|operations| Arc::new(operations) as Arc<dyn ExperimentVehicle>);
+        Arc::new(ExperimentStore::new(
+            config.directory,
+            journal.clone(),
+            snapshot_source,
+        ))
+    });
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
@@ -301,6 +318,7 @@ pub fn router_with_motor_and_static(
             axum::routing::post(start_experiment),
         )
         .route("/v1/experiment/stop", axum::routing::post(stop_experiment))
+        .route("/v1/experiment/mark", axum::routing::post(mark_experiment))
         .route("/v1/camera", get(camera_status))
         .route(
             "/v1/camera/{stream}",
@@ -1551,6 +1569,8 @@ struct StartExperimentRequest {
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    telemetry_profile: Option<String>,
 }
 
 async fn start_experiment(
@@ -1558,9 +1578,27 @@ async fn start_experiment(
     Json(request): Json<StartExperimentRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let active = require_experiments(&state)?
-        .start(&request.name, &request.description)
+        .start(
+            &request.name,
+            &request.description,
+            request.telemetry_profile.as_deref(),
+        )
         .await?;
     Ok(Json(json!({ "active": active })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkExperimentRequest {
+    label: String,
+}
+
+async fn mark_experiment(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<MarkExperimentRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        require_experiments(&state)?.mark(&request.label).await?,
+    ))
 }
 
 async fn stop_experiment(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
@@ -2274,7 +2312,7 @@ mod tests {
 
         let (status, video) = json_response(
             &app,
-            Request::post(format!("/v1/experiment/{id}/video/phone1?seq=0&final=true"))
+            Request::post(format!("/v1/experiment/{id}/video/phone1?seq=0"))
                 .header(CONTENT_TYPE, "video/webm;codecs=vp8")
                 .body(Body::from("frames"))
                 .unwrap(),
@@ -2282,7 +2320,17 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(video["file"], "video-phone1.webm");
-        assert_eq!(video["finished"], true);
+        assert_eq!(video["finished"], false);
+        let (status, rejected) = json_response(
+            &app,
+            Request::post(format!("/v1/experiment/{id}/video/phone1?seq=1&final=true"))
+                .header(CONTENT_TYPE, "video/webm;codecs=vp8")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(rejected["error"], "video_finalize_failed");
         let (status, rejected) = json_response(
             &app,
             Request::post(format!("/v1/experiment/{id}/video/phone2?seq=3"))

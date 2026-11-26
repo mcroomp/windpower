@@ -63,6 +63,21 @@ export type MotorStatus = { available: false } | {
   error: string | null;
 };
 
+export interface ExperimentScript {
+  name: string;
+  bytes: number;
+  sha256: string;
+}
+
+/** Parameters, Lua scripts and firmware captured when the experiment started. */
+export interface ExperimentSnapshot {
+  state: "capturing" | "complete" | "failed";
+  error: string | null;
+  parameter_count: number | null;
+  scripts: ExperimentScript[];
+  completed_at_ns: number | null;
+}
+
 export interface ExperimentInfo {
   id: string;
   name: string;
@@ -71,6 +86,9 @@ export interface ExperimentInfo {
   started_at_ns: number;
   start_cursor: string;
   directory: string;
+  /** The UI telemetry profile when the experiment started. */
+  telemetry_profile: string | null;
+  snapshot: ExperimentSnapshot;
 }
 
 export interface SavedExperiment {
@@ -116,6 +134,8 @@ export interface LinkHubStatus {
   connection: string;
   port: string | null;
   baud: number | null;
+  /** The serial port is the flight controller's own USB; its baud is nominal. */
+  native_usb: boolean;
   clock_epoch: number;
   target_system: number;
   target_component: number;

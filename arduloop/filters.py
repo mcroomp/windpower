@@ -71,24 +71,22 @@ def _notch_coeffs(center_hz: float, bandwidth_hz: float, sample_hz: float,
 
     Uses the same form as AP's `NotchFilter::init` (with attenuation control).
     """
-    if center_hz <= 0.0 or bandwidth_hz <= 0.0 or sample_hz <= 0.0:
-        # Pass-through
+    if not (bandwidth_hz > 0.0 and center_hz > 0.5 * bandwidth_hz
+            and center_hz < 0.5 * sample_hz):
         return _BiquadCoeffs(1.0, 0.0, 0.0, 0.0, 0.0)
-    # Limit centre below Nyquist
-    center_hz = min(center_hz, 0.45 * sample_hz)
     omega = 2.0 * math.pi * center_hz / sample_hz
-    # Convert attenuation dB to amplitude factor A (≥1 → deeper notch)
-    A = 10.0 ** (attenuation_db / 40.0)
-    Q = center_hz / max(bandwidth_hz, 1e-9)
+    A = 10.0 ** (-attenuation_db / 40.0)
+    ratio = center_hz / (center_hz - bandwidth_hz / 2.0)
+    Q = ratio / (ratio * ratio - 1.0)
     alpha = math.sin(omega) / (2.0 * Q)
     cos_w = math.cos(omega)
-    a0 = 1.0 + alpha / A
+    a0 = 1.0 + alpha
     return _BiquadCoeffs(
-        b0=(1.0 + alpha * A) / a0,
+        b0=(1.0 + alpha * A * A) / a0,
         b1=(-2.0 * cos_w) / a0,
-        b2=(1.0 - alpha * A) / a0,
+        b2=(1.0 - alpha * A * A) / a0,
         a1=(-2.0 * cos_w) / a0,
-        a2=(1.0 - alpha / A) / a0,
+        a2=(1.0 - alpha) / a0,
     )
 
 
@@ -121,7 +119,8 @@ class NotchFilter:
         if attenuation_db is not None:
             self.attenuation_db = attenuation_db
         self._c = _notch_coeffs(center_hz, bandwidth_hz, sample_hz, self.attenuation_db)
-        self.enabled = True
+        self.enabled = (bandwidth_hz > 0.0 and center_hz > 0.5 * bandwidth_hz
+                        and center_hz < 0.5 * sample_hz)
 
     def disable(self) -> None:
         self.enabled = False
@@ -129,7 +128,7 @@ class NotchFilter:
     def reset(self, value: float = 0.0) -> None:
         # Prime the transposed direct-form II delay line so steady-state DC
         # passes through cleanly.
-        self._z1 = value * (self._c.b1 - self._c.a1)
+        self._z1 = value * (1.0 - self._c.b0)
         self._z2 = value * (self._c.b2 - self._c.a2)
 
     def apply(self, x: float) -> float:
